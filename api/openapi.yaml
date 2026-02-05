@@ -1,0 +1,329 @@
+openapi: 3.0.3
+info:
+  title: Alancoin API
+  description: |
+    Payment infrastructure for autonomous AI agents.
+    
+    Alancoin provides:
+    - Agent registry and discovery
+    - Session keys for bounded autonomy
+    - Balance management and withdrawals
+    - Reputation scoring
+    - Webhooks for event notifications
+    
+    ## Authentication
+    
+    Most read endpoints are public. Write endpoints require an API key:
+    
+    ```
+    Authorization: Bearer ap_sk_live_xxxxx
+    ```
+    
+    API keys are issued on agent registration.
+    
+    ## Session Keys
+    
+    Session keys provide bounded autonomy - agents can transact within limits
+    without human approval for each transaction.
+    
+    Flow:
+    1. Generate ECDSA keypair client-side
+    2. Register public key with limits (max per tx, per day, etc.)
+    3. Sign transactions with private key
+    4. Server validates signature and permissions, executes on-chain
+    
+  version: "0.1.0"
+  contact:
+    email: hello@alancoin.network
+  license:
+    name: MIT
+
+servers:
+  - url: https://api.alancoin.network
+    description: Production
+  - url: https://api.staging.alancoin.network
+    description: Staging (Base Sepolia)
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: Platform
+    description: Platform information
+  - name: Agents
+    description: Agent registry
+  - name: Services
+    description: Service discovery
+  - name: Session Keys
+    description: Bounded autonomy
+  - name: Balance
+    description: Agent balance management
+  - name: Reputation
+    description: Agent reputation scores
+  - name: Webhooks
+    description: Event notifications
+
+paths:
+  /v1/platform:
+    get:
+      tags: [Platform]
+      summary: Get platform info
+      description: Returns platform deposit address and instructions
+      responses:
+        '200':
+          description: Platform info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  platform:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                        example: "Alancoin"
+                      depositAddress:
+                        type: string
+                        example: "0x..."
+                      chain:
+                        type: string
+                        example: "base-sepolia"
+                      chainId:
+                        type: integer
+                        example: 84532
+
+  /v1/agents:
+    get:
+      tags: [Agents]
+      summary: List agents
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of agents
+    post:
+      tags: [Agents]
+      summary: Register agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address, name]
+              properties:
+                address:
+                  type: string
+                  example: "0x..."
+                name:
+                  type: string
+                  example: "MyAgent"
+                description:
+                  type: string
+      responses:
+        '201':
+          description: Agent registered, API key returned
+
+  /v1/agents/{address}:
+    get:
+      tags: [Agents]
+      summary: Get agent details
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agent details
+        '404':
+          description: Agent not found
+
+  /v1/agents/{address}/balance:
+    get:
+      tags: [Balance]
+      summary: Get platform balance
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Balance info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  balance:
+                    type: object
+                    properties:
+                      available:
+                        type: string
+                        example: "10.00"
+                      pending:
+                        type: string
+                        example: "0"
+
+  /v1/agents/{address}/sessions:
+    post:
+      tags: [Session Keys]
+      summary: Create session key
+      security:
+        - ApiKey: []
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [publicKey]
+              properties:
+                publicKey:
+                  type: string
+                expiresIn:
+                  type: string
+                  example: "24h"
+                maxPerTransaction:
+                  type: string
+                  example: "1.00"
+                maxPerDay:
+                  type: string
+                  example: "10.00"
+      responses:
+        '201':
+          description: Session key created
+
+  /v1/agents/{address}/sessions/{keyId}/transact:
+    post:
+      tags: [Session Keys]
+      summary: Execute signed transaction
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: keyId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to, amount, nonce, timestamp, signature]
+              properties:
+                to:
+                  type: string
+                amount:
+                  type: string
+                nonce:
+                  type: integer
+                timestamp:
+                  type: integer
+                signature:
+                  type: string
+      responses:
+        '200':
+          description: Transaction executed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [approved, executed]
+                  txHash:
+                    type: string
+
+  /v1/agents/{address}/webhooks:
+    post:
+      tags: [Webhooks]
+      summary: Create webhook
+      security:
+        - ApiKey: []
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, events]
+              properties:
+                url:
+                  type: string
+                  format: uri
+                events:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                      - payment.received
+                      - payment.sent
+                      - session_key.used
+                      - balance.deposit
+                      - balance.withdraw
+      responses:
+        '201':
+          description: Webhook created, secret returned
+
+  /v1/reputation/{address}:
+    get:
+      tags: [Reputation]
+      summary: Get reputation score
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Reputation score
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  score:
+                    type: number
+                    example: 75.5
+                  tier:
+                    type: string
+                    enum: [new, emerging, established, trusted, elite]
+
+components:
+  securitySchemes:
+    ApiKey:
+      type: http
+      scheme: bearer
+      description: API key from agent registration

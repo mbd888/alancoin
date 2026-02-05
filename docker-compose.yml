@@ -1,0 +1,28 @@
+# Docker Compose for local development
+# Usage: docker-compose up
+
+version: "3.9"
+
+services:
+  alancoin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - ENV=development
+      - LOG_LEVEL=debug
+      - RPC_URL=https://sepolia.base.org
+      - CHAIN_ID=84532
+      - USDC_CONTRACT=0x036CbD53842c5426634e7929541eC2318f3dCF7e
+      - DEFAULT_PRICE=0.001
+      - PRIVATE_KEY=${PRIVATE_KEY}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped

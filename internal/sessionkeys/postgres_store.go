@@ -1,0 +1,210 @@
+package sessionkeys
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/lib/pq"
+)
+
+// PostgresStore implements Store using PostgreSQL
+type PostgresStore struct {
+	db *sql.DB
+}
+
+// NewPostgresStore creates a PostgreSQL-backed session key store
+func NewPostgresStore(db *sql.DB) *PostgresStore {
+	return &PostgresStore{db: db}
+}
+
+func (p *PostgresStore) Create(ctx context.Context, key *SessionKey) error {
+	_, err := p.db.ExecContext(ctx, `
+		INSERT INTO session_keys (
+			id, owner_address, public_key,
+			max_per_transaction, max_per_day, max_total,
+			valid_after, expires_at,
+			allowed_recipients, allowed_service_types, allow_any, label,
+			transaction_count, total_spent, spent_today, last_used, last_reset_day,
+			revoked_at, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+	`,
+		key.ID,
+		strings.ToLower(key.OwnerAddr),
+		key.PublicKey,
+		nullString(key.Permission.MaxPerTransaction),
+		nullString(key.Permission.MaxPerDay),
+		nullString(key.Permission.MaxTotal),
+		nullTime(key.Permission.ValidAfter),
+		key.Permission.ExpiresAt,
+		pq.Array(key.Permission.AllowedRecipients),
+		pq.Array(key.Permission.AllowedServiceTypes),
+		key.Permission.AllowAny,
+		key.Permission.Label,
+		key.Usage.TransactionCount,
+		key.Usage.TotalSpent,
+		key.Usage.SpentToday,
+		nullTime(key.Usage.LastUsed),
+		key.Usage.LastResetDay,
+		nullTime(timePtr(key.RevokedAt)),
+		key.CreatedAt,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to create session key: %w", err)
+	}
+	return nil
+}
+
+func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error) {
+	var key SessionKey
+	var validAfter, lastUsed, revokedAt sql.NullTime
+	var maxPerTx, maxPerDay, maxTotal, label sql.NullString
+	var lastResetDay sql.NullString
+
+	err := p.db.QueryRowContext(ctx, `
+		SELECT 
+			id, owner_address, public_key,
+			max_per_transaction, max_per_day, max_total,
+			valid_after, expires_at,
+			allowed_recipients, allowed_service_types, allow_any, label,
+			transaction_count, total_spent, spent_today, last_used, last_reset_day,
+			revoked_at, created_at
+		FROM session_keys WHERE id = $1
+	`, id).Scan(
+		&key.ID,
+		&key.OwnerAddr,
+		&key.PublicKey,
+		&maxPerTx,
+		&maxPerDay,
+		&maxTotal,
+		&validAfter,
+		&key.Permission.ExpiresAt,
+		pq.Array(&key.Permission.AllowedRecipients),
+		pq.Array(&key.Permission.AllowedServiceTypes),
+		&key.Permission.AllowAny,
+		&label,
+		&key.Usage.TransactionCount,
+		&key.Usage.TotalSpent,
+		&key.Usage.SpentToday,
+		&lastUsed,
+		&lastResetDay,
+		&revokedAt,
+		&key.CreatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, ErrKeyNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session key: %w", err)
+	}
+
+	// Map nullable fields
+	key.Permission.MaxPerTransaction = maxPerTx.String
+	key.Permission.MaxPerDay = maxPerDay.String
+	key.Permission.MaxTotal = maxTotal.String
+	key.Permission.Label = label.String
+	if validAfter.Valid {
+		key.Permission.ValidAfter = validAfter.Time
+	}
+	if lastUsed.Valid {
+		key.Usage.LastUsed = lastUsed.Time
+	}
+	if lastResetDay.Valid {
+		key.Usage.LastResetDay = lastResetDay.String
+	}
+	if revokedAt.Valid {
+		key.RevokedAt = &revokedAt.Time
+	}
+
+	return &key, nil
+}
+
+func (p *PostgresStore) GetByOwner(ctx context.Context, ownerAddr string) ([]*SessionKey, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT id FROM session_keys WHERE owner_address = $1 ORDER BY created_at DESC
+	`, strings.ToLower(ownerAddr))
+	if err != nil {
+		return nil, fmt.Errorf("failed to list session keys: %w", err)
+	}
+	defer rows.Close()
+
+	var keys []*SessionKey
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		key, err := p.Get(ctx, id)
+		if err == nil {
+			keys = append(keys, key)
+		}
+	}
+
+	return keys, nil
+}
+
+func (p *PostgresStore) Update(ctx context.Context, key *SessionKey) error {
+	_, err := p.db.ExecContext(ctx, `
+		UPDATE session_keys SET
+			transaction_count = $1,
+			total_spent = $2,
+			spent_today = $3,
+			last_used = $4,
+			last_reset_day = $5,
+			revoked_at = $6
+		WHERE id = $7
+	`,
+		key.Usage.TransactionCount,
+		key.Usage.TotalSpent,
+		key.Usage.SpentToday,
+		nullTime(key.Usage.LastUsed),
+		key.Usage.LastResetDay,
+		nullTime(timePtr(key.RevokedAt)),
+		key.ID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to update session key: %w", err)
+	}
+	return nil
+}
+
+func (p *PostgresStore) Delete(ctx context.Context, id string) error {
+	result, err := p.db.ExecContext(ctx, `DELETE FROM session_keys WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete session key: %w", err)
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return ErrKeyNotFound
+	}
+	return nil
+}
+
+// Helpers
+
+func nullString(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
+}
+
+func nullTime(t time.Time) sql.NullTime {
+	if t.IsZero() {
+		return sql.NullTime{}
+	}
+	return sql.NullTime{Time: t, Valid: true}
+}
+
+func timePtr(t *time.Time) time.Time {
+	if t == nil {
+		return time.Time{}
+	}
+	return *t
+}

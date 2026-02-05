@@ -1,0 +1,202 @@
+package ledger
+
+import (
+	"context"
+	"math/big"
+	"net/http"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/gin-gonic/gin"
+)
+
+// WithdrawalExecutor executes on-chain withdrawals
+type WithdrawalExecutor interface {
+	Transfer(ctx context.Context, to common.Address, amount *big.Int) (txHash string, err error)
+}
+
+// Handler provides HTTP endpoints for ledger operations
+type Handler struct {
+	ledger   *Ledger
+	executor WithdrawalExecutor // nil = withdrawals are pending only
+}
+
+// NewHandler creates a new ledger handler
+func NewHandler(ledger *Ledger) *Handler {
+	return &Handler{ledger: ledger}
+}
+
+// NewHandlerWithWithdrawals creates a handler that can execute withdrawals
+func NewHandlerWithWithdrawals(ledger *Ledger, executor WithdrawalExecutor) *Handler {
+	return &Handler{ledger: ledger, executor: executor}
+}
+
+// RegisterRoutes sets up ledger routes
+func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
+	r.GET("/agents/:address/balance", h.GetBalance)
+	r.GET("/agents/:address/ledger", h.GetHistory)
+}
+
+// GetBalance handles GET /agents/:address/balance
+func (h *Handler) GetBalance(c *gin.Context) {
+	address := c.Param("address")
+
+	balance, err := h.ledger.GetBalance(c.Request.Context(), address)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "balance_error",
+			"message": "Failed to retrieve balance",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"balance": balance,
+	})
+}
+
+// GetHistory handles GET /agents/:address/ledger
+func (h *Handler) GetHistory(c *gin.Context) {
+	address := c.Param("address")
+	limit := 50
+
+	entries, err := h.ledger.GetHistory(c.Request.Context(), address, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "ledger_error",
+			"message": "Failed to retrieve ledger history",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"entries": entries,
+	})
+}
+
+// DepositRequest for manual deposit recording (admin use)
+type DepositRequest struct {
+	AgentAddress string `json:"agentAddress" binding:"required"`
+	Amount       string `json:"amount" binding:"required"`
+	TxHash       string `json:"txHash" binding:"required"`
+}
+
+// RecordDeposit handles POST /admin/deposits (for manual/webhook deposit recording)
+func (h *Handler) RecordDeposit(c *gin.Context) {
+	var req DepositRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	err := h.ledger.Deposit(c.Request.Context(), req.AgentAddress, req.Amount, req.TxHash)
+	if err != nil {
+		if err == ErrDuplicateDeposit {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":   "duplicate_deposit",
+				"message": "Deposit already processed",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "deposit_error",
+			"message": "Failed to record deposit",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "credited",
+		"message": "Deposit credited to agent balance",
+	})
+}
+
+// WithdrawRequest for withdrawal
+type WithdrawRequest struct {
+	Amount string `json:"amount" binding:"required"`
+}
+
+// RequestWithdrawal handles POST /agents/:address/withdraw
+func (h *Handler) RequestWithdrawal(c *gin.Context) {
+	address := c.Param("address")
+
+	var req WithdrawRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	// Check balance first
+	canSpend, err := h.ledger.CanSpend(c.Request.Context(), address, req.Amount)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "balance_error",
+			"message": "Failed to check balance",
+		})
+		return
+	}
+	if !canSpend {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "insufficient_balance",
+			"message": "Insufficient balance for withdrawal",
+		})
+		return
+	}
+
+	// Execute withdrawal if executor is configured
+	if h.executor != nil {
+		// Parse amount
+		amountBig, ok := parseUSDC(req.Amount)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "invalid_amount",
+				"message": "Invalid amount format",
+			})
+			return
+		}
+
+		// Execute on-chain transfer
+		txHash, err := h.executor.Transfer(c.Request.Context(), common.HexToAddress(address), amountBig)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "transfer_failed",
+				"message": "Failed to execute withdrawal",
+			})
+			return
+		}
+
+		// Record in ledger
+		if err := h.ledger.Withdraw(c.Request.Context(), address, req.Amount, txHash); err != nil {
+			// Transfer succeeded but ledger update failed - log but don't fail
+			c.JSON(http.StatusOK, gin.H{
+				"status":  "completed",
+				"message": "Withdrawal executed",
+				"amount":  req.Amount,
+				"txHash":  txHash,
+				"warning": "Ledger update failed - balance may be incorrect",
+			})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "completed",
+			"message": "Withdrawal executed",
+			"amount":  req.Amount,
+			"txHash":  txHash,
+		})
+		return
+	}
+
+	// No executor - return pending status
+	c.JSON(http.StatusAccepted, gin.H{
+		"status":  "pending",
+		"message": "Withdrawal request received",
+		"amount":  req.Amount,
+		"note":    "Withdrawals are processed within 24 hours",
+	})
+}

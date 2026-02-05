@@ -1,0 +1,50 @@
+# Fly.io configuration for Alancoin
+# Deploy: fly launch (first time) or fly deploy (updates)
+
+app = "alancoin"
+primary_region = "sjc"  # San Jose - close to you
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  ENV = "production"
+  LOG_LEVEL = "info"
+  # Chain config (Base Sepolia testnet)
+  RPC_URL = "https://sepolia.base.org"
+  CHAIN_ID = "84532"
+  USDC_CONTRACT = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+  DEFAULT_PRICE = "0.001"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false  # Keep running for demo
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 250
+    soft_limit = 200
+
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "30s"
+  method = "GET"
+  timeout = "5s"
+  path = "/health/live"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+
+# Secrets (set via: fly secrets set PRIVATE_KEY=xxx)
+# PRIVATE_KEY - wallet private key (required)
+# DATABASE_URL - auto-set when you attach Fly Postgres
+
+# To add Postgres:
+#   fly postgres create --name alancoin-db
+#   fly postgres attach alancoin-db
