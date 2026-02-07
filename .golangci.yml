@@ -1,0 +1,29 @@
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+
+linters-settings:
+  errcheck:
+    exclude-functions:
+      # Deferred rollbacks — after commit succeeds, rollback is a no-op.
+      # If commit hasn't been called, the deferred rollback runs and the
+      # error is irrelevant (we're already in an error path).
+      - (*database/sql.Tx).Rollback
+
+      # crypto/rand.Read returns an error on Go <1.24 but never actually
+      # fails on supported platforms (backed by OS entropy).
+      - crypto/rand.Read
+
+      # WebSocket deadline/close writes are best-effort in pump loops;
+      # the next ReadMessage/WriteMessage will surface the real error.
+      - (*github.com/gorilla/websocket.Conn).SetReadDeadline
+      - (*github.com/gorilla/websocket.Conn).SetWriteDeadline
+
+issues:
+  exclude-rules:
+    # Test files: allow unchecked errors in setup/helper calls.
+    - path: _test\.go
+      linters:
+        - errcheck
