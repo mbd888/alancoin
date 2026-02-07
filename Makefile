@@ -72,6 +72,12 @@ build: ## Build the binary
 	$(GOBUILD) $(LDFLAGS) -o $(BINARY_PATH) ./cmd/server
 	@echo "$(GREEN)Built: $(BINARY_PATH)$(NC)"
 
+build-mcp: ## Build the MCP server binary
+	@echo "$(GREEN)Building MCP server...$(NC)"
+	@mkdir -p bin
+	$(GOBUILD) $(LDFLAGS) -o bin/alancoin-mcp ./cmd/mcp
+	@echo "$(GREEN)Built: bin/alancoin-mcp$(NC)"
+
 build-linux: ## Build for Linux (useful for Docker)
 	@echo "$(GREEN)Building for Linux...$(NC)"
 	@mkdir -p bin
