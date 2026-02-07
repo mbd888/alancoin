@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -74,8 +75,8 @@ type Hub struct {
 	mu         sync.RWMutex
 	logger     *slog.Logger
 
-	// Stats
-	totalEvents  int64
+	// Stats (totalEvents uses atomic for lock-free access from Run goroutine)
+	totalEvents  atomic.Int64
 	totalClients int64
 	peakClients  int64
 }
@@ -121,7 +122,7 @@ func (h *Hub) Run(ctx context.Context) {
 			h.logger.Info("client disconnected", "total", len(h.clients))
 
 		case event := <-h.broadcast:
-			h.totalEvents++
+			h.totalEvents.Add(1)
 			h.mu.RLock()
 			for client := range h.clients {
 				if h.shouldSend(client, event) {
@@ -238,7 +239,7 @@ func (h *Hub) Stats() map[string]interface{} {
 
 	return map[string]interface{}{
 		"connectedClients": len(h.clients),
-		"totalEvents":      h.totalEvents,
+		"totalEvents":      h.totalEvents.Load(),
 		"totalClients":     h.totalClients,
 		"peakClients":      h.peakClients,
 	}

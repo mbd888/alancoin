@@ -42,15 +42,34 @@ type Event struct {
 
 // Subscription represents a webhook subscription
 type Subscription struct {
-	ID          string      `json:"id"`
-	AgentAddr   string      `json:"agentAddr"`
-	URL         string      `json:"url"`
-	Secret      string      `json:"-"` // Used for HMAC signing
-	Events      []EventType `json:"events"`
-	Active      bool        `json:"active"`
-	CreatedAt   time.Time   `json:"createdAt"`
-	LastSuccess *time.Time  `json:"lastSuccess,omitempty"`
-	LastError   string      `json:"lastError,omitempty"`
+	ID                  string      `json:"id"`
+	AgentAddr           string      `json:"agentAddr"`
+	URL                 string      `json:"url"`
+	Secret              string      `json:"-"` // Used for HMAC signing
+	Events              []EventType `json:"events"`
+	Active              bool        `json:"active"`
+	CreatedAt           time.Time   `json:"createdAt"`
+	LastSuccess         *time.Time  `json:"lastSuccess,omitempty"`
+	LastError           string      `json:"lastError,omitempty"`
+	ConsecutiveFailures int         `json:"consecutiveFailures"`
+}
+
+// RetryConfig controls exponential backoff for webhook delivery
+type RetryConfig struct {
+	MaxAttempts int           // Total attempts including initial (default: 5)
+	BaseDelay   time.Duration // Initial retry delay (default: 1s)
+	MaxDelay    time.Duration // Cap on backoff delay (default: 60s)
+	MaxFailures int           // Consecutive failures before deactivation (default: 50)
+}
+
+// DefaultRetryConfig returns sensible retry defaults
+func DefaultRetryConfig() RetryConfig {
+	return RetryConfig{
+		MaxAttempts: 5,
+		BaseDelay:   1 * time.Second,
+		MaxDelay:    60 * time.Second,
+		MaxFailures: 50,
+	}
 }
 
 // Store persists webhook subscriptions
@@ -67,6 +86,7 @@ type Store interface {
 type Dispatcher struct {
 	store  Store
 	client *http.Client
+	retry  RetryConfig
 	mu     sync.RWMutex
 }
 
@@ -77,6 +97,18 @@ func NewDispatcher(store Store) *Dispatcher {
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		retry: DefaultRetryConfig(),
+	}
+}
+
+// NewDispatcherWithRetry creates a dispatcher with custom retry config
+func NewDispatcherWithRetry(store Store, retryCfg RetryConfig) *Dispatcher {
+	return &Dispatcher{
+		store: store,
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+		retry: retryCfg,
 	}
 }
 
@@ -130,34 +162,60 @@ func (d *Dispatcher) send(ctx context.Context, sub *Subscription, event *Event) 
 		return
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", sub.URL, bytes.NewReader(payload))
-	if err != nil {
-		d.updateError(ctx, sub, "failed to create request")
-		return
+	var lastErr string
+	for attempt := 0; attempt < d.retry.MaxAttempts; attempt++ {
+		// Wait before retry (no wait on first attempt)
+		if attempt > 0 {
+			delay := d.retry.BaseDelay * (1 << (attempt - 1)) // exponential: 1s, 2s, 4s, 8s...
+			if delay > d.retry.MaxDelay {
+				delay = d.retry.MaxDelay
+			}
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				d.updateError(ctx, sub, "context cancelled during retry")
+				return
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "POST", sub.URL, bytes.NewReader(payload))
+		if err != nil {
+			lastErr = "failed to create request"
+			continue
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Alancoin-Event", string(event.Type))
+		req.Header.Set("X-Alancoin-Timestamp", fmt.Sprintf("%d", event.Timestamp.Unix()))
+		req.Header.Set("X-Alancoin-Delivery-Attempt", fmt.Sprintf("%d", attempt+1))
+
+		if sub.Secret != "" {
+			signature := d.sign(payload, sub.Secret)
+			req.Header.Set("X-Alancoin-Signature", signature)
+		}
+
+		resp, err := d.client.Do(req)
+		if err != nil {
+			lastErr = fmt.Sprintf("request failed: %v", err)
+			continue
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			d.updateSuccess(ctx, sub)
+			return
+		}
+
+		lastErr = fmt.Sprintf("status %d", resp.StatusCode)
+
+		// Don't retry on 4xx (client error) — only retry on 5xx / network failures
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			break
+		}
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Alancoin-Event", string(event.Type))
-	req.Header.Set("X-Alancoin-Timestamp", fmt.Sprintf("%d", event.Timestamp.Unix()))
-
-	// Sign the payload if secret is set
-	if sub.Secret != "" {
-		signature := d.sign(payload, sub.Secret)
-		req.Header.Set("X-Alancoin-Signature", signature)
-	}
-
-	resp, err := d.client.Do(req)
-	if err != nil {
-		d.updateError(ctx, sub, fmt.Sprintf("request failed: %v", err))
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		d.updateSuccess(ctx, sub)
-	} else {
-		d.updateError(ctx, sub, fmt.Sprintf("status %d", resp.StatusCode))
-	}
+	// All attempts exhausted
+	d.updateError(ctx, sub, lastErr)
 }
 
 func (d *Dispatcher) sign(payload []byte, secret string) string {
@@ -170,11 +228,19 @@ func (d *Dispatcher) updateSuccess(ctx context.Context, sub *Subscription) {
 	now := time.Now()
 	sub.LastSuccess = &now
 	sub.LastError = ""
+	sub.ConsecutiveFailures = 0
 	d.store.Update(ctx, sub)
 }
 
 func (d *Dispatcher) updateError(ctx context.Context, sub *Subscription, errMsg string) {
 	sub.LastError = errMsg
+	sub.ConsecutiveFailures++
+
+	// Auto-deactivate after too many consecutive failures
+	if d.retry.MaxFailures > 0 && sub.ConsecutiveFailures >= d.retry.MaxFailures {
+		sub.Active = false
+	}
+
 	d.store.Update(ctx, sub)
 }
 

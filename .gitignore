@@ -43,3 +43,7 @@ tmp/
 *.log
 *.pem
 *.key
+
+# Python
+__pycache__/
+*.pyc

@@ -20,8 +20,9 @@ func HeadersMiddleware() gin.HandlerFunc {
 		// Referrer policy
 		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
 
-		// Content Security Policy (restrictive for API)
-		c.Header("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")
+		// Content Security Policy
+		// Allow inline scripts/styles for dashboard pages, restrict framing
+		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'")
 
 		// Permissions Policy
 		c.Header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")

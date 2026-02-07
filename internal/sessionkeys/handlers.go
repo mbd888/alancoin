@@ -32,6 +32,14 @@ type BalanceService interface {
 	CanSpend(ctx context.Context, agentAddr, amount string) (bool, error)
 	Spend(ctx context.Context, agentAddr, amount, reference string) error
 	Refund(ctx context.Context, agentAddr, amount, reference string) error
+
+	// Two-phase hold operations for safe transaction execution.
+	// Hold moves funds from available → pending before on-chain transfer.
+	// ConfirmHold moves from pending → total_out after confirmation.
+	// ReleaseHold moves from pending → available if transfer fails.
+	Hold(ctx context.Context, agentAddr, amount, reference string) error
+	ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error
+	ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error
 }
 
 // EventEmitter broadcasts events to real-time subscribers
@@ -296,34 +304,6 @@ func (h *Handler) Transact(c *gin.Context) {
 	var executed bool
 
 	if h.wallet != nil {
-		// Check agent balance if ledger is configured
-		if h.balance != nil {
-			canSpend, err := h.balance.CanSpend(c.Request.Context(), address, req.Amount)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"error":   "balance_error",
-					"message": "Failed to check balance",
-				})
-				return
-			}
-			if !canSpend {
-				c.JSON(http.StatusPaymentRequired, gin.H{
-					"error":   "insufficient_balance",
-					"message": "Agent has insufficient balance",
-				})
-				return
-			}
-
-			// Debit balance first
-			if err := h.balance.Spend(c.Request.Context(), address, req.Amount, keyID); err != nil {
-				c.JSON(http.StatusPaymentRequired, gin.H{
-					"error":   "debit_failed",
-					"message": "Failed to debit agent balance",
-				})
-				return
-			}
-		}
-
 		// Parse amount to big.Int (USDC has 6 decimals)
 		amountBig, ok := parseUSDC(req.Amount)
 		if !ok {
@@ -334,12 +314,26 @@ func (h *Handler) Transact(c *gin.Context) {
 			return
 		}
 
+		// Two-phase balance hold: hold funds before transfer, confirm after.
+		// This prevents double-spend without risking permanent fund loss
+		// if the on-chain transfer gets stuck in the mempool.
+		if h.balance != nil {
+			// Phase 1: Place hold (available → pending)
+			if err := h.balance.Hold(c.Request.Context(), address, req.Amount, keyID); err != nil {
+				c.JSON(http.StatusPaymentRequired, gin.H{
+					"error":   "insufficient_balance",
+					"message": "Agent has insufficient balance",
+				})
+				return
+			}
+		}
+
 		// Execute on-chain transfer
 		result, err := h.wallet.Transfer(c.Request.Context(), common.HexToAddress(req.To), amountBig)
 		if err != nil {
-			// Refund the debited balance since transfer failed
+			// Release the hold since transfer failed
 			if h.balance != nil {
-				h.balance.Refund(c.Request.Context(), address, req.Amount, keyID)
+				h.balance.ReleaseHold(c.Request.Context(), address, req.Amount, keyID)
 			}
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "transfer_failed",
@@ -350,6 +344,13 @@ func (h *Handler) Transact(c *gin.Context) {
 
 		txHash = result.TxHash
 		executed = true
+
+		// Phase 2: Confirm hold (pending → total_out)
+		// The transfer was broadcast successfully. Even if confirmation
+		// takes time, the funds are committed.
+		if h.balance != nil {
+			h.balance.ConfirmHold(c.Request.Context(), address, req.Amount, keyID)
+		}
 
 		// Record in registry if available
 		if h.recorder != nil {

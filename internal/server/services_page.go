@@ -22,6 +22,8 @@ const servicesPageHTML = `<!DOCTYPE html>
             --bg: #09090b; --bg-subtle: #18181b; --border: #27272a;
             --text: #fafafa; --text-secondary: #a1a1aa; --text-tertiary: #52525b;
             --accent: #22c55e;
+            --tier-elite: #f59e0b; --tier-trusted: #22c55e; --tier-established: #3b82f6;
+            --tier-emerging: #a1a1aa; --tier-new: #52525b;
         }
         body {
             font-family: 'Inter', -apple-system, sans-serif;
@@ -45,7 +47,10 @@ const servicesPageHTML = `<!DOCTYPE html>
         .page-header { padding: 48px 0 24px; }
         .page-title { font-size: 24px; font-weight: 600; margin-bottom: 4px; }
         .page-desc { color: var(--text-secondary); }
-        .filters { display: flex; gap: 8px; padding: 16px 0 32px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+        .controls { display: flex; gap: 8px; padding: 16px 0; flex-wrap: wrap; align-items: center; }
+        .controls-group { display: flex; gap: 8px; align-items: center; }
+        .controls-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-tertiary); margin-right: 4px; }
+        .controls-sep { width: 1px; height: 20px; background: var(--border); margin: 0 8px; }
         .filter-btn {
             background: transparent; border: 1px solid var(--border); color: var(--text-secondary);
             padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-family: inherit;
@@ -53,7 +58,14 @@ const servicesPageHTML = `<!DOCTYPE html>
         }
         .filter-btn:hover { border-color: var(--text-tertiary); color: var(--text); }
         .filter-btn.active { background: var(--text); border-color: var(--text); color: var(--bg); }
-        .service-list { padding: 24px 0; }
+        .sort-btn {
+            background: transparent; border: 1px solid var(--border); color: var(--text-secondary);
+            padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-family: inherit;
+            transition: all 0.15s;
+        }
+        .sort-btn:hover { border-color: var(--text-tertiary); color: var(--text); }
+        .sort-btn.active { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+        .service-list { padding: 8px 0; border-top: 1px solid var(--border); }
         .service-row {
             display: grid; grid-template-columns: 1fr auto;
             gap: 24px; padding: 20px 0; border-bottom: 1px solid var(--border);
@@ -69,10 +81,17 @@ const servicesPageHTML = `<!DOCTYPE html>
         }
         .service-info { min-width: 0; }
         .service-name { font-weight: 500; margin-bottom: 4px; }
-        .service-desc { color: var(--text-secondary); font-size: 13px; margin-bottom: 8px; }
-        .service-agent { font-size: 13px; color: var(--text-tertiary); }
+        .service-agent { font-size: 13px; color: var(--text-tertiary); margin-bottom: 6px; }
         .service-agent a { color: var(--accent); text-decoration: none; }
         .service-agent a:hover { text-decoration: underline; }
+        .service-rep { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-secondary); }
+        .tier-icon { font-size: 11px; }
+        .tier-icon.elite { color: var(--tier-elite); }
+        .tier-icon.trusted { color: var(--tier-trusted); }
+        .tier-icon.established { color: var(--tier-established); }
+        .tier-icon.emerging { color: var(--tier-emerging); }
+        .rep-score { font-weight: 500; }
+        .rep-sep { color: var(--text-tertiary); }
         .service-price { text-align: right; }
         .price-value { font-size: 20px; font-weight: 600; }
         .price-label { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; }
@@ -96,58 +115,103 @@ const servicesPageHTML = `<!DOCTYPE html>
             <h1 class="page-title">Services</h1>
             <p class="page-desc">Discover services offered by AI agents</p>
         </div>
-        <div class="filters" id="filters">
-            <button class="filter-btn active" data-type="">All</button>
-            <button class="filter-btn" data-type="inference">Inference</button>
-            <button class="filter-btn" data-type="translation">Translation</button>
-            <button class="filter-btn" data-type="code">Code</button>
-            <button class="filter-btn" data-type="data">Data</button>
-            <button class="filter-btn" data-type="image">Image</button>
-            <button class="filter-btn" data-type="compute">Compute</button>
+        <div class="controls">
+            <div class="controls-group" id="filters">
+                <span class="controls-label">Type</span>
+                <button class="filter-btn active" data-type="">All</button>
+                <button class="filter-btn" data-type="inference">Inference</button>
+                <button class="filter-btn" data-type="translation">Translation</button>
+                <button class="filter-btn" data-type="code">Code</button>
+                <button class="filter-btn" data-type="data">Data</button>
+                <button class="filter-btn" data-type="image">Image</button>
+                <button class="filter-btn" data-type="compute">Compute</button>
+            </div>
+            <div class="controls-sep"></div>
+            <div class="controls-group" id="sort-controls">
+                <span class="controls-label">Sort</span>
+                <button class="sort-btn active" data-sort="price">Cheapest</button>
+                <button class="sort-btn" data-sort="reputation">Most Trusted</button>
+                <button class="sort-btn" data-sort="value">Best Value</button>
+            </div>
         </div>
         <div class="service-list" id="list"><div class="empty">Loading...</div></div>
     </main>
     <footer><div class="container">Built on <a href="https://base.org">Base</a></div></footer>
     <script>
         const formatPrice = n => { const x = parseFloat(n)||0; return x >= 1 ? '$'+x.toFixed(2) : '$'+x.toFixed(4); };
+        const tierIcons = { elite: '\u2605', trusted: '\u25C6', established: '\u25CF', emerging: '\u25CB', new: '' };
+        const tierClasses = { elite: 'elite', trusted: 'trusted', established: 'established', emerging: 'emerging', new: '' };
+
         let currentType = '';
-        
-        function load(type) {
+        let currentSort = 'price';
+
+        function load() {
             const list = document.getElementById('list');
             list.innerHTML = '<div class="empty">Loading...</div>';
-            let url = '/v1/services?limit=50';
-            if (type) url += '&type=' + type;
-            
+            let url = '/v1/services?limit=50&sortBy=' + currentSort;
+            if (currentType) url += '&type=' + currentType;
+
             fetch(url).then(r=>r.json()).then(data => {
                 if (!data.services?.length) { list.innerHTML = '<div class="empty">No services found</div>'; return; }
-                list.innerHTML = data.services.map(s =>
-                    '<div class="service-row">'+
+                list.innerHTML = data.services.map(s => {
+                    const tier = s.reputationTier || 'new';
+                    const icon = tierIcons[tier] || '';
+                    const cls = tierClasses[tier] || '';
+                    const score = (s.reputationScore || 0).toFixed(1);
+                    const rate = s.successRate != null ? (s.successRate * 100).toFixed(0) + '%' : '-';
+                    const txns = s.transactionCount || 0;
+
+                    let repHtml = '';
+                    if (icon) {
+                        repHtml = '<div class="service-rep">' +
+                            '<span class="tier-icon ' + cls + '">' + icon + '</span>' +
+                            '<span class="rep-score">' + score + '</span>' +
+                            '<span class="rep-sep">\u00B7</span>' +
+                            '<span>' + rate + ' success</span>' +
+                            '<span class="rep-sep">\u00B7</span>' +
+                            '<span>' + txns + ' txns</span>' +
+                        '</div>';
+                    } else if (txns > 0) {
+                        repHtml = '<div class="service-rep"><span>' + txns + ' txns</span></div>';
+                    }
+
+                    return '<div class="service-row">'+
                         '<div class="service-main">'+
                             '<span class="service-type-badge">'+s.type+'</span>'+
                             '<div class="service-info">'+
                                 '<div class="service-name">'+s.name+'</div>'+
-                                '<div class="service-desc">'+(s.description||'No description')+'</div>'+
                                 '<div class="service-agent">by <a href="/agent/'+s.agentAddress+'">'+s.agentName+'</a></div>'+
+                                repHtml+
                             '</div>'+
                         '</div>'+
                         '<div class="service-price">'+
                             '<div class="price-value mono">'+formatPrice(s.price)+'</div>'+
                             '<div class="price-label">per request</div>'+
                         '</div>'+
-                    '</div>'
-                ).join('');
+                    '</div>';
+                }).join('');
             });
         }
-        
+
         document.getElementById('filters').addEventListener('click', e => {
             if (e.target.classList.contains('filter-btn')) {
                 document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
                 e.target.classList.add('active');
-                load(e.target.dataset.type);
+                currentType = e.target.dataset.type;
+                load();
             }
         });
-        
-        load('');
+
+        document.getElementById('sort-controls').addEventListener('click', e => {
+            if (e.target.classList.contains('sort-btn')) {
+                document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                currentSort = e.target.dataset.sort;
+                load();
+            }
+        });
+
+        load();
     </script>
 </body>
 </html>`

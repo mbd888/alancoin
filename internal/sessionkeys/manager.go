@@ -16,6 +16,7 @@ type Store interface {
 	GetByOwner(ctx context.Context, ownerAddr string) ([]*SessionKey, error)
 	Update(ctx context.Context, key *SessionKey) error
 	Delete(ctx context.Context, id string) error
+	CountActive(ctx context.Context) (int64, error) // Count non-revoked, non-expired keys
 }
 
 // ServiceResolver resolves service information for validation
@@ -117,6 +118,11 @@ func (m *Manager) Get(ctx context.Context, id string) (*SessionKey, error) {
 // List returns all session keys for an owner
 func (m *Manager) List(ctx context.Context, ownerAddr string) ([]*SessionKey, error) {
 	return m.store.GetByOwner(ctx, strings.ToLower(ownerAddr))
+}
+
+// CountActive returns the count of active (non-revoked, non-expired) session keys
+func (m *Manager) CountActive(ctx context.Context) (int64, error) {
+	return m.store.CountActive(ctx)
 }
 
 // Revoke revokes a session key

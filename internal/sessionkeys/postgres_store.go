@@ -186,6 +186,19 @@ func (p *PostgresStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// CountActive returns the number of active session keys (non-revoked, non-expired)
+func (p *PostgresStore) CountActive(ctx context.Context) (int64, error) {
+	var count int64
+	err := p.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM session_keys
+		WHERE revoked_at IS NULL AND expires_at > NOW()
+	`).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count active keys: %w", err)
+	}
+	return count, nil
+}
+
 // Helpers
 
 func nullString(s string) sql.NullString {

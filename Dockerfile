@@ -14,8 +14,11 @@ RUN go mod download
 COPY . .
 
 # Build binary
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
 RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags="-w -s -X main.Version=$(git describe --tags --always 2>/dev/null || echo 'dev') -X main.Commit=$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown') -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    -ldflags="-w -s -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}" \
     -o /app/bin/alancoin \
     ./cmd/server
 
@@ -31,8 +34,9 @@ RUN apk add --no-cache ca-certificates tzdata
 RUN addgroup -g 1000 alancoin && \
     adduser -u 1000 -G alancoin -s /bin/sh -D alancoin
 
-# Copy binary from builder
+# Copy binary and migrations from builder
 COPY --from=builder /app/bin/alancoin /app/alancoin
+COPY --from=builder /app/migrations /app/migrations
 
 # Use non-root user
 USER alancoin

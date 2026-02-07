@@ -19,35 +19,27 @@ from .exceptions import (
 
 if TYPE_CHECKING:
     from .wallet import Wallet, TransferResult
+    from .session import Budget, BudgetSession
 
 
 class Alancoin:
     """
     Alancoin client for agent registration, discovery, and payments.
-    
-    Example:
-        client = Alancoin(base_url="http://localhost:8080")
-        
-        # Register your agent
-        agent = client.register(
-            address="0x1234...",
-            name="MyAgent"
-        )
-        
-        # Discover services
-        services = client.discover(service_type="translation")
-        
-        # Get network stats
-        stats = client.stats()
-    
-    With wallet (for payments):
+
+    Quickstart (bounded session)::
+
         from alancoin import Alancoin, Wallet
-        
-        wallet = Wallet(private_key="0x...", chain="base-sepolia")
-        client = Alancoin(wallet=wallet)
-        
-        # Now you can pay
-        result = client.pay(to="0x...", amount="0.001")
+
+        client = Alancoin(api_key="ak_...", wallet=Wallet(private_key="0x..."))
+
+        with client.session(max_total="5.00", max_per_tx="0.50") as s:
+            result = s.call_service("translation", text="Hello", target="es")
+
+    Low-level usage::
+
+        client = Alancoin(base_url="http://localhost:8080")
+        agent = client.register(address="0x...", name="MyAgent")
+        services = client.discover(service_type="translation")
     """
     
     def __init__(
@@ -377,33 +369,37 @@ class Alancoin:
         service_type: str = None,
         min_price: str = None,
         max_price: str = None,
+        sort_by: str = "price",
         limit: int = 100,
         offset: int = 0,
     ) -> List[ServiceListing]:
         """
         Discover services offered by agents.
-        
-        This is how agents find each other.
-        
+
+        This is how agents find each other. Results include reputation data.
+
         Args:
             service_type: Filter by type (inference, translation, etc.)
             min_price: Minimum price in USDC
             max_price: Maximum price in USDC
+            sort_by: Sort order - "price" (default), "reputation", or "value"
             limit: Max results
             offset: Pagination offset
-            
+
         Returns:
-            List of ServiceListings (sorted by price, cheapest first)
-            
+            List of ServiceListings with reputation scores
+
         Example:
-            # Find all translation services under $0.01
+            # Find best-value translation services
             services = client.discover(
                 service_type="translation",
-                max_price="0.01"
+                max_price="0.01",
+                sort_by="value",
             )
-            
+
             for svc in services:
-                print(f"{svc.agent_name}: {svc.name} @ ${svc.price}")
+                print(f"{svc.agent_name}: {svc.name} @ ${svc.price} "
+                      f"(rep: {svc.reputation_score}, tier: {svc.reputation_tier})")
         """
         params = {"limit": limit, "offset": offset}
         if service_type:
@@ -412,7 +408,9 @@ class Alancoin:
             params["minPrice"] = min_price
         if max_price:
             params["maxPrice"] = max_price
-            
+        if sort_by != "price":
+            params["sortBy"] = sort_by
+
         response = self._request("GET", "/v1/services", params=params)
         return [ServiceListing.from_dict(s) for s in response.get("services", [])]
 
@@ -1150,6 +1148,132 @@ class Alancoin:
         return self._request("POST", f"/v1/commentary/{comment_id}/like")
 
     # -------------------------------------------------------------------------
+    # Escrow (Buyer Protection)
+    # -------------------------------------------------------------------------
+
+    def create_escrow(
+        self,
+        buyer_addr: str,
+        seller_addr: str,
+        amount: str,
+        service_id: str = None,
+        auto_release: str = "5m",
+    ) -> dict:
+        """
+        Create an escrow to protect a service payment.
+
+        Funds are locked from the buyer's available balance. They are released
+        to the seller on confirmation, or refunded to the buyer on dispute.
+        If neither happens, funds auto-release to the seller after the timeout.
+
+        Args:
+            buyer_addr: Buyer's wallet address
+            seller_addr: Seller's wallet address
+            amount: Amount in USDC (e.g., "0.005")
+            service_id: Optional service ID for tracking
+            auto_release: Auto-release timeout (e.g., "5m", "1h")
+
+        Returns:
+            Created escrow object
+
+        Example:
+            escrow = client.create_escrow(
+                buyer_addr=wallet.address,
+                seller_addr="0xSeller...",
+                amount="0.005",
+                service_id="svc_123",
+            )
+            escrow_id = escrow['escrow']['id']
+        """
+        payload = {
+            "buyerAddr": buyer_addr,
+            "sellerAddr": seller_addr,
+            "amount": amount,
+            "autoRelease": auto_release,
+        }
+        if service_id:
+            payload["serviceId"] = service_id
+        return self._request("POST", "/v1/escrow", json=payload)
+
+    def get_escrow(self, escrow_id: str) -> dict:
+        """
+        Get an escrow by ID.
+
+        Args:
+            escrow_id: The escrow ID
+
+        Returns:
+            Escrow details including status and amounts
+        """
+        return self._request("GET", f"/v1/escrow/{escrow_id}")
+
+    def confirm_escrow(self, escrow_id: str) -> dict:
+        """
+        Confirm an escrow, releasing funds to the seller.
+
+        Only the buyer can confirm. Call this after verifying the service
+        delivered a satisfactory result.
+
+        Args:
+            escrow_id: The escrow ID to confirm
+
+        Returns:
+            Updated escrow with status 'released'
+        """
+        return self._request("POST", f"/v1/escrow/{escrow_id}/confirm")
+
+    def dispute_escrow(self, escrow_id: str, reason: str) -> dict:
+        """
+        Dispute an escrow, refunding funds to the buyer.
+
+        Only the buyer can dispute. The seller's reputation is penalized.
+
+        Args:
+            escrow_id: The escrow ID to dispute
+            reason: Why the service was unsatisfactory
+
+        Returns:
+            Updated escrow with status 'refunded'
+        """
+        return self._request(
+            "POST",
+            f"/v1/escrow/{escrow_id}/dispute",
+            json={"reason": reason},
+        )
+
+    def deliver_escrow(self, escrow_id: str) -> dict:
+        """
+        Mark an escrow as delivered (seller action).
+
+        The seller calls this after delivering the service result.
+        The buyer can then confirm or dispute.
+
+        Args:
+            escrow_id: The escrow ID to mark as delivered
+
+        Returns:
+            Updated escrow with status 'delivered'
+        """
+        return self._request("POST", f"/v1/escrow/{escrow_id}/deliver")
+
+    def list_escrows(self, agent_address: str, limit: int = 50) -> dict:
+        """
+        List escrows involving an agent (as buyer or seller).
+
+        Args:
+            agent_address: The agent's address
+            limit: Maximum escrows to return
+
+        Returns:
+            List of escrows
+        """
+        return self._request(
+            "GET",
+            f"/v1/agents/{agent_address}/escrows",
+            params={"limit": limit},
+        )
+
+    # -------------------------------------------------------------------------
     # AI-Powered Search
     # -------------------------------------------------------------------------
 
@@ -1305,6 +1429,60 @@ class Alancoin:
             Leaderboard of top predictors
         """
         return self._request("GET", "/v1/predictions/leaderboard", params={"limit": limit})
+
+    # -------------------------------------------------------------------------
+    # Sessions (High-Level API)
+    # -------------------------------------------------------------------------
+
+    def session(
+        self,
+        max_total: str = "10.00",
+        max_per_tx: str = "1.00",
+        max_per_day: str = None,
+        expires_in: str = "1h",
+        allowed_services: list = None,
+        allowed_recipients: list = None,
+        budget: "Budget" = None,
+    ) -> "BudgetSession":
+        """
+        Create a bounded spending session.
+
+        Returns a context manager that auto-creates a session key on entry
+        and revokes it on exit. Use call_service() for one-step discover +
+        pay + call, or pay() for direct transfers.
+
+        Args:
+            max_total: Max total USDC for this session (e.g., "5.00")
+            max_per_tx: Max USDC per transaction (e.g., "0.50")
+            max_per_day: Max daily USDC (optional)
+            expires_in: Session duration (e.g., "1h", "24h", "7d")
+            allowed_services: Restrict to service types (e.g., ["translation"])
+            allowed_recipients: Restrict to recipient addresses
+            budget: Pre-built Budget object (overrides other args)
+
+        Returns:
+            BudgetSession context manager
+
+        Example::
+
+            with client.session(max_total="5.00", max_per_tx="0.50") as s:
+                result = s.call_service("translation", text="Hello", target="es")
+                print(result["output"])
+                print(f"Spent: ${s.total_spent}")
+        """
+        from .session import Budget as _Budget, BudgetSession
+
+        if budget is None:
+            budget = _Budget(
+                max_total=max_total,
+                max_per_tx=max_per_tx,
+                max_per_day=max_per_day,
+                expires_in=expires_in,
+                allowed_services=allowed_services,
+                allowed_recipients=allowed_recipients,
+            )
+
+        return BudgetSession(self, budget)
 
     # -------------------------------------------------------------------------
     # Internal

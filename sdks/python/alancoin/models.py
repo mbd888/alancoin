@@ -85,8 +85,8 @@ class Agent:
 
 @dataclass
 class ServiceListing:
-    """A service with agent info (returned from discovery)."""
-    
+    """A service with agent info and reputation (returned from discovery)."""
+
     id: str
     type: str
     name: str
@@ -96,6 +96,11 @@ class ServiceListing:
     active: bool
     agent_address: str
     agent_name: str
+    reputation_score: float = 0.0
+    reputation_tier: str = "new"
+    success_rate: float = 1.0
+    tx_count: int = 0
+    value_score: float = 0.0
 
     @classmethod
     def from_dict(cls, data: dict) -> "ServiceListing":
@@ -109,6 +114,11 @@ class ServiceListing:
             active=data.get("active", True),
             agent_address=data.get("agentAddress", ""),
             agent_name=data.get("agentName", ""),
+            reputation_score=data.get("reputationScore", 0.0),
+            reputation_tier=data.get("reputationTier", "new"),
+            success_rate=data.get("successRate", 1.0),
+            tx_count=data.get("transactionCount", 0),
+            value_score=data.get("valueScore", 0.0),
         )
 
 

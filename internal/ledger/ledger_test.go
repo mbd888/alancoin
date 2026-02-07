@@ -2,213 +2,9 @@ package ledger
 
 import (
 	"context"
-	"sync"
+	"math/big"
 	"testing"
-	"time"
 )
-
-// MemoryStore for testing
-type MemoryStore struct {
-	balances map[string]*Balance
-	entries  []*Entry
-	deposits map[string]bool
-	mu       sync.RWMutex
-}
-
-func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{
-		balances: make(map[string]*Balance),
-		entries:  make([]*Entry, 0),
-		deposits: make(map[string]bool),
-	}
-}
-
-func (m *MemoryStore) GetBalance(ctx context.Context, agentAddr string) (*Balance, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if bal, ok := m.balances[agentAddr]; ok {
-		return bal, nil
-	}
-	return &Balance{
-		AgentAddr: agentAddr,
-		Available: "0",
-		Pending:   "0",
-		TotalIn:   "0",
-		TotalOut:  "0",
-		UpdatedAt: time.Now(),
-	}, nil
-}
-
-func (m *MemoryStore) Credit(ctx context.Context, agentAddr, amount, txHash, description string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	bal, ok := m.balances[agentAddr]
-	if !ok {
-		bal = &Balance{
-			AgentAddr: agentAddr,
-			Available: "0",
-			Pending:   "0",
-			TotalIn:   "0",
-			TotalOut:  "0",
-		}
-		m.balances[agentAddr] = bal
-	}
-
-	// Add to available and totalIn
-	avail, _ := parseUSDC(bal.Available)
-	total, _ := parseUSDC(bal.TotalIn)
-	add, _ := parseUSDC(amount)
-
-	avail.Add(avail, add)
-	total.Add(total, add)
-
-	bal.Available = formatUSDC(avail)
-	bal.TotalIn = formatUSDC(total)
-	bal.UpdatedAt = time.Now()
-
-	m.entries = append(m.entries, &Entry{
-		ID:          "entry_" + txHash,
-		AgentAddr:   agentAddr,
-		Type:        "deposit",
-		Amount:      amount,
-		TxHash:      txHash,
-		Description: description,
-		CreatedAt:   time.Now(),
-	})
-
-	m.deposits[txHash] = true
-
-	return nil
-}
-
-func (m *MemoryStore) Debit(ctx context.Context, agentAddr, amount, reference, description string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	bal, ok := m.balances[agentAddr]
-	if !ok {
-		return ErrAgentNotFound
-	}
-
-	avail, _ := parseUSDC(bal.Available)
-	totalOut, _ := parseUSDC(bal.TotalOut)
-	sub, _ := parseUSDC(amount)
-
-	if avail.Cmp(sub) < 0 {
-		return ErrInsufficientBalance
-	}
-
-	avail.Sub(avail, sub)
-	totalOut.Add(totalOut, sub)
-
-	bal.Available = formatUSDC(avail)
-	bal.TotalOut = formatUSDC(totalOut)
-	bal.UpdatedAt = time.Now()
-
-	m.entries = append(m.entries, &Entry{
-		ID:          "entry_spend",
-		AgentAddr:   agentAddr,
-		Type:        "spend",
-		Amount:      amount,
-		Reference:   reference,
-		Description: description,
-		CreatedAt:   time.Now(),
-	})
-
-	return nil
-}
-
-func (m *MemoryStore) Withdraw(ctx context.Context, agentAddr, amount, txHash string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	bal, ok := m.balances[agentAddr]
-	if !ok {
-		return ErrAgentNotFound
-	}
-
-	avail, _ := parseUSDC(bal.Available)
-	totalOut, _ := parseUSDC(bal.TotalOut)
-	sub, _ := parseUSDC(amount)
-
-	if avail.Cmp(sub) < 0 {
-		return ErrInsufficientBalance
-	}
-
-	avail.Sub(avail, sub)
-	totalOut.Add(totalOut, sub)
-
-	bal.Available = formatUSDC(avail)
-	bal.TotalOut = formatUSDC(totalOut)
-	bal.UpdatedAt = time.Now()
-
-	m.entries = append(m.entries, &Entry{
-		ID:          "entry_" + txHash,
-		AgentAddr:   agentAddr,
-		Type:        "withdrawal",
-		Amount:      amount,
-		TxHash:      txHash,
-		Description: "withdrawal",
-		CreatedAt:   time.Now(),
-	})
-
-	return nil
-}
-
-func (m *MemoryStore) Refund(ctx context.Context, agentAddr, amount, reference, description string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	bal, ok := m.balances[agentAddr]
-	if !ok {
-		return ErrAgentNotFound
-	}
-
-	// Credit back the amount
-	avail, _ := parseUSDC(bal.Available)
-	totalOut, _ := parseUSDC(bal.TotalOut)
-	add, _ := parseUSDC(amount)
-
-	avail.Add(avail, add)
-	totalOut.Sub(totalOut, add)
-
-	bal.Available = formatUSDC(avail)
-	bal.TotalOut = formatUSDC(totalOut)
-	bal.UpdatedAt = time.Now()
-
-	m.entries = append(m.entries, &Entry{
-		ID:          "entry_refund",
-		AgentAddr:   agentAddr,
-		Type:        "refund",
-		Amount:      amount,
-		Reference:   reference,
-		Description: description,
-		CreatedAt:   time.Now(),
-	})
-
-	return nil
-}
-
-func (m *MemoryStore) GetHistory(ctx context.Context, agentAddr string, limit int) ([]*Entry, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	var result []*Entry
-	for i := len(m.entries) - 1; i >= 0 && len(result) < limit; i-- {
-		if m.entries[i].AgentAddr == agentAddr {
-			result = append(result, m.entries[i])
-		}
-	}
-	return result, nil
-}
-
-func (m *MemoryStore) HasDeposit(ctx context.Context, txHash string) (bool, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.deposits[txHash], nil
-}
 
 // Tests
 
@@ -385,6 +181,751 @@ func TestLedger_GetHistory(t *testing.T) {
 	if len(entries) != 3 {
 		t.Errorf("Expected 3 entries, got %d", len(entries))
 	}
+}
+
+func TestLedger_HoldConfirmRelease(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	agent := "0x1234567890123456789012345678901234567890"
+
+	// Setup: deposit $10
+	l.Deposit(ctx, agent, "10.00", "0xtx1")
+
+	// Hold $3 — should move from available to pending
+	err := l.Hold(ctx, agent, "3.00", "sk_hold1")
+	if err != nil {
+		t.Fatalf("Hold failed: %v", err)
+	}
+	bal, _ := l.GetBalance(ctx, agent)
+	if bal.Available != "7.000000" {
+		t.Errorf("After hold: expected available 7.000000, got %s", bal.Available)
+	}
+	if bal.Pending != "3.000000" {
+		t.Errorf("After hold: expected pending 3.000000, got %s", bal.Pending)
+	}
+
+	// Confirm hold — should move from pending to total_out
+	err = l.ConfirmHold(ctx, agent, "3.00", "sk_hold1")
+	if err != nil {
+		t.Fatalf("ConfirmHold failed: %v", err)
+	}
+	bal, _ = l.GetBalance(ctx, agent)
+	if bal.Available != "7.000000" {
+		t.Errorf("After confirm: expected available 7.000000, got %s", bal.Available)
+	}
+	if bal.Pending != "0.000000" {
+		t.Errorf("After confirm: expected pending 0.000000, got %s", bal.Pending)
+	}
+	if bal.TotalOut != "3.000000" {
+		t.Errorf("After confirm: expected total_out 3.000000, got %s", bal.TotalOut)
+	}
+
+	// Hold $5 then release — should return to available
+	l.Hold(ctx, agent, "5.00", "sk_hold2")
+	bal, _ = l.GetBalance(ctx, agent)
+	if bal.Available != "2.000000" {
+		t.Errorf("After second hold: expected available 2.000000, got %s", bal.Available)
+	}
+
+	err = l.ReleaseHold(ctx, agent, "5.00", "sk_hold2")
+	if err != nil {
+		t.Fatalf("ReleaseHold failed: %v", err)
+	}
+	bal, _ = l.GetBalance(ctx, agent)
+	if bal.Available != "7.000000" {
+		t.Errorf("After release: expected available 7.000000, got %s", bal.Available)
+	}
+	if bal.Pending != "0.000000" {
+		t.Errorf("After release: expected pending 0.000000, got %s", bal.Pending)
+	}
+}
+
+func TestLedger_HoldInsufficientBalance(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	agent := "0x1234567890123456789012345678901234567890"
+
+	l.Deposit(ctx, agent, "5.00", "0xtx1")
+
+	// Try to hold more than available
+	err := l.Hold(ctx, agent, "10.00", "sk_big")
+	if err == nil {
+		t.Error("Expected error when holding more than available balance")
+	}
+
+	// Balance should be unchanged
+	bal, _ := l.GetBalance(ctx, agent)
+	if bal.Available != "5.000000" {
+		t.Errorf("Balance should be unchanged, got %s", bal.Available)
+	}
+}
+
+func TestLedger_EscrowLockAndRelease(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	buyer := "0x1111111111111111111111111111111111111111"
+	seller := "0x2222222222222222222222222222222222222222"
+
+	// Setup: deposit $10 to buyer
+	l.Deposit(ctx, buyer, "10.00", "0xtx_buyer")
+
+	// Lock $3 in escrow
+	err := l.EscrowLock(ctx, buyer, "3.00", "esc_1")
+	if err != nil {
+		t.Fatalf("EscrowLock failed: %v", err)
+	}
+	bal, _ := l.GetBalance(ctx, buyer)
+	if bal.Available != "7.000000" {
+		t.Errorf("After escrow lock: expected available 7.000000, got %s", bal.Available)
+	}
+	if bal.Escrowed != "3.000000" {
+		t.Errorf("After escrow lock: expected escrowed 3.000000, got %s", bal.Escrowed)
+	}
+
+	// Release escrow to seller
+	err = l.ReleaseEscrow(ctx, buyer, seller, "3.00", "esc_1")
+	if err != nil {
+		t.Fatalf("ReleaseEscrow failed: %v", err)
+	}
+
+	buyerBal, _ := l.GetBalance(ctx, buyer)
+	if buyerBal.Available != "7.000000" {
+		t.Errorf("Buyer after release: expected available 7.000000, got %s", buyerBal.Available)
+	}
+	if buyerBal.Escrowed != "0.000000" {
+		t.Errorf("Buyer after release: expected escrowed 0.000000, got %s", buyerBal.Escrowed)
+	}
+	if buyerBal.TotalOut != "3.000000" {
+		t.Errorf("Buyer after release: expected totalOut 3.000000, got %s", buyerBal.TotalOut)
+	}
+
+	sellerBal, _ := l.GetBalance(ctx, seller)
+	if sellerBal.Available != "3.000000" {
+		t.Errorf("Seller after release: expected available 3.000000, got %s", sellerBal.Available)
+	}
+}
+
+func TestLedger_EscrowLockAndRefund(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	buyer := "0x1111111111111111111111111111111111111111"
+
+	// Setup: deposit $10
+	l.Deposit(ctx, buyer, "10.00", "0xtx1")
+
+	// Lock $5 in escrow
+	err := l.EscrowLock(ctx, buyer, "5.00", "esc_2")
+	if err != nil {
+		t.Fatalf("EscrowLock failed: %v", err)
+	}
+
+	// Refund (dispute path)
+	err = l.RefundEscrow(ctx, buyer, "5.00", "esc_2")
+	if err != nil {
+		t.Fatalf("RefundEscrow failed: %v", err)
+	}
+
+	bal, _ := l.GetBalance(ctx, buyer)
+	if bal.Available != "10.000000" {
+		t.Errorf("After refund: expected available 10.000000, got %s", bal.Available)
+	}
+	if bal.Escrowed != "0.000000" {
+		t.Errorf("After refund: expected escrowed 0.000000, got %s", bal.Escrowed)
+	}
+}
+
+func TestLedger_EscrowInsufficientBalance(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	agent := "0x1234567890123456789012345678901234567890"
+
+	l.Deposit(ctx, agent, "5.00", "0xtx1")
+
+	// Try to lock more than available
+	err := l.EscrowLock(ctx, agent, "10.00", "esc_big")
+	if err == nil {
+		t.Error("Expected error when escrowing more than available balance")
+	}
+
+	// Balance should be unchanged
+	bal, _ := l.GetBalance(ctx, agent)
+	if bal.Available != "5.000000" {
+		t.Errorf("Balance should be unchanged, got %s", bal.Available)
+	}
+	if bal.Escrowed != "0.000000" && bal.Escrowed != "0" {
+		t.Errorf("Escrowed should be 0, got %s", bal.Escrowed)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow edge cases: fund conservation
+// ---------------------------------------------------------------------------
+
+func TestLedger_EscrowFundConservation(t *testing.T) {
+	// Verify no money is created or destroyed in the escrow cycle.
+	// totalIn - totalOut = available + pending + escrowed (for buyer)
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	buyer := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	seller := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	// Deposit $20 to buyer
+	l.Deposit(ctx, buyer, "20.00", "0xtx1")
+
+	// Lock $7 in escrow
+	l.EscrowLock(ctx, buyer, "7.00", "esc1")
+
+	// Verify fund conservation: 20 = 13 + 0 + 7
+	bal, _ := l.GetBalance(ctx, buyer)
+	assertFundConservation(t, bal, "after escrow lock")
+
+	// Release $7 from escrow to seller
+	l.ReleaseEscrow(ctx, buyer, seller, "7.00", "esc1")
+
+	// Buyer: totalIn=20, totalOut=7, available=13, pending=0, escrowed=0 → 20-7=13 ✓
+	bal, _ = l.GetBalance(ctx, buyer)
+	assertFundConservation(t, bal, "buyer after release")
+
+	if bal.Available != "13.000000" {
+		t.Errorf("Buyer available after release: expected 13.000000, got %s", bal.Available)
+	}
+
+	// Seller: totalIn=7, totalOut=0, available=7, pending=0, escrowed=0 → 7-0=7 ✓
+	sellerBal, _ := l.GetBalance(ctx, seller)
+	assertFundConservation(t, sellerBal, "seller after release")
+
+	if sellerBal.Available != "7.000000" {
+		t.Errorf("Seller available: expected 7.000000, got %s", sellerBal.Available)
+	}
+}
+
+func TestLedger_EscrowRefundFundConservation(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	buyer := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	l.Deposit(ctx, buyer, "15.00", "0xtx1")
+
+	// Lock, then refund
+	l.EscrowLock(ctx, buyer, "6.00", "esc1")
+	l.RefundEscrow(ctx, buyer, "6.00", "esc1")
+
+	// Should be back to full amount
+	bal, _ := l.GetBalance(ctx, buyer)
+	assertFundConservation(t, bal, "after lock+refund")
+
+	if bal.Available != "15.000000" {
+		t.Errorf("Available should be back to 15.000000 after refund, got %s", bal.Available)
+	}
+	if bal.Escrowed != "0.000000" {
+		t.Errorf("Escrowed should be 0.000000 after refund, got %s", bal.Escrowed)
+	}
+}
+
+func TestLedger_EscrowAndHoldCoexistence(t *testing.T) {
+	// Verify that escrow and hold (two-phase on-chain) don't interfere
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	agent := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	l.Deposit(ctx, agent, "20.00", "0xtx1")
+
+	// Hold $5 for an on-chain transfer
+	l.Hold(ctx, agent, "5.00", "hold1")
+
+	// Lock $3 in escrow
+	l.EscrowLock(ctx, agent, "3.00", "esc1")
+
+	// Should have: available=12, pending=5, escrowed=3
+	bal, _ := l.GetBalance(ctx, agent)
+	if bal.Available != "12.000000" {
+		t.Errorf("Expected available 12.000000, got %s", bal.Available)
+	}
+	if bal.Pending != "5.000000" {
+		t.Errorf("Expected pending 5.000000, got %s", bal.Pending)
+	}
+	if bal.Escrowed != "3.000000" {
+		t.Errorf("Expected escrowed 3.000000, got %s", bal.Escrowed)
+	}
+
+	// Confirm the hold (on-chain transfer done)
+	l.ConfirmHold(ctx, agent, "5.00", "hold1")
+
+	// available=12, pending=0, escrowed=3, totalOut=5
+	bal, _ = l.GetBalance(ctx, agent)
+	if bal.Available != "12.000000" {
+		t.Errorf("Expected available 12.000000 after confirm hold, got %s", bal.Available)
+	}
+	if bal.Pending != "0.000000" {
+		t.Errorf("Expected pending 0.000000 after confirm hold, got %s", bal.Pending)
+	}
+	if bal.Escrowed != "3.000000" {
+		t.Errorf("Expected escrowed 3.000000 (unchanged), got %s", bal.Escrowed)
+	}
+	if bal.TotalOut != "5.000000" {
+		t.Errorf("Expected totalOut 5.000000, got %s", bal.TotalOut)
+	}
+
+	// Refund the escrow
+	l.RefundEscrow(ctx, agent, "3.00", "esc1")
+
+	// available=15, pending=0, escrowed=0, totalOut=5, totalIn=20
+	bal, _ = l.GetBalance(ctx, agent)
+	if bal.Available != "15.000000" {
+		t.Errorf("Expected available 15.000000 after escrow refund, got %s", bal.Available)
+	}
+	if bal.Escrowed != "0.000000" {
+		t.Errorf("Expected escrowed 0.000000 after refund, got %s", bal.Escrowed)
+	}
+}
+
+func TestLedger_EscrowMultiplePartialOperations(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	buyer := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	seller1 := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	seller2 := "0xcccccccccccccccccccccccccccccccccccccccc"
+
+	l.Deposit(ctx, buyer, "10.00", "0xtx1")
+
+	// Lock $3 + $4 in two separate escrows
+	l.EscrowLock(ctx, buyer, "3.00", "esc1")
+	l.EscrowLock(ctx, buyer, "4.00", "esc2")
+
+	bal, _ := l.GetBalance(ctx, buyer)
+	if bal.Available != "3.000000" {
+		t.Errorf("Expected available 3.000000 after two locks, got %s", bal.Available)
+	}
+	if bal.Escrowed != "7.000000" {
+		t.Errorf("Expected escrowed 7.000000, got %s", bal.Escrowed)
+	}
+
+	// Release first escrow to seller1
+	l.ReleaseEscrow(ctx, buyer, seller1, "3.00", "esc1")
+
+	bal, _ = l.GetBalance(ctx, buyer)
+	if bal.Available != "3.000000" {
+		t.Errorf("Expected available 3.000000 after partial release, got %s", bal.Available)
+	}
+	if bal.Escrowed != "4.000000" {
+		t.Errorf("Expected escrowed 4.000000, got %s", bal.Escrowed)
+	}
+
+	// Release second escrow to seller2
+	l.ReleaseEscrow(ctx, buyer, seller2, "4.00", "esc2")
+
+	bal, _ = l.GetBalance(ctx, buyer)
+	if bal.Available != "3.000000" {
+		t.Errorf("Expected available 3.000000, got %s", bal.Available)
+	}
+	if bal.Escrowed != "0.000000" {
+		t.Errorf("Expected escrowed 0.000000, got %s", bal.Escrowed)
+	}
+	if bal.TotalOut != "7.000000" {
+		t.Errorf("Expected totalOut 7.000000, got %s", bal.TotalOut)
+	}
+	assertFundConservation(t, bal, "buyer after all releases")
+
+	// Verify sellers got their money
+	s1Bal, _ := l.GetBalance(ctx, seller1)
+	if s1Bal.Available != "3.000000" {
+		t.Errorf("Seller1 available: expected 3.000000, got %s", s1Bal.Available)
+	}
+	s2Bal, _ := l.GetBalance(ctx, seller2)
+	if s2Bal.Available != "4.000000" {
+		t.Errorf("Seller2 available: expected 4.000000, got %s", s2Bal.Available)
+	}
+}
+
+func TestLedger_EscrowRefundMoreThanEscrowed(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	agent := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	l.Deposit(ctx, agent, "10.00", "0xtx1")
+	l.EscrowLock(ctx, agent, "3.00", "esc1")
+
+	// Try to refund more than escrowed
+	err := l.RefundEscrow(ctx, agent, "5.00", "esc1")
+	if err == nil {
+		t.Error("Expected error when refunding more than escrowed")
+	}
+
+	// Balance should be unchanged
+	bal, _ := l.GetBalance(ctx, agent)
+	if bal.Available != "7.000000" {
+		t.Errorf("Available should be unchanged at 7.000000, got %s", bal.Available)
+	}
+	if bal.Escrowed != "3.000000" {
+		t.Errorf("Escrowed should be unchanged at 3.000000, got %s", bal.Escrowed)
+	}
+}
+
+func TestLedger_EscrowReleaseMoreThanEscrowed(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	buyer := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	seller := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	l.Deposit(ctx, buyer, "10.00", "0xtx1")
+	l.EscrowLock(ctx, buyer, "3.00", "esc1")
+
+	// Try to release more than escrowed
+	err := l.ReleaseEscrow(ctx, buyer, seller, "5.00", "esc1")
+	if err == nil {
+		t.Error("Expected error when releasing more than escrowed")
+	}
+
+	// Balance should be unchanged
+	bal, _ := l.GetBalance(ctx, buyer)
+	if bal.Available != "7.000000" {
+		t.Errorf("Available should be unchanged at 7.000000, got %s", bal.Available)
+	}
+	if bal.Escrowed != "3.000000" {
+		t.Errorf("Escrowed should be unchanged at 3.000000, got %s", bal.Escrowed)
+	}
+}
+
+func TestLedger_EscrowLockNonexistentAgent(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	err := l.EscrowLock(ctx, "0xghost", "1.00", "esc1")
+	if err == nil {
+		t.Error("Expected error when escrowing for nonexistent agent")
+	}
+}
+
+func TestLedger_EscrowLockInvalidAmount(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	// Zero amount
+	err := l.EscrowLock(ctx, "0xagent", "0", "esc1")
+	if err == nil {
+		t.Error("Expected error for zero escrow amount")
+	}
+
+	// Negative amount
+	err = l.EscrowLock(ctx, "0xagent", "-1.00", "esc1")
+	if err == nil {
+		t.Error("Expected error for negative escrow amount")
+	}
+}
+
+func TestLedger_EscrowLockEntireBalance(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	agent := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	l.Deposit(ctx, agent, "5.00", "0xtx1")
+
+	// Lock entire balance
+	err := l.EscrowLock(ctx, agent, "5.00", "esc1")
+	if err != nil {
+		t.Fatalf("Locking entire balance should work: %v", err)
+	}
+
+	bal, _ := l.GetBalance(ctx, agent)
+	if bal.Available != "0.000000" {
+		t.Errorf("Expected available 0.000000, got %s", bal.Available)
+	}
+	if bal.Escrowed != "5.000000" {
+		t.Errorf("Expected escrowed 5.000000, got %s", bal.Escrowed)
+	}
+
+	// Should not be able to spend or lock more
+	err = l.EscrowLock(ctx, agent, "0.01", "esc2")
+	if err == nil {
+		t.Error("Expected error when no available balance left")
+	}
+}
+
+func TestLedger_EscrowHistoryEntries(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	buyer := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	seller := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	l.Deposit(ctx, buyer, "10.00", "0xtx1")
+	l.EscrowLock(ctx, buyer, "3.00", "esc1")
+	l.ReleaseEscrow(ctx, buyer, seller, "3.00", "esc1")
+
+	entries, err := l.GetHistory(ctx, buyer, 100)
+	if err != nil {
+		t.Fatalf("GetHistory failed: %v", err)
+	}
+
+	// Should have: deposit, escrow_lock, escrow_release (3 entries, reverse order)
+	if len(entries) != 3 {
+		t.Fatalf("Expected 3 entries, got %d", len(entries))
+	}
+	// Most recent first
+	if entries[0].Type != "escrow_release" {
+		t.Errorf("Expected escrow_release entry, got %s", entries[0].Type)
+	}
+	if entries[1].Type != "escrow_lock" {
+		t.Errorf("Expected escrow_lock entry, got %s", entries[1].Type)
+	}
+	if entries[2].Type != "deposit" {
+		t.Errorf("Expected deposit entry, got %s", entries[2].Type)
+	}
+}
+
+// assertFundConservation verifies totalIn - totalOut = available + pending + escrowed
+func assertFundConservation(t *testing.T, bal *Balance, context string) {
+	t.Helper()
+	totalIn, _ := parseUSDC(bal.TotalIn)
+	totalOut, _ := parseUSDC(bal.TotalOut)
+	available, _ := parseUSDC(bal.Available)
+	pending, _ := parseUSDC(bal.Pending)
+	escrowed, _ := parseUSDC(bal.Escrowed)
+
+	// net = totalIn - totalOut
+	net := new(big.Int).Sub(totalIn, totalOut)
+	// sum = available + pending + escrowed
+	sum := new(big.Int).Add(available, pending)
+	sum.Add(sum, escrowed)
+
+	if net.Cmp(sum) != 0 {
+		t.Errorf("%s: fund conservation violated: totalIn(%s) - totalOut(%s) = %s, but available(%s) + pending(%s) + escrowed(%s) = %s",
+			context, bal.TotalIn, bal.TotalOut, formatUSDC(net),
+			bal.Available, bal.Pending, bal.Escrowed, formatUSDC(sum))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// More escrow edge cases
+// ---------------------------------------------------------------------------
+
+func TestLedger_EscrowReleaseSameSellerTwice(t *testing.T) {
+	// Verify that releasing to the same seller accumulates correctly
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	buyer := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	seller := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	l.Deposit(ctx, buyer, "10.00", "0xtx1")
+
+	l.EscrowLock(ctx, buyer, "3.00", "esc1")
+	l.EscrowLock(ctx, buyer, "2.00", "esc2")
+
+	l.ReleaseEscrow(ctx, buyer, seller, "3.00", "esc1")
+	l.ReleaseEscrow(ctx, buyer, seller, "2.00", "esc2")
+
+	sellerBal, _ := l.GetBalance(ctx, seller)
+	if sellerBal.Available != "5.000000" {
+		t.Errorf("Seller should have 5.000000 after two releases, got %s", sellerBal.Available)
+	}
+	if sellerBal.TotalIn != "5.000000" {
+		t.Errorf("Seller totalIn should be 5.000000, got %s", sellerBal.TotalIn)
+	}
+
+	buyerBal, _ := l.GetBalance(ctx, buyer)
+	if buyerBal.Available != "5.000000" {
+		t.Errorf("Buyer should have 5.000000, got %s", buyerBal.Available)
+	}
+	if buyerBal.TotalOut != "5.000000" {
+		t.Errorf("Buyer totalOut should be 5.000000, got %s", buyerBal.TotalOut)
+	}
+	assertFundConservation(t, buyerBal, "buyer after two releases")
+	assertFundConservation(t, sellerBal, "seller after two releases")
+}
+
+func TestLedger_EscrowReleaseToSelf(t *testing.T) {
+	// Edge case: buyer releases to themselves (same address)
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	agent := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	l.Deposit(ctx, agent, "10.00", "0xtx1")
+	l.EscrowLock(ctx, agent, "3.00", "esc1")
+
+	// Release to self
+	err := l.ReleaseEscrow(ctx, agent, agent, "3.00", "esc1")
+	if err != nil {
+		t.Fatalf("ReleaseEscrow to self failed: %v", err)
+	}
+
+	// escrowed should be 0, available should be original minus escrow plus release
+	// Lock: available 10->7, escrowed 0->3
+	// Release: escrowed 3->0, totalOut +=3, THEN credit self: available 7->10, totalIn +=3
+	bal, _ := l.GetBalance(ctx, agent)
+	if bal.Escrowed != "0.000000" {
+		t.Errorf("Expected escrowed 0.000000, got %s", bal.Escrowed)
+	}
+	// After release to self: totalIn=10+3=13, totalOut=3, available=10
+	if bal.Available != "10.000000" {
+		t.Errorf("Expected available 10.000000 after self-release, got %s", bal.Available)
+	}
+	assertFundConservation(t, bal, "after self-release")
+}
+
+func TestLedger_RefundEscrowNonexistentAgent(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	err := l.RefundEscrow(ctx, "0xghost", "1.00", "esc1")
+	if err == nil {
+		t.Error("Expected error when refunding nonexistent agent")
+	}
+}
+
+func TestLedger_ReleaseEscrowNonexistentBuyer(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	err := l.ReleaseEscrow(ctx, "0xghost_buyer", "0xghost_seller", "1.00", "esc1")
+	if err == nil {
+		t.Error("Expected error when releasing escrow for nonexistent buyer")
+	}
+}
+
+func TestLedger_EscrowLockCaseInsensitive(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	// Deposit with lowercase
+	l.Deposit(ctx, "0xAABBCCDDEEFF00112233445566778899aabbccdd", "10.00", "0xtx1")
+
+	// Lock with same address (Ledger lowercases it)
+	err := l.EscrowLock(ctx, "0xAABBCCDDEEFF00112233445566778899AABBCCDD", "3.00", "esc1")
+	if err != nil {
+		t.Fatalf("EscrowLock with mixed case should work: %v", err)
+	}
+
+	bal, _ := l.GetBalance(ctx, "0xaabbccddeeff00112233445566778899aabbccdd")
+	if bal.Escrowed != "3.000000" {
+		t.Errorf("Expected escrowed 3.000000, got %s", bal.Escrowed)
+	}
+}
+
+func TestLedger_EscrowGetBalanceShowsEscrowed(t *testing.T) {
+	// Verify GetBalance returns the escrowed field properly
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	agent := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	// Before any deposit
+	bal, err := l.GetBalance(ctx, agent)
+	if err != nil {
+		t.Fatalf("GetBalance failed: %v", err)
+	}
+	if bal.Escrowed != "0" {
+		t.Errorf("Expected escrowed 0 for new agent, got %s", bal.Escrowed)
+	}
+
+	// After deposit + escrow lock
+	l.Deposit(ctx, agent, "10.00", "0xtx1")
+	l.EscrowLock(ctx, agent, "4.00", "esc1")
+
+	bal, _ = l.GetBalance(ctx, agent)
+	if bal.Escrowed != "4.000000" {
+		t.Errorf("Expected escrowed 4.000000, got %s", bal.Escrowed)
+	}
+	if bal.Available != "6.000000" {
+		t.Errorf("Expected available 6.000000, got %s", bal.Available)
+	}
+}
+
+func TestLedger_EscrowRefundHistory(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	agent := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	l.Deposit(ctx, agent, "10.00", "0xtx1")
+	l.EscrowLock(ctx, agent, "3.00", "esc1")
+	l.RefundEscrow(ctx, agent, "3.00", "esc1")
+
+	entries, _ := l.GetHistory(ctx, agent, 100)
+	if len(entries) != 3 {
+		t.Fatalf("Expected 3 entries, got %d", len(entries))
+	}
+
+	// Most recent first
+	if entries[0].Type != "escrow_refund" {
+		t.Errorf("Expected escrow_refund, got %s", entries[0].Type)
+	}
+	if entries[1].Type != "escrow_lock" {
+		t.Errorf("Expected escrow_lock, got %s", entries[1].Type)
+	}
+}
+
+func TestLedger_EscrowAndSpendCombined(t *testing.T) {
+	// Test that escrow and regular spend work together correctly
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	agent := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	seller := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	l.Deposit(ctx, agent, "20.00", "0xtx1")
+
+	// Regular spend
+	l.Spend(ctx, agent, "5.00", "sk_1")
+
+	// Escrow lock
+	l.EscrowLock(ctx, agent, "3.00", "esc1")
+
+	// Hold (for on-chain transfer)
+	l.Hold(ctx, agent, "2.00", "hold1")
+
+	// available = 20 - 5 - 3 - 2 = 10
+	bal, _ := l.GetBalance(ctx, agent)
+	if bal.Available != "10.000000" {
+		t.Errorf("Expected available 10.000000, got %s", bal.Available)
+	}
+	if bal.Escrowed != "3.000000" {
+		t.Errorf("Expected escrowed 3.000000, got %s", bal.Escrowed)
+	}
+	if bal.Pending != "2.000000" {
+		t.Errorf("Expected pending 2.000000, got %s", bal.Pending)
+	}
+
+	// Can't escrow more than available (even though total balance > amount)
+	err := l.EscrowLock(ctx, agent, "11.00", "esc2")
+	if err == nil {
+		t.Error("Expected error when escrowing more than available")
+	}
+
+	// Release escrow
+	l.ReleaseEscrow(ctx, agent, seller, "3.00", "esc1")
+
+	// Confirm hold
+	l.ConfirmHold(ctx, agent, "2.00", "hold1")
+
+	// Final: available=10, pending=0, escrowed=0, totalOut=5+3+2=10
+	bal, _ = l.GetBalance(ctx, agent)
+	if bal.Available != "10.000000" {
+		t.Errorf("Expected available 10.000000, got %s", bal.Available)
+	}
+	if bal.TotalOut != "10.000000" {
+		t.Errorf("Expected totalOut 10.000000, got %s", bal.TotalOut)
+	}
+	assertFundConservation(t, bal, "after combined operations")
 }
 
 func TestParseUSDC(t *testing.T) {

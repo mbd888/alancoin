@@ -358,13 +358,39 @@ func (m *MemoryStore) RecordTransaction(ctx context.Context, tx *Transaction) er
 	m.transactions[tx.ID] = tx
 	m.stats.TotalTransactions++
 
-	// Update volume
+	// Update volume and agent stats
 	if tx.Status == "confirmed" {
-		currentVolume, _ := wallet.ParseUSDC(m.stats.TotalVolume)
 		txAmount, _ := wallet.ParseUSDC(tx.Amount)
+
+		// Update network volume
+		currentVolume, _ := wallet.ParseUSDC(m.stats.TotalVolume)
 		if currentVolume != nil && txAmount != nil {
 			currentVolume.Add(currentVolume, txAmount)
 			m.stats.TotalVolume = wallet.FormatUSDC(currentVolume)
+		}
+
+		// Update sender stats (TotalSent)
+		fromAddr := strings.ToLower(tx.From)
+		if fromAgent, exists := m.agents[fromAddr]; exists {
+			fromSent, _ := wallet.ParseUSDC(fromAgent.Stats.TotalSent)
+			if fromSent != nil && txAmount != nil {
+				fromSent.Add(fromSent, txAmount)
+				fromAgent.Stats.TotalSent = wallet.FormatUSDC(fromSent)
+			}
+			fromAgent.Stats.TransactionCount++
+			fromAgent.Stats.LastActive = time.Now()
+		}
+
+		// Update receiver stats (TotalReceived)
+		toAddr := strings.ToLower(tx.To)
+		if toAgent, exists := m.agents[toAddr]; exists {
+			toReceived, _ := wallet.ParseUSDC(toAgent.Stats.TotalReceived)
+			if toReceived != nil && txAmount != nil {
+				toReceived.Add(toReceived, txAmount)
+				toAgent.Stats.TotalReceived = wallet.FormatUSDC(toReceived)
+			}
+			toAgent.Stats.TransactionCount++
+			toAgent.Stats.LastActive = time.Now()
 		}
 	}
 

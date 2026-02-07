@@ -130,6 +130,22 @@ func MaxLength(field, value string, max int) func() *ValidationError {
 	}
 }
 
+// AddressParamMiddleware validates the :address URL parameter on routes that use it.
+// Apply to route groups that include :address params to reject malformed addresses early.
+func AddressParamMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		addr := c.Param("address")
+		if addr != "" && !IsValidEthAddress(addr) {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error":   "invalid_address",
+				"message": "address must be a valid Ethereum address (0x + 40 hex chars)",
+			})
+			return
+		}
+		c.Next()
+	}
+}
+
 // ValidAmount checks if a value is a valid USDC amount
 func ValidAmount(field, value string) func() *ValidationError {
 	return func() *ValidationError {

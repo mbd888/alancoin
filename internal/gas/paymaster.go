@@ -18,12 +18,14 @@ import (
 // Flow:
 // 1. Agent initiates USDC transfer
 // 2. We estimate gas cost in ETH
-// 3. Convert ETH cost to USDC (with markup)
+// 3. Convert ETH cost to USDC (with markup) using live price oracle
 // 4. Execute transfer, we pay ETH gas
 // 5. Agent is charged: transfer amount + gas fee in USDC
 type PlatformPaymaster struct {
-	client *ethclient.Client
-	config PaymasterConfig
+	client        *ethclient.Client
+	config        PaymasterConfig
+	walletAddress common.Address
+	oracle        *PriceOracle
 
 	// Rate limiting
 	mu           sync.Mutex
@@ -32,16 +34,27 @@ type PlatformPaymaster struct {
 }
 
 // NewPlatformPaymaster creates a new platform paymaster
-func NewPlatformPaymaster(rpcURL string, cfg PaymasterConfig) (*PlatformPaymaster, error) {
+// walletAddress is the platform wallet that sponsors gas
+func NewPlatformPaymaster(rpcURL string, walletAddress string, cfg PaymasterConfig) (*PlatformPaymaster, error) {
 	client, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to RPC: %w", err)
 	}
 
+	var addr common.Address
+	if walletAddress != "" {
+		addr = common.HexToAddress(walletAddress)
+	}
+
+	// Initialize price oracle: 60s cache, falls back to config value
+	oracle := NewPriceOracle(cfg.ETHPriceUSD, 60*time.Second)
+
 	return &PlatformPaymaster{
-		client:     client,
-		config:     cfg,
-		dailySpent: big.NewInt(0),
+		client:        client,
+		config:        cfg,
+		walletAddress: addr,
+		oracle:        oracle,
+		dailySpent:    big.NewInt(0),
 	}, nil
 }
 
@@ -81,8 +94,9 @@ func (p *PlatformPaymaster) EstimateGasFee(ctx context.Context, req *EstimateReq
 	gasCostWei := new(big.Int).Mul(gasPrice, big.NewInt(int64(gasLimit)))
 	gasCostETH := weiToETH(gasCostWei)
 
-	// Convert to USDC with markup
-	gasCostUSD := gasCostETH * p.config.ETHPriceUSD
+	// Convert to USDC with markup using live oracle price
+	ethPrice := p.oracle.GetETHPrice(ctx)
+	gasCostUSD := gasCostETH * ethPrice
 	gasCostUSD *= (1 + p.config.GasMarkupPct) // Add markup
 
 	// Apply min/max
@@ -106,7 +120,7 @@ func (p *PlatformPaymaster) EstimateGasFee(ctx context.Context, req *EstimateReq
 		GasPriceWei:  gasPrice.String(),
 		GasCostETH:   fmt.Sprintf("%.8f", gasCostETH),
 		GasCostUSDC:  formatUSDC(gasCostUSDCBig),
-		ETHPriceUSD:  fmt.Sprintf("%.2f", p.config.ETHPriceUSD),
+		ETHPriceUSD:  fmt.Sprintf("%.2f", ethPrice),
 		TotalWithGas: formatUSDC(totalWithGas),
 		ValidUntil:   time.Now().Add(30 * time.Second), // Estimate valid for 30s
 	}, nil
@@ -155,9 +169,10 @@ func (p *PlatformPaymaster) SponsorTransaction(ctx context.Context, req *Sponsor
 
 // GetBalance returns the paymaster's ETH balance
 func (p *PlatformPaymaster) GetBalance(ctx context.Context) (*big.Int, error) {
-	// This would query the platform wallet's ETH balance
-	// For now, return a placeholder
-	return big.NewInt(0), fmt.Errorf("not implemented - requires wallet integration")
+	if p.walletAddress == (common.Address{}) {
+		return big.NewInt(0), fmt.Errorf("wallet address not configured")
+	}
+	return p.client.BalanceAt(ctx, p.walletAddress, nil)
 }
 
 // checkDailyLimit checks if we've exceeded daily gas spending

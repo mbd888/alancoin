@@ -1,9 +1,11 @@
 package registry
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,14 +13,27 @@ import (
 	"github.com/mbd888/alancoin/internal/logging"
 )
 
+// ReputationProvider supplies reputation scores for agents.
+// This decouples the registry from the reputation package.
+type ReputationProvider interface {
+	GetScore(ctx context.Context, address string) (score float64, tier string, err error)
+}
+
 // Handler provides HTTP handlers for the registry API
 type Handler struct {
-	store Store
+	store      Store
+	verifier   TxVerifier         // optional on-chain verifier
+	reputation ReputationProvider // optional reputation enrichment
 }
 
 // NewHandler creates a new registry handler
 func NewHandler(store Store) *Handler {
 	return &Handler{store: store}
+}
+
+// SetReputation attaches a reputation provider for discovery enrichment
+func (h *Handler) SetReputation(r ReputationProvider) {
+	h.reputation = r
 }
 
 // RegisterRoutes sets up the registry routes
@@ -64,8 +79,18 @@ type RecordTransactionRequest struct {
 	ServiceID string `json:"serviceId,omitempty"`
 }
 
+// TxVerifier verifies on-chain transaction receipts
+type TxVerifier interface {
+	VerifyPayment(ctx context.Context, from string, minAmount string, txHash string) (bool, error)
+}
+
+// SetVerifier attaches a transaction verifier to the handler
+func (h *Handler) SetVerifier(v TxVerifier) {
+	h.verifier = v
+}
+
 // RecordTransaction handles POST /transactions
-// Records a transaction in the registry (for demo/testing)
+// Records a transaction in the registry after optional on-chain verification.
 func (h *Handler) RecordTransaction(c *gin.Context) {
 	ctx := c.Request.Context()
 	logger := logging.L(ctx)
@@ -79,13 +104,30 @@ func (h *Handler) RecordTransaction(c *gin.Context) {
 		return
 	}
 
+	status := "pending"
+
+	// Verify on-chain if verifier is available
+	if h.verifier != nil {
+		verified, err := h.verifier.VerifyPayment(ctx, req.From, req.Amount, req.TxHash)
+		if err != nil {
+			logger.Warn("on-chain verification failed, recording as pending",
+				"tx_hash", req.TxHash,
+				"error", err,
+			)
+		} else if verified {
+			status = "confirmed"
+		} else {
+			status = "failed"
+		}
+	}
+
 	tx := &Transaction{
 		TxHash:    req.TxHash,
 		From:      req.From,
 		To:        req.To,
 		Amount:    req.Amount,
 		ServiceID: req.ServiceID,
-		Status:    "confirmed",
+		Status:    status,
 	}
 
 	if err := h.store.RecordTransaction(ctx, tx); err != nil {
@@ -102,6 +144,7 @@ func (h *Handler) RecordTransaction(c *gin.Context) {
 		"from", tx.From,
 		"to", tx.To,
 		"amount", tx.Amount,
+		"status", tx.Status,
 	)
 
 	c.JSON(http.StatusCreated, tx)
@@ -411,6 +454,13 @@ func (h *Handler) DiscoverServices(c *gin.Context) {
 		return
 	}
 
+	// Enrich with reputation data
+	h.enrichWithReputation(ctx, services)
+
+	// Sort by requested strategy
+	sortBy := c.DefaultQuery("sortBy", "price")
+	h.sortServices(services, sortBy)
+
 	c.JSON(http.StatusOK, gin.H{
 		"services": services,
 		"count":    len(services),
@@ -418,8 +468,68 @@ func (h *Handler) DiscoverServices(c *gin.Context) {
 			"type":     query.ServiceType,
 			"minPrice": query.MinPrice,
 			"maxPrice": query.MaxPrice,
+			"sortBy":   sortBy,
 		},
 	})
+}
+
+// enrichWithReputation adds reputation data to service listings.
+// It batches lookups by unique agent address to avoid redundant calls.
+func (h *Handler) enrichWithReputation(ctx context.Context, services []ServiceListing) {
+	if h.reputation == nil {
+		return
+	}
+
+	// Cache scores by address to avoid duplicate lookups
+	type repData struct {
+		score float64
+		tier  string
+	}
+	cache := make(map[string]*repData)
+
+	for i := range services {
+		addr := services[i].AgentAddress
+		if _, ok := cache[addr]; !ok {
+			score, tier, err := h.reputation.GetScore(ctx, addr)
+			if err != nil {
+				cache[addr] = &repData{score: 0, tier: "new"}
+			} else {
+				cache[addr] = &repData{score: score, tier: tier}
+			}
+		}
+		rd := cache[addr]
+		services[i].ReputationScore = rd.score
+		services[i].ReputationTier = rd.tier
+
+		// Pull agent stats for success rate and tx count
+		if agent, err := h.store.GetAgent(ctx, addr); err == nil {
+			services[i].SuccessRate = agent.Stats.SuccessRate
+			services[i].TxCount = agent.Stats.TransactionCount
+		}
+	}
+}
+
+// sortServices sorts listings by the requested strategy.
+func (h *Handler) sortServices(services []ServiceListing, sortBy string) {
+	switch sortBy {
+	case "reputation":
+		sort.Slice(services, func(i, j int) bool {
+			return services[i].ReputationScore > services[j].ReputationScore
+		})
+	case "value":
+		// Compute value score: reputation / price (higher = better deal)
+		for i := range services {
+			priceF := 0.01 // floor to avoid division by zero
+			if p, err := fmt.Sscanf(services[i].Price, "%f", &priceF); p == 1 && err == nil && priceF > 0 {
+				// priceF already set
+			}
+			services[i].ValueScore = services[i].ReputationScore / priceF
+		}
+		sort.Slice(services, func(i, j int) bool {
+			return services[i].ValueScore > services[j].ValueScore
+		})
+	default: // "price" — already sorted by price from store
+	}
 }
 
 // -----------------------------------------------------------------------------

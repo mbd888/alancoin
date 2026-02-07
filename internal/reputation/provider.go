@@ -58,6 +58,18 @@ func (p *RegistryProvider) GetAllAgentMetrics(ctx context.Context) (map[string]*
 	return result, nil
 }
 
+// GetScore returns the reputation score and tier for a single agent.
+// Implements registry.ReputationProvider.
+func (p *RegistryProvider) GetScore(ctx context.Context, address string) (float64, string, error) {
+	metrics, err := p.GetAgentMetrics(ctx, address)
+	if err != nil {
+		return 0, string(TierNew), err
+	}
+	calc := NewCalculator()
+	score := calc.Calculate(address, *metrics)
+	return score.Score, string(score.Tier), nil
+}
+
 func (p *RegistryProvider) calculateMetrics(agent *registry.Agent, txns []*registry.Transaction) *Metrics {
 	m := &Metrics{
 		FirstSeen: agent.CreatedAt,

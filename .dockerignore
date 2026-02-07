@@ -1,0 +1,13 @@
+bin/
+coverage/
+.env
+.git/
+*.md
+examples/
+experiments/
+sdks/
+landing/
+scripts/
+*.pyc
+__pycache__/
+node_modules/

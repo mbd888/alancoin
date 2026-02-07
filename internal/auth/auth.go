@@ -115,10 +115,11 @@ func (m *Manager) ValidateKey(ctx context.Context, rawKey string) (*APIKey, erro
 		return nil, ErrInvalidAPIKey
 	}
 
-	// Update last used (fire and forget)
+	// Update last used (fire and forget) — copy to avoid racing with caller
 	go func() {
-		key.LastUsed = time.Now()
-		m.store.Update(context.Background(), key)
+		cp := *key
+		cp.LastUsed = time.Now()
+		m.store.Update(context.Background(), &cp)
 	}()
 
 	return key, nil
@@ -176,7 +177,8 @@ func (s *MemoryStore) GetByHash(ctx context.Context, hash string) (*APIKey, erro
 	defer s.mu.RUnlock()
 	for _, k := range s.keys {
 		if k.Hash == hash {
-			return k, nil
+			cp := *k
+			return &cp, nil
 		}
 	}
 	return nil, ErrKeyNotFound
@@ -188,7 +190,8 @@ func (s *MemoryStore) GetByAgent(ctx context.Context, addr string) ([]*APIKey, e
 	var result []*APIKey
 	for _, k := range s.keys {
 		if strings.EqualFold(k.AgentAddr, addr) {
-			result = append(result, k)
+			cp := *k
+			result = append(result, &cp)
 		}
 	}
 	return result, nil

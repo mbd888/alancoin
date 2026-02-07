@@ -27,6 +27,9 @@ type Paymaster interface {
 
 	// GetBalance returns the paymaster's ETH balance (for monitoring)
 	GetBalance(ctx context.Context) (*big.Int, error)
+
+	// GetDailySpending returns today's gas spending and daily limit (in ETH)
+	GetDailySpending() (spent string, limit string)
 }
 
 // SponsorRequest is a request to sponsor a transaction
@@ -110,7 +113,7 @@ type PaymasterConfig struct {
 // DefaultConfig returns sensible defaults for Base
 func DefaultConfig() PaymasterConfig {
 	return PaymasterConfig{
-		ETHPriceUSD:   2500.0,   // Approximate - should use oracle
+		ETHPriceUSD:   2500.0,   // Fallback price — live oracle is used when available
 		GasMarkupPct:  0.2,      // 20% markup to cover volatility
 		MinGasFeeUSDC: "0.0001", // $0.0001 minimum
 		MaxGasFeeUSDC: "1.0",    // $1 maximum

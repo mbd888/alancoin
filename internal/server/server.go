@@ -24,9 +24,11 @@ import (
 	"github.com/mbd888/alancoin/internal/commentary"
 	"github.com/mbd888/alancoin/internal/config"
 	"github.com/mbd888/alancoin/internal/discovery"
+	"github.com/mbd888/alancoin/internal/escrow"
 	"github.com/mbd888/alancoin/internal/gas"
 	"github.com/mbd888/alancoin/internal/ledger"
 	"github.com/mbd888/alancoin/internal/logging"
+	"github.com/mbd888/alancoin/internal/metrics"
 	"github.com/mbd888/alancoin/internal/paywall"
 	"github.com/mbd888/alancoin/internal/predictions"
 	"github.com/mbd888/alancoin/internal/ratelimit"
@@ -59,6 +61,8 @@ type Server struct {
 	webhooks       *webhooks.Dispatcher
 	realtimeHub    *realtime.Hub
 	paymaster      gas.Paymaster
+	escrowService  *escrow.Service
+	escrowTimer    *escrow.Timer
 	db             *sql.DB // nil if using in-memory
 	router         *gin.Engine
 	httpSrv        *http.Server
@@ -164,6 +168,12 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		}
 		s.predictions = predictions.NewService(predictionsStore, &registryMetricProvider{s.registry})
 		s.logger.Info("predictions enabled")
+
+		// Escrow with in-memory store (uses same ledger)
+		escrowStore := escrow.NewMemoryStore()
+		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledger})
+		s.escrowTimer = escrow.NewTimer(s.escrowService, escrowStore, s.logger)
+		s.logger.Info("escrow enabled")
 	} else {
 		s.registry = registry.NewMemoryStore()
 		s.logger.Info("using in-memory storage (data will not persist)")
@@ -175,15 +185,22 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		// API keys with in-memory store
 		s.authMgr = auth.NewManager(auth.NewMemoryStore())
 
-		// No ledger in memory mode (demo only)
-		s.ledger = nil
+		// In-memory ledger for demo mode
+		s.ledger = ledger.New(ledger.NewMemoryStore())
+		s.logger.Info("agent balance tracking enabled (in-memory)")
 
 		// Webhooks with in-memory store
 		s.webhooks = webhooks.NewDispatcher(webhooks.NewMemoryStore())
 
-		// Commentary and predictions not enabled in memory mode
-		s.commentary = nil
-		s.predictions = nil
+		// Commentary and predictions with in-memory stores (for demo)
+		s.commentary = commentary.NewService(commentary.NewMemoryStore())
+		s.predictions = predictions.NewService(predictions.NewMemoryStore(), &registryMetricProvider{s.registry})
+
+		// Escrow with in-memory store
+		escrowStore := escrow.NewMemoryStore()
+		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledger})
+		s.escrowTimer = escrow.NewTimer(s.escrowService, escrowStore, s.logger)
+		s.logger.Info("escrow enabled (in-memory)")
 	}
 
 	// Create wallet if not injected
@@ -202,12 +219,16 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 	// Create paymaster for gas abstraction
 	paymasterCfg := gas.DefaultConfig()
-	paymaster, err := gas.NewPlatformPaymaster(cfg.RPCURL, paymasterCfg)
+	walletAddr := ""
+	if s.wallet != nil {
+		walletAddr = s.wallet.Address()
+	}
+	paymaster, err := gas.NewPlatformPaymaster(cfg.RPCURL, walletAddr, paymasterCfg)
 	if err != nil {
 		s.logger.Warn("failed to initialize paymaster, gas estimation disabled", "error", err)
 	} else {
 		s.paymaster = paymaster
-		s.logger.Info("gas abstraction enabled", "ethPrice", paymasterCfg.ETHPriceUSD)
+		s.logger.Info("gas abstraction enabled", "ethPrice", paymasterCfg.ETHPriceUSD, "wallet", walletAddr)
 	}
 
 	// Create deposit watcher (auto-credits agent balances when they deposit)
@@ -288,6 +309,9 @@ func (s *Server) setupMiddleware() {
 	limiter := ratelimit.New(ratelimit.DefaultConfig())
 	s.router.Use(limiter.Middleware())
 
+	// Prometheus metrics
+	s.router.Use(metrics.Middleware())
+
 	// Request ID
 	s.router.Use(s.requestIDMiddleware())
 
@@ -360,19 +384,21 @@ func (s *Server) loggingMiddleware() gin.HandlerFunc {
 // -----------------------------------------------------------------------------
 
 func (s *Server) setupRoutes() {
-	// Health endpoints - no middleware
+	// Health & metrics endpoints
 	s.router.GET("/health", s.healthHandler)
 	s.router.GET("/health/live", s.livenessHandler)
 	s.router.GET("/health/ready", s.readinessHandler)
+	s.router.GET("/metrics", metrics.Handler())
 
 	// PUBLIC PAGES - The "app" layer (what people browse)
-	s.router.GET("/", dashboardHandler)                  // Main dashboard (the polished view)
-	s.router.GET("/feed", feedPageHandler)               // Raw transaction feed
-	s.router.GET("/timeline", timelinePageHandler)       // Real-time timeline (the magic)
-	s.router.GET("/agents", agentsPageHandler)           // Agent directory
-	s.router.GET("/services", servicesPageHandler)       // Service marketplace
-	s.router.GET("/agent/:address", agentProfileHandler) // Individual agent profiles
-	s.router.GET("/docs", s.docsRedirectHandler)         // Redirect to GitHub/docs
+	s.router.GET("/", dashboardHandler)                                                       // Main dashboard (the polished view)
+	s.router.GET("/debug", debugPageHandler)                                                  // Debug page to diagnose issues
+	s.router.GET("/feed", feedPageHandler)                                                    // Raw transaction feed
+	s.router.GET("/timeline", timelinePageHandler)                                            // Real-time timeline (the magic)
+	s.router.GET("/agents", agentsPageHandler)                                                // Agent directory
+	s.router.GET("/services", servicesPageHandler)                                            // Service marketplace
+	s.router.GET("/agent/:address", validation.AddressParamMiddleware(), agentProfileHandler) // Individual agent profiles
+	s.router.GET("/docs", s.docsRedirectHandler)                                              // Redirect to GitHub/docs
 
 	// WebSocket for real-time streaming
 	s.router.GET("/ws", func(c *gin.Context) {
@@ -385,7 +411,18 @@ func (s *Server) setupRoutes() {
 
 	// V1 API group
 	v1 := s.router.Group("/v1")
+	// Validate :address URL params on all v1 routes (no-op when param absent)
+	v1.Use(validation.AddressParamMiddleware())
 	registryHandler := registry.NewHandler(s.registry)
+
+	// Wire reputation into discovery so agents see trust scores when searching
+	reputationProvider := reputation.NewRegistryProvider(s.registry)
+	registryHandler.SetReputation(reputationProvider)
+
+	// Wire on-chain transaction verifier so POST /transactions checks receipts
+	if s.wallet != nil {
+		registryHandler.SetVerifier(&walletVerifierAdapter{s.wallet})
+	}
 
 	// PUBLIC ROUTES (no auth required)
 	// These are the discovery/read endpoints
@@ -395,7 +432,9 @@ func (s *Server) setupRoutes() {
 	v1.GET("/services", registryHandler.DiscoverServices)
 	v1.GET("/agents/:address/transactions", registryHandler.ListTransactions)
 	v1.GET("/network/stats", registryHandler.GetNetworkStats)
+	v1.GET("/network/stats/enhanced", s.enhancedStatsHandler) // Demo-friendly extended stats
 	v1.GET("/feed", registryHandler.GetPublicFeed)
+	v1.POST("/transactions", registryHandler.RecordTransaction) // For demo - record transactions
 
 	// AI-powered natural language search
 	v1.GET("/search", s.naturalLanguageSearch)
@@ -496,7 +535,7 @@ func (s *Server) setupRoutes() {
 	}
 
 	// Reputation routes (the network moat - agents build reputation over time)
-	reputationProvider := reputation.NewRegistryProvider(s.registry)
+	// reputationProvider is already created above for discovery enrichment
 	reputationHandler := reputation.NewHandler(reputationProvider)
 	reputationHandler.RegisterRoutes(v1)
 
@@ -536,6 +575,19 @@ func (s *Server) setupRoutes() {
 		protectedCommentary := v1.Group("")
 		protectedCommentary.Use(auth.Middleware(s.authMgr))
 		commentaryHandler.RegisterProtectedRoutes(protectedCommentary)
+	}
+
+	// Escrow routes (buyer protection for service payments)
+	if s.escrowService != nil {
+		escrowHandler := escrow.NewHandler(s.escrowService)
+
+		// Public routes - anyone can read
+		escrowHandler.RegisterRoutes(v1)
+
+		// Protected routes - only authenticated agents can create/confirm/dispute
+		protectedEscrow := v1.Group("")
+		protectedEscrow.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		escrowHandler.RegisterProtectedRoutes(protectedEscrow)
 	}
 
 	// Predictions routes (verifiable predictions with reputation stakes)
@@ -599,11 +651,13 @@ func (s *Server) setupRoutes() {
 // recordPayment records a payment in the registry (builds the data moat)
 func (s *Server) recordPayment(proof *paywall.PaymentProof) {
 	ctx := context.Background()
+
+	// Paywall already verified the payment on-chain before calling this callback
 	tx := &registry.Transaction{
 		TxHash: proof.TxHash,
 		From:   proof.From,
 		To:     s.wallet.Address(),
-		Status: "confirmed",
+		Status: "verified",
 	}
 	if err := s.registry.RecordTransaction(ctx, tx); err != nil {
 		s.logger.Error("failed to record transaction", "error", err)
@@ -655,6 +709,19 @@ func (s *Server) registerAgentWithAPIKey(c *gin.Context) {
 		})
 		return
 	}
+
+	// Validate address format
+	if !validation.IsValidEthAddress(req.Address) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_address",
+			"message": "address must be a valid Ethereum address (0x + 40 hex chars)",
+		})
+		return
+	}
+
+	// Sanitize string fields
+	req.Name = validation.SanitizeString(req.Name, 200)
+	req.Description = validation.SanitizeString(req.Description, validation.MaxStringLength)
 
 	// Create agent
 	agent := &registry.Agent{
@@ -871,6 +938,65 @@ func (s *Server) premiumHandler(c *gin.Context) {
 	})
 }
 
+// enhancedStatsHandler returns extended network stats for demos
+// Aggregates data from multiple sources: registry, session keys, commentary, gas
+func (s *Server) enhancedStatsHandler(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	// Get base stats from registry
+	baseStats, err := s.registry.GetNetworkStats(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Failed to get network stats",
+		})
+		return
+	}
+
+	// Build enhanced response
+	enhanced := gin.H{
+		"totalAgents":       baseStats.TotalAgents,
+		"totalServices":     baseStats.TotalServices,
+		"totalTransactions": baseStats.TotalTransactions,
+		"totalVolume":       baseStats.TotalVolume,
+		"updatedAt":         baseStats.UpdatedAt,
+	}
+
+	// Add session key stats (the differentiator!)
+	if s.sessionMgr != nil {
+		activeKeys, err := s.sessionMgr.CountActive(ctx)
+		if err == nil {
+			enhanced["activeSessionKeys"] = activeKeys
+		}
+	}
+
+	// Add gas sponsorship stats
+	if s.paymaster != nil {
+		spent, limit := s.paymaster.GetDailySpending()
+		enhanced["gasSponsoredToday"] = spent
+		enhanced["gasDailyLimit"] = limit
+
+		// Get paymaster balance
+		balance, err := s.paymaster.GetBalance(ctx)
+		if err == nil {
+			// Format as ETH
+			balanceETH := new(big.Float).SetInt(balance)
+			balanceETH.Quo(balanceETH, big.NewFloat(1e18))
+			f, _ := balanceETH.Float64()
+			enhanced["paymasterBalance"] = fmt.Sprintf("%.4f ETH", f)
+		}
+	}
+
+	// Add commentary stats
+	if s.commentary != nil {
+		// Count verbal agents and comments (if store exposes this)
+		// For now, just indicate commentary is enabled
+		enhanced["commentaryEnabled"] = true
+	}
+
+	c.JSON(http.StatusOK, enhanced)
+}
+
 // -----------------------------------------------------------------------------
 // Lifecycle
 // -----------------------------------------------------------------------------
@@ -912,6 +1038,11 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.realtimeHub.Run(ctx)
 	}
 
+	// Start escrow auto-release timer
+	if s.escrowTimer != nil {
+		go s.escrowTimer.Start(ctx)
+	}
+
 	// Mark as ready after brief delay for startup
 	go func() {
 		time.Sleep(100 * time.Millisecond)
@@ -949,6 +1080,12 @@ func (s *Server) Shutdown() error {
 	if err := s.httpSrv.Shutdown(ctx); err != nil {
 		s.logger.Error("shutdown error", "error", err)
 		return err
+	}
+
+	// Stop escrow timer
+	if s.escrowTimer != nil {
+		s.escrowTimer.Stop()
+		s.logger.Info("escrow timer stopped")
 	}
 
 	// Stop deposit watcher
@@ -1018,9 +1155,18 @@ func (a *registryAdapter) RecordTransaction(ctx context.Context, txHash, from, t
 		To:        to,
 		Amount:    amount,
 		ServiceID: serviceID,
-		Status:    "confirmed",
+		Status:    "pending", // Recorded as pending; confirmed by deposit watcher or verification
 	}
 	return a.r.RecordTransaction(ctx, tx)
+}
+
+// walletVerifierAdapter adapts wallet.WalletService to registry.TxVerifier
+type walletVerifierAdapter struct {
+	w wallet.WalletService
+}
+
+func (a *walletVerifierAdapter) VerifyPayment(ctx context.Context, from string, minAmount string, txHash string) (bool, error) {
+	return a.w.VerifyPayment(ctx, from, minAmount, txHash)
 }
 
 // ledgerAdapter adapts ledger.Ledger to sessionkeys.BalanceService
@@ -1038,6 +1184,35 @@ func (a *ledgerAdapter) Spend(ctx context.Context, agentAddr, amount, reference 
 
 func (a *ledgerAdapter) Refund(ctx context.Context, agentAddr, amount, reference string) error {
 	return a.l.Refund(ctx, agentAddr, amount, reference)
+}
+
+func (a *ledgerAdapter) Hold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.Hold(ctx, agentAddr, amount, reference)
+}
+
+func (a *ledgerAdapter) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.ConfirmHold(ctx, agentAddr, amount, reference)
+}
+
+func (a *ledgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
+}
+
+// escrowLedgerAdapter adapts ledger.Ledger to escrow.LedgerService
+type escrowLedgerAdapter struct {
+	l *ledger.Ledger
+}
+
+func (a *escrowLedgerAdapter) EscrowLock(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.EscrowLock(ctx, agentAddr, amount, reference)
+}
+
+func (a *escrowLedgerAdapter) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error {
+	return a.l.ReleaseEscrow(ctx, buyerAddr, sellerAddr, amount, reference)
+}
+
+func (a *escrowLedgerAdapter) RefundEscrow(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.RefundEscrow(ctx, agentAddr, amount, reference)
 }
 
 // registryChecker implements watcher.AgentChecker

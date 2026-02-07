@@ -178,12 +178,16 @@ db-setup: ## Set up local PostgreSQL database
 	@echo "$(GREEN)Setting up database...$(NC)"
 	@./scripts/setup-db.sh
 
-# db-migrate: ## Run database migrations
-# 	@echo "$(GREEN)Running migrations...$(NC)"
-# 	go run ./cmd/migrate/main.go up
+db-migrate: ## Run database migrations (requires DATABASE_URL)
+	@echo "$(GREEN)Running migrations...$(NC)"
+	go run ./cmd/migrate up
 
-# db-rollback: ## Rollback last migration
-# 	go run ./cmd/migrate/main.go down
+db-rollback: ## Rollback last migration
+	@echo "$(YELLOW)Rolling back last migration...$(NC)"
+	go run ./cmd/migrate down
+
+db-migrate-status: ## Show migration status
+	go run ./cmd/migrate status
 
 ##@ SDK
 
@@ -193,6 +197,25 @@ sdk-test: ## Run Python SDK tests
 
 sdk-install: ## Install Python SDK locally
 	cd sdks/python && pip install -e .
+
+##@ Demo
+
+demo: ## One-command YC demo (builds, starts server, runs simulation)
+	@./scripts/demo-launcher.sh
+
+demo-fast: ## Run demo with fast pacing
+	@./scripts/demo-launcher.sh --fast
+
+demo-slow: ## Run demo with slow pacing (easier to follow)
+	@./scripts/demo-launcher.sh --slow
+
+demo-live: ## Run demo against already-running server
+	@echo "$(GREEN)Running demo against existing server...$(NC)"
+	@python3 scripts/demo.py --speed normal
+
+demo-setup: ## Install demo dependencies
+	@echo "$(GREEN)Installing demo dependencies...$(NC)"
+	pip install requests
 
 ##@ Release
 

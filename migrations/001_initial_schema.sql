@@ -1,5 +1,5 @@
+-- +goose Up
 -- Alancoin Database Schema
--- Run with: psql -d alancoin -f schema.sql
 
 -- ============================================================================
 -- AGENTS

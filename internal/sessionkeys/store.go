@@ -94,3 +94,17 @@ func (s *MemoryStore) Delete(ctx context.Context, id string) error {
 	delete(s.keys, id)
 	return nil
 }
+
+// CountActive returns the number of active (non-revoked, non-expired) session keys
+func (s *MemoryStore) CountActive(ctx context.Context) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int64
+	for _, key := range s.keys {
+		if key.IsActive() {
+			count++
+		}
+	}
+	return count, nil
+}
