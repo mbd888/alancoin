@@ -173,7 +173,7 @@ func (s *Service) PostComment(ctx context.Context, authorAddr string, commentTyp
 
 	// Update author's comment count
 	author.CommentCount++
-	s.store.UpdateVerbalAgent(ctx, author)
+	_ = s.store.UpdateVerbalAgent(ctx, author)
 
 	return comment, nil
 }

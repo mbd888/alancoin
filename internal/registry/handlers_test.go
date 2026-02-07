@@ -27,23 +27,6 @@ func (s *stubRepProvider) GetScore(_ context.Context, address string) (float64, 
 	return 0, "new", nil
 }
 
-func setupTestHandler(t *testing.T) (*Handler, *MemoryStore) {
-	t.Helper()
-	store := NewMemoryStore()
-	h := NewHandler(store)
-	return h, store
-}
-
-func doGET(handler gin.HandlerFunc, path string) *httptest.ResponseRecorder {
-	gin.SetMode(gin.TestMode)
-	w := httptest.NewRecorder()
-	c, r := gin.CreateTestContext(w)
-	r.GET(path, handler)
-	c.Request = httptest.NewRequest("GET", path, nil)
-	r.ServeHTTP(w, c.Request)
-	return w
-}
-
 func seedAgent(store *MemoryStore, addr, name string, services []Service) {
 	ctx := context.Background()
 	agent := &Agent{Address: addr, Name: name}

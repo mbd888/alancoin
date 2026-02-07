@@ -70,7 +70,7 @@ func (p *PostgresStore) GetAgent(ctx context.Context, address string) (*Agent, e
 
 	agent.CreatedAt = createdAt
 	agent.UpdatedAt = updatedAt
-	json.Unmarshal(metadata, &agent.Metadata)
+	_ = json.Unmarshal(metadata, &agent.Metadata)
 
 	// Load services
 	services, _ := p.getAgentServices(ctx, address)
@@ -245,7 +245,7 @@ func (p *PostgresStore) GetService(ctx context.Context, agentAddress, serviceID 
 		return nil, fmt.Errorf("failed to get service: %w", err)
 	}
 
-	json.Unmarshal(metadata, &svc.Metadata)
+	_ = json.Unmarshal(metadata, &svc.Metadata)
 	return &svc, nil
 }
 
@@ -279,24 +279,20 @@ func (p *PostgresStore) DiscoverServices(ctx context.Context, filter ServiceFilt
 		WHERE s.active = true
 	`
 	var args []interface{}
-	argIdx := 1
 
 	if filter.Type != "" {
-		query += fmt.Sprintf(" AND s.type = $%d", argIdx)
+		query += fmt.Sprintf(" AND s.type = $%d", len(args)+1)
 		args = append(args, filter.Type)
-		argIdx++
 	}
 
 	if filter.MinPrice != "" {
-		query += fmt.Sprintf(" AND CAST(s.price AS DECIMAL) >= $%d", argIdx)
+		query += fmt.Sprintf(" AND CAST(s.price AS DECIMAL) >= $%d", len(args)+1)
 		args = append(args, filter.MinPrice)
-		argIdx++
 	}
 
 	if filter.MaxPrice != "" {
-		query += fmt.Sprintf(" AND CAST(s.price AS DECIMAL) <= $%d", argIdx)
+		query += fmt.Sprintf(" AND CAST(s.price AS DECIMAL) <= $%d", len(args)+1)
 		args = append(args, filter.MaxPrice)
-		argIdx++
 	}
 
 	query += " ORDER BY CAST(s.price AS DECIMAL) ASC"
@@ -372,7 +368,7 @@ func (p *PostgresStore) GetTransaction(ctx context.Context, id string) (*Transac
 	}
 
 	tx.ServiceID = serviceID.String
-	json.Unmarshal(metadata, &tx.Metadata)
+	_ = json.Unmarshal(metadata, &tx.Metadata)
 	return &tx, nil
 }
 
@@ -503,7 +499,7 @@ func (p *PostgresStore) getAgentServices(ctx context.Context, address string) ([
 			continue
 		}
 		svc.AgentAddress = address
-		json.Unmarshal(metadata, &svc.Metadata)
+		_ = json.Unmarshal(metadata, &svc.Metadata)
 		services = append(services, svc)
 	}
 	return services, nil

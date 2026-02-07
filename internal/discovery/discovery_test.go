@@ -302,13 +302,13 @@ func TestSearch_NoResults(t *testing.T) {
 	provider := &mockServiceProvider{services: testServices()}
 	e := NewEngine(provider)
 
-	results, _, err := e.Search(context.Background(), "find me a quantum computing service")
+	_, _, err := e.Search(context.Background(), "find me a quantum computing service")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
 	// "quantum" and "computing" don't match any known types, but "find" matches "search"
 	// so we might get results. Let's test a truly unknown query
-	results, _, err = e.Search(context.Background(), "xyz123 nomatches here")
+	results, _, err := e.Search(context.Background(), "xyz123 nomatches here")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}

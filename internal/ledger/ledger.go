@@ -12,7 +12,6 @@ import (
 	"errors"
 	"math/big"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -76,7 +75,6 @@ type Store interface {
 // Ledger manages agent balances
 type Ledger struct {
 	store Store
-	mu    sync.RWMutex
 }
 
 // New creates a new ledger

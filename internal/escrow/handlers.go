@@ -60,7 +60,7 @@ func (h *Handler) CreateEscrow(c *gin.Context) {
 
 	// Verify the authenticated agent is the buyer
 	callerAddr := c.GetString("authAgentAddr")
-	if strings.ToLower(callerAddr) != strings.ToLower(req.BuyerAddr) {
+	if !strings.EqualFold(callerAddr, req.BuyerAddr) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error":   "unauthorized",
 			"message": "Authenticated agent must be the buyer",

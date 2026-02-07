@@ -59,11 +59,10 @@ type Subscription struct {
 
 // Client represents a WebSocket connection
 type Client struct {
-	hub       *Hub
-	conn      *websocket.Conn
-	send      chan []byte
-	sub       Subscription
-	agentAddr string // If authenticated
+	hub  *Hub
+	conn *websocket.Conn
+	send chan []byte
+	sub  Subscription
 }
 
 // Hub manages all WebSocket connections

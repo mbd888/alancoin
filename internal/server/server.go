@@ -686,7 +686,7 @@ func (s *Server) recordPayment(proof *paywall.PaymentProof) {
 				"to":     s.wallet.Address(),
 			},
 		}
-		s.webhooks.DispatchToAgent(ctx, s.wallet.Address(), event)
+		_ = s.webhooks.DispatchToAgent(ctx, s.wallet.Address(), event)
 	}
 }
 
@@ -1396,7 +1396,7 @@ func (p *registryServiceProvider) ListAllServices(ctx context.Context) ([]discov
 
 		var priceFloat float64
 		if svc.Price != "" {
-			fmt.Sscanf(svc.Price, "%f", &priceFloat)
+			_, _ = fmt.Sscanf(svc.Price, "%f", &priceFloat)
 		}
 
 		results = append(results, discovery.SearchResult{
@@ -1473,7 +1473,7 @@ func (p *registryMetricProvider) GetAgentMetric(ctx context.Context, agentAddr, 
 		// Parse TotalReceived string to float
 		var volume float64
 		if agent.Stats.TotalReceived != "" {
-			fmt.Sscanf(agent.Stats.TotalReceived, "%f", &volume)
+			_, _ = fmt.Sscanf(agent.Stats.TotalReceived, "%f", &volume)
 		}
 		return volume, nil
 	default:
@@ -1498,7 +1498,7 @@ func (p *registryMetricProvider) GetServiceTypeMetric(ctx context.Context, servi
 		var total float64
 		for _, svc := range services {
 			var price float64
-			fmt.Sscanf(svc.Price, "%f", &price)
+			_, _ = fmt.Sscanf(svc.Price, "%f", &price)
 			total += price
 		}
 		return total / float64(len(services)), nil
@@ -1524,7 +1524,7 @@ func (p *registryMetricProvider) GetMarketMetric(ctx context.Context, metric str
 		// Parse TotalVolume string to float
 		var volume float64
 		if stats.TotalVolume != "" {
-			fmt.Sscanf(stats.TotalVolume, "%f", &volume)
+			_, _ = fmt.Sscanf(stats.TotalVolume, "%f", &volume)
 		}
 		return volume, nil
 	default:

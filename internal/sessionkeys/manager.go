@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -31,7 +30,6 @@ type ServiceResolver interface {
 type Manager struct {
 	store    Store
 	resolver ServiceResolver
-	mu       sync.RWMutex
 }
 
 // NewManager creates a new session key manager
@@ -320,7 +318,7 @@ func (m *Manager) validateTransaction(ctx context.Context, key *SessionKey, to s
 			serviceType, err := m.resolver.GetServiceType(ctx, serviceID)
 			if err == nil {
 				for _, t := range key.Permission.AllowedServiceTypes {
-					if strings.ToLower(t) == strings.ToLower(serviceType) {
+					if strings.EqualFold(t, serviceType) {
 						allowed = true
 						break
 					}

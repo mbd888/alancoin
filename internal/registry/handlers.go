@@ -520,8 +520,8 @@ func (h *Handler) sortServices(services []ServiceListing, sortBy string) {
 		// Compute value score: reputation / price (higher = better deal)
 		for i := range services {
 			priceF := 0.01 // floor to avoid division by zero
-			if p, err := fmt.Sscanf(services[i].Price, "%f", &priceF); p == 1 && err == nil && priceF > 0 {
-				// priceF already set
+			if p, err := fmt.Sscanf(services[i].Price, "%f", &priceF); p != 1 || err != nil || priceF <= 0 {
+				priceF = 0.01
 			}
 			services[i].ValueScore = services[i].ReputationScore / priceF
 		}

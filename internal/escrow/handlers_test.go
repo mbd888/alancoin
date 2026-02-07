@@ -2,6 +2,7 @@ package escrow
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -129,7 +130,7 @@ func TestHandler_ConfirmEscrow(t *testing.T) {
 	router, svc := setupTestRouter()
 
 	// Create via service directly
-	esc, _ := svc.Create(nil, CreateRequest{
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
 		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
 		SellerAddr: "0xbbbb000000000000000000000000000000000002",
 		Amount:     "1.00",
@@ -160,7 +161,7 @@ func TestHandler_ConfirmEscrow(t *testing.T) {
 func TestHandler_ConfirmUnauthorized(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	esc, _ := svc.Create(nil, CreateRequest{
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
 		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
 		SellerAddr: "0xbbbb000000000000000000000000000000000002",
 		Amount:     "1.00",
@@ -180,7 +181,7 @@ func TestHandler_ConfirmUnauthorized(t *testing.T) {
 func TestHandler_DisputeEscrow(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	esc, _ := svc.Create(nil, CreateRequest{
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
 		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
 		SellerAddr: "0xbbbb000000000000000000000000000000000002",
 		Amount:     "1.00",
@@ -216,7 +217,7 @@ func TestHandler_DisputeEscrow(t *testing.T) {
 func TestHandler_DisputeNoReason(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	esc, _ := svc.Create(nil, CreateRequest{
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
 		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
 		SellerAddr: "0xbbbb000000000000000000000000000000000002",
 		Amount:     "1.00",
@@ -237,7 +238,7 @@ func TestHandler_DisputeNoReason(t *testing.T) {
 func TestHandler_MarkDelivered(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	esc, _ := svc.Create(nil, CreateRequest{
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
 		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
 		SellerAddr: "0xbbbb000000000000000000000000000000000002",
 		Amount:     "1.00",
@@ -267,9 +268,9 @@ func TestHandler_MarkDelivered(t *testing.T) {
 func TestHandler_ListEscrows(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	svc.Create(nil, CreateRequest{BuyerAddr: "0xaaaa000000000000000000000000000000000001", SellerAddr: "0xcccc000000000000000000000000000000000003", Amount: "1.00"})
-	svc.Create(nil, CreateRequest{BuyerAddr: "0xaaaa000000000000000000000000000000000001", SellerAddr: "0xcccc000000000000000000000000000000000004", Amount: "2.00"})
-	svc.Create(nil, CreateRequest{BuyerAddr: "0xdddd000000000000000000000000000000000008", SellerAddr: "0xs3", Amount: "3.00"})
+	svc.Create(context.TODO(), CreateRequest{BuyerAddr: "0xaaaa000000000000000000000000000000000001", SellerAddr: "0xcccc000000000000000000000000000000000003", Amount: "1.00"})
+	svc.Create(context.TODO(), CreateRequest{BuyerAddr: "0xaaaa000000000000000000000000000000000001", SellerAddr: "0xcccc000000000000000000000000000000000004", Amount: "2.00"})
+	svc.Create(context.TODO(), CreateRequest{BuyerAddr: "0xdddd000000000000000000000000000000000008", SellerAddr: "0xs3", Amount: "3.00"})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/v1/agents/0xaaaa000000000000000000000000000000000001/escrows", nil)
@@ -294,7 +295,7 @@ func TestHandler_ListEscrowsWithLimit(t *testing.T) {
 	router, svc := setupTestRouter()
 
 	for i := 0; i < 5; i++ {
-		svc.Create(nil, CreateRequest{BuyerAddr: "0xaaaa000000000000000000000000000000000001", SellerAddr: "0xbbbb000000000000000000000000000000000002", Amount: "1.00"})
+		svc.Create(context.TODO(), CreateRequest{BuyerAddr: "0xaaaa000000000000000000000000000000000001", SellerAddr: "0xbbbb000000000000000000000000000000000002", Amount: "1.00"})
 	}
 
 	w := httptest.NewRecorder()
@@ -318,7 +319,7 @@ func TestHandler_ListEscrowsWithLimit(t *testing.T) {
 func TestHandler_DoubleConfirmReturnsConflict(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	esc, _ := svc.Create(nil, CreateRequest{
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
 		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
 		SellerAddr: "0xbbbb000000000000000000000000000000000002",
 		Amount:     "1.00",
@@ -350,7 +351,7 @@ func TestHandler_DoubleConfirmReturnsConflict(t *testing.T) {
 func TestHandler_DeliverUnauthorized(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	esc, _ := svc.Create(nil, CreateRequest{
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
 		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
 		SellerAddr: "0xbbbb000000000000000000000000000000000002",
 		Amount:     "1.00",
@@ -370,7 +371,7 @@ func TestHandler_DeliverUnauthorized(t *testing.T) {
 func TestHandler_DisputeUnauthorized(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	esc, _ := svc.Create(nil, CreateRequest{
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
 		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
 		SellerAddr: "0xbbbb000000000000000000000000000000000002",
 		Amount:     "1.00",
@@ -440,14 +441,14 @@ func TestHandler_DeliverNotFound(t *testing.T) {
 func TestHandler_DeliverAlreadyReleased(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	esc, _ := svc.Create(nil, CreateRequest{
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
 		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
 		SellerAddr: "0xbbbb000000000000000000000000000000000002",
 		Amount:     "1.00",
 	})
 
 	// Confirm (release) the escrow
-	svc.Confirm(nil, esc.ID, "0xaaaa000000000000000000000000000000000001")
+	svc.Confirm(context.TODO(), esc.ID, "0xaaaa000000000000000000000000000000000001")
 
 	// Try to deliver after release
 	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/deliver", nil)
@@ -463,14 +464,14 @@ func TestHandler_DeliverAlreadyReleased(t *testing.T) {
 func TestHandler_DisputeAlreadyReleased(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	esc, _ := svc.Create(nil, CreateRequest{
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
 		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
 		SellerAddr: "0xbbbb000000000000000000000000000000000002",
 		Amount:     "1.00",
 	})
 
 	// Confirm (release) the escrow
-	svc.Confirm(nil, esc.ID, "0xaaaa000000000000000000000000000000000001")
+	svc.Confirm(context.TODO(), esc.ID, "0xaaaa000000000000000000000000000000000001")
 
 	body, _ := json.Marshal(DisputeRequest{Reason: "too late"})
 	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/dispute", bytes.NewReader(body))
@@ -664,7 +665,7 @@ func TestHandler_CreateMalformedJSON(t *testing.T) {
 func TestHandler_DisputeMalformedJSON(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	esc, _ := svc.Create(nil, CreateRequest{
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
 		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
 		SellerAddr: "0xbbbb000000000000000000000000000000000002",
 		Amount:     "1.00",
@@ -710,7 +711,7 @@ func TestHandler_ListEscrowsEmpty(t *testing.T) {
 func TestHandler_ListEscrowsInvalidLimit(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	svc.Create(nil, CreateRequest{BuyerAddr: "0xaaaa000000000000000000000000000000000001", SellerAddr: "0xbbbb000000000000000000000000000000000002", Amount: "1.00"})
+	svc.Create(context.TODO(), CreateRequest{BuyerAddr: "0xaaaa000000000000000000000000000000000001", SellerAddr: "0xbbbb000000000000000000000000000000000002", Amount: "1.00"})
 
 	// Invalid limit should be ignored (uses default 50)
 	w := httptest.NewRecorder()
@@ -734,7 +735,7 @@ func TestHandler_ListEscrowsInvalidLimit(t *testing.T) {
 func TestHandler_ListEscrowsNegativeLimit(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	svc.Create(nil, CreateRequest{BuyerAddr: "0xaaaa000000000000000000000000000000000001", SellerAddr: "0xbbbb000000000000000000000000000000000002", Amount: "1.00"})
+	svc.Create(context.TODO(), CreateRequest{BuyerAddr: "0xaaaa000000000000000000000000000000000001", SellerAddr: "0xbbbb000000000000000000000000000000000002", Amount: "1.00"})
 
 	// Negative limit should be ignored (uses default)
 	w := httptest.NewRecorder()
@@ -851,7 +852,7 @@ func TestHandler_ErrorResponseStructure(t *testing.T) {
 func TestHandler_DisputeUnicodeReason(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	esc, _ := svc.Create(nil, CreateRequest{
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
 		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
 		SellerAddr: "0xbbbb000000000000000000000000000000000002",
 		Amount:     "1.00",
@@ -966,9 +967,9 @@ func TestHandler_CreateLowercasesAddresses(t *testing.T) {
 func TestHandler_ListEscrowsAsSeller(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	svc.Create(nil, CreateRequest{BuyerAddr: "0xeeee000000000000000000000000000000000005", SellerAddr: "0xbbbb000000000000000000000000000000000002", Amount: "1.00"})
-	svc.Create(nil, CreateRequest{BuyerAddr: "0xeeee000000000000000000000000000000000006", SellerAddr: "0xbbbb000000000000000000000000000000000002", Amount: "2.00"})
-	svc.Create(nil, CreateRequest{BuyerAddr: "0xeeee000000000000000000000000000000000007", SellerAddr: "0xdddd000000000000000000000000000000000008", Amount: "3.00"})
+	svc.Create(context.TODO(), CreateRequest{BuyerAddr: "0xeeee000000000000000000000000000000000005", SellerAddr: "0xbbbb000000000000000000000000000000000002", Amount: "1.00"})
+	svc.Create(context.TODO(), CreateRequest{BuyerAddr: "0xeeee000000000000000000000000000000000006", SellerAddr: "0xbbbb000000000000000000000000000000000002", Amount: "2.00"})
+	svc.Create(context.TODO(), CreateRequest{BuyerAddr: "0xeeee000000000000000000000000000000000007", SellerAddr: "0xdddd000000000000000000000000000000000008", Amount: "3.00"})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/v1/agents/0xbbbb000000000000000000000000000000000002/escrows", nil)
@@ -1013,7 +1014,7 @@ func TestHandler_CreateEmptyBody(t *testing.T) {
 func TestHandler_DoubleDisputeReturnsConflict(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	esc, _ := svc.Create(nil, CreateRequest{
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
 		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
 		SellerAddr: "0xbbbb000000000000000000000000000000000002",
 		Amount:     "1.00",
@@ -1052,7 +1053,7 @@ func TestHandler_DoubleDisputeReturnsConflict(t *testing.T) {
 func TestHandler_DoubleDeliverReturnsConflict(t *testing.T) {
 	router, svc := setupTestRouter()
 
-	esc, _ := svc.Create(nil, CreateRequest{
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
 		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
 		SellerAddr: "0xbbbb000000000000000000000000000000000002",
 		Amount:     "1.00",

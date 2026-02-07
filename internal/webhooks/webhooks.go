@@ -87,7 +87,6 @@ type Dispatcher struct {
 	store  Store
 	client *http.Client
 	retry  RetryConfig
-	mu     sync.RWMutex
 }
 
 // NewDispatcher creates a new webhook dispatcher

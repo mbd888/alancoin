@@ -175,7 +175,7 @@ func (p *PostgresStore) GetComment(ctx context.Context, id string) (*Comment, er
 		return nil, err
 	}
 
-	json.Unmarshal(refsJSON, &comment.References)
+	_ = json.Unmarshal(refsJSON, &comment.References)
 	return comment, nil
 }
 
@@ -275,7 +275,7 @@ func (p *PostgresStore) scanComments(rows *sql.Rows) ([]*Comment, error) {
 			return nil, err
 		}
 
-		json.Unmarshal(refsJSON, &comment.References)
+		_ = json.Unmarshal(refsJSON, &comment.References)
 		comments = append(comments, comment)
 	}
 	return comments, rows.Err()
@@ -324,7 +324,7 @@ func (p *PostgresStore) UnlikeComment(ctx context.Context, commentID, agentAddr 
 
 	affected, _ := result.RowsAffected()
 	if affected > 0 {
-		tx.ExecContext(ctx, `UPDATE comments SET likes = likes - 1 WHERE id = $1`, commentID)
+		_, _ = tx.ExecContext(ctx, `UPDATE comments SET likes = likes - 1 WHERE id = $1`, commentID)
 	}
 
 	return tx.Commit()
@@ -373,7 +373,7 @@ func (p *PostgresStore) Unfollow(ctx context.Context, followerAddr, verbalAgentA
 
 	affected, _ := result.RowsAffected()
 	if affected > 0 {
-		tx.ExecContext(ctx, `
+		_, _ = tx.ExecContext(ctx, `
 			UPDATE verbal_agents SET followers = followers - 1 WHERE address = $1
 		`, verbalAgentAddr)
 	}

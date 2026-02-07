@@ -57,7 +57,7 @@ func TestValidateKey(t *testing.T) {
 	}
 
 	// Validate with Bearer prefix
-	key, err = mgr.ValidateKey(ctx, "Bearer "+rawKey)
+	_, err = mgr.ValidateKey(ctx, "Bearer "+rawKey)
 	if err != nil {
 		t.Errorf("ValidateKey failed with Bearer prefix: %v", err)
 	}

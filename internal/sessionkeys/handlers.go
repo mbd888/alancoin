@@ -333,7 +333,7 @@ func (h *Handler) Transact(c *gin.Context) {
 		if err != nil {
 			// Release the hold since transfer failed
 			if h.balance != nil {
-				h.balance.ReleaseHold(c.Request.Context(), address, req.Amount, keyID)
+				_ = h.balance.ReleaseHold(c.Request.Context(), address, req.Amount, keyID)
 			}
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "transfer_failed",
@@ -349,12 +349,12 @@ func (h *Handler) Transact(c *gin.Context) {
 		// The transfer was broadcast successfully. Even if confirmation
 		// takes time, the funds are committed.
 		if h.balance != nil {
-			h.balance.ConfirmHold(c.Request.Context(), address, req.Amount, keyID)
+			_ = h.balance.ConfirmHold(c.Request.Context(), address, req.Amount, keyID)
 		}
 
 		// Record in registry if available
 		if h.recorder != nil {
-			h.recorder.RecordTransaction(c.Request.Context(), txHash, address, req.To, req.Amount, req.ServiceID)
+			_ = h.recorder.RecordTransaction(c.Request.Context(), txHash, address, req.To, req.Amount, req.ServiceID)
 		}
 	}
 

@@ -3,7 +3,6 @@ package predictions
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 )
 
 // PostgresStore implements Store using PostgreSQL
@@ -287,10 +286,4 @@ func (p *PostgresStore) GetTopPredictors(ctx context.Context, limit int) ([]*Pre
 		stats = append(stats, s)
 	}
 	return stats, rows.Err()
-}
-
-// Helper
-func jsonMarshal(v interface{}) string {
-	b, _ := json.Marshal(v)
-	return string(b)
 }
