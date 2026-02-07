@@ -197,14 +197,14 @@ func (s *Service) ResolvePredictions(ctx context.Context) (resolved int, err err
 			actualValue, fetchErr = s.metrics.GetMarketMetric(ctx, pred.Metric)
 		default:
 			pred.Status = StatusVoid
-			s.store.Update(ctx, pred)
+			_ = s.store.Update(ctx, pred)
 			continue
 		}
 
 		if fetchErr != nil {
 			// Can't determine, mark void
 			pred.Status = StatusVoid
-			s.store.Update(ctx, pred)
+			_ = s.store.Update(ctx, pred)
 			continue
 		}
 

@@ -229,7 +229,7 @@ func (d *Dispatcher) updateSuccess(ctx context.Context, sub *Subscription) {
 	sub.LastSuccess = &now
 	sub.LastError = ""
 	sub.ConsecutiveFailures = 0
-	d.store.Update(ctx, sub)
+	_ = d.store.Update(ctx, sub)
 }
 
 func (d *Dispatcher) updateError(ctx context.Context, sub *Subscription, errMsg string) {
@@ -241,7 +241,7 @@ func (d *Dispatcher) updateError(ctx context.Context, sub *Subscription, errMsg 
 		sub.Active = false
 	}
 
-	d.store.Update(ctx, sub)
+	_ = d.store.Update(ctx, sub)
 }
 
 // MemoryStore is an in-memory implementation for testing

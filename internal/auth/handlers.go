@@ -87,7 +87,7 @@ func (h *Handler) CreateKey(c *gin.Context) {
 	}
 
 	var req CreateKeyRequest
-	c.ShouldBindJSON(&req)
+	_ = c.ShouldBindJSON(&req) // Optional body — Name defaults below if missing
 	if req.Name == "" {
 		req.Name = "Additional key"
 	}
@@ -152,8 +152,8 @@ func (h *Handler) RegenerateKey(c *gin.Context) {
 
 	keyID := c.Param("keyId")
 
-	// Revoke old key
-	h.manager.RevokeKey(c.Request.Context(), keyID, key.AgentAddr)
+	// Revoke old key (best-effort; new key is generated regardless)
+	_ = h.manager.RevokeKey(c.Request.Context(), keyID, key.AgentAddr)
 
 	// Create new key
 	rawKey, newKey, err := h.manager.GenerateKey(c.Request.Context(), key.AgentAddr, "Regenerated key")

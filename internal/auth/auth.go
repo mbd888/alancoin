@@ -119,7 +119,7 @@ func (m *Manager) ValidateKey(ctx context.Context, rawKey string) (*APIKey, erro
 	go func() {
 		cp := *key
 		cp.LastUsed = time.Now()
-		m.store.Update(context.Background(), &cp)
+		_ = m.store.Update(context.Background(), &cp)
 	}()
 
 	return key, nil

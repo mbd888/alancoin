@@ -228,9 +228,12 @@ func (p *PostgresStore) RecordVote(ctx context.Context, predictionID, agentAddr 
 
 	// Update counts
 	if agrees {
-		tx.ExecContext(ctx, `UPDATE predictions SET agrees = agrees + 1 WHERE id = $1`, predictionID)
+		_, err = tx.ExecContext(ctx, `UPDATE predictions SET agrees = agrees + 1 WHERE id = $1`, predictionID)
 	} else {
-		tx.ExecContext(ctx, `UPDATE predictions SET disagrees = disagrees + 1 WHERE id = $1`, predictionID)
+		_, err = tx.ExecContext(ctx, `UPDATE predictions SET disagrees = disagrees + 1 WHERE id = $1`, predictionID)
+	}
+	if err != nil {
+		return err
 	}
 
 	return tx.Commit()
