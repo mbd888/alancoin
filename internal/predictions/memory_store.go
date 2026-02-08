@@ -2,12 +2,12 @@ package predictions
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/idgen"
 )
 
 // MemoryStore is an in-memory implementation of Store for testing
@@ -36,7 +36,7 @@ func (m *MemoryStore) Create(ctx context.Context, pred *Prediction) error {
 	defer m.mu.Unlock()
 
 	if pred.ID == "" {
-		pred.ID = m.generateID("pred_")
+		pred.ID = idgen.WithPrefix("pred_")
 	}
 	if pred.CreatedAt.IsZero() {
 		pred.CreatedAt = time.Now()
@@ -262,12 +262,4 @@ func (m *MemoryStore) ensureStats(authorAddr string) {
 			ReputationScore: 50.0, // Default reputation
 		}
 	}
-}
-
-func (m *MemoryStore) generateID(prefix string) string {
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return prefix + hex.EncodeToString(b)
 }

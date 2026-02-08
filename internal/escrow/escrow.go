@@ -223,7 +223,9 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 	escrow.UpdatedAt = now
 
 	if err := s.store.Update(ctx, escrow); err != nil {
-		return nil, err
+		// Compensate: reverse the ledger release to prevent double-payment
+		_ = s.ledger.RefundEscrow(ctx, escrow.SellerAddr, escrow.Amount, escrow.ID)
+		return nil, fmt.Errorf("failed to update escrow after fund release: %w", err)
 	}
 
 	// Record confirmed transaction for reputation
@@ -266,7 +268,9 @@ func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*
 	escrow.UpdatedAt = now
 
 	if err := s.store.Update(ctx, escrow); err != nil {
-		return nil, err
+		// Compensate: re-lock the refunded funds
+		_ = s.ledger.EscrowLock(ctx, escrow.BuyerAddr, escrow.Amount, escrow.ID)
+		return nil, fmt.Errorf("failed to update escrow after refund: %w", err)
 	}
 
 	// Record failed transaction for reputation
@@ -295,7 +299,9 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 	escrow.UpdatedAt = now
 
 	if err := s.store.Update(ctx, escrow); err != nil {
-		return err
+		// Compensate: reverse the release to prevent double-payment on retry
+		_ = s.ledger.RefundEscrow(ctx, escrow.SellerAddr, escrow.Amount, escrow.ID)
+		return fmt.Errorf("failed to update escrow after auto-release: %w", err)
 	}
 
 	// Record confirmed transaction for reputation (auto-release counts as success)

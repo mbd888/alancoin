@@ -2,8 +2,11 @@ package ledger
 
 import (
 	"context"
+	"math/big"
 	"sync"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 // MemoryStore is an in-memory ledger store for demo/development mode.
@@ -28,16 +31,19 @@ func (m *MemoryStore) GetBalance(ctx context.Context, agentAddr string) (*Balanc
 	defer m.mu.RUnlock()
 
 	if bal, ok := m.balances[agentAddr]; ok {
-		return bal, nil
+		cp := *bal
+		return &cp, nil
 	}
 	return &Balance{
-		AgentAddr: agentAddr,
-		Available: "0",
-		Pending:   "0",
-		Escrowed:  "0",
-		TotalIn:   "0",
-		TotalOut:  "0",
-		UpdatedAt: time.Now(),
+		AgentAddr:   agentAddr,
+		Available:   "0",
+		Pending:     "0",
+		Escrowed:    "0",
+		CreditLimit: "0",
+		CreditUsed:  "0",
+		TotalIn:     "0",
+		TotalOut:    "0",
+		UpdatedAt:   time.Now(),
 	}, nil
 }
 
@@ -48,25 +54,49 @@ func (m *MemoryStore) Credit(ctx context.Context, agentAddr, amount, txHash, des
 	bal, ok := m.balances[agentAddr]
 	if !ok {
 		bal = &Balance{
-			AgentAddr: agentAddr,
-			Available: "0",
-			Pending:   "0",
-			Escrowed:  "0",
-			TotalIn:   "0",
-			TotalOut:  "0",
+			AgentAddr:   agentAddr,
+			Available:   "0",
+			Pending:     "0",
+			Escrowed:    "0",
+			CreditLimit: "0",
+			CreditUsed:  "0",
+			TotalIn:     "0",
+			TotalOut:    "0",
 		}
 		m.balances[agentAddr] = bal
 	}
 
-	avail, _ := parseUSDC(bal.Available)
-	total, _ := parseUSDC(bal.TotalIn)
-	add, _ := parseUSDC(amount)
-
-	avail.Add(avail, add)
+	total, _ := usdc.Parse(bal.TotalIn)
+	add, _ := usdc.Parse(amount)
 	total.Add(total, add)
+	bal.TotalIn = usdc.Format(total)
 
-	bal.Available = formatUSDC(avail)
-	bal.TotalIn = formatUSDC(total)
+	// Auto-repay credit if there's outstanding usage
+	creditUsed, _ := usdc.Parse(bal.CreditUsed)
+	if creditUsed.Sign() > 0 {
+		repayment := new(big.Int).Set(add)
+		if repayment.Cmp(creditUsed) > 0 {
+			repayment.Set(creditUsed)
+		}
+		creditUsed.Sub(creditUsed, repayment)
+		add.Sub(add, repayment)
+		bal.CreditUsed = usdc.Format(creditUsed)
+
+		m.entries = append(m.entries, &Entry{
+			ID:          "entry_credit_repay_" + txHash,
+			AgentAddr:   agentAddr,
+			Type:        "credit_repay",
+			Amount:      usdc.Format(repayment),
+			TxHash:      txHash,
+			Description: "auto_repay_from_deposit",
+			CreatedAt:   time.Now(),
+		})
+	}
+
+	// Credit remainder to available
+	avail, _ := usdc.Parse(bal.Available)
+	avail.Add(avail, add)
+	bal.Available = usdc.Format(avail)
 	bal.UpdatedAt = time.Now()
 
 	m.entries = append(m.entries, &Entry{
@@ -93,19 +123,42 @@ func (m *MemoryStore) Debit(ctx context.Context, agentAddr, amount, reference, d
 		return ErrAgentNotFound
 	}
 
-	avail, _ := parseUSDC(bal.Available)
-	totalOut, _ := parseUSDC(bal.TotalOut)
-	sub, _ := parseUSDC(amount)
+	avail, _ := usdc.Parse(bal.Available)
+	totalOut, _ := usdc.Parse(bal.TotalOut)
+	sub, _ := usdc.Parse(amount)
 
-	if avail.Cmp(sub) < 0 {
-		return ErrInsufficientBalance
+	if avail.Cmp(sub) >= 0 {
+		// Normal debit from available
+		avail.Sub(avail, sub)
+		bal.Available = usdc.Format(avail)
+	} else {
+		// Credit-aware: debit all available, draw gap from credit
+		creditLimit, _ := usdc.Parse(bal.CreditLimit)
+		creditUsed, _ := usdc.Parse(bal.CreditUsed)
+		creditAvailable := new(big.Int).Sub(creditLimit, creditUsed)
+		gap := new(big.Int).Sub(sub, avail)
+
+		if creditAvailable.Cmp(gap) < 0 {
+			return ErrInsufficientBalance
+		}
+
+		creditUsed.Add(creditUsed, gap)
+		bal.Available = "0.000000"
+		bal.CreditUsed = usdc.Format(creditUsed)
+
+		m.entries = append(m.entries, &Entry{
+			ID:          "entry_credit_draw_" + reference,
+			AgentAddr:   agentAddr,
+			Type:        "credit_draw",
+			Amount:      usdc.Format(gap),
+			Reference:   reference,
+			Description: "credit_draw_for_spend",
+			CreatedAt:   time.Now(),
+		})
 	}
 
-	avail.Sub(avail, sub)
 	totalOut.Add(totalOut, sub)
-
-	bal.Available = formatUSDC(avail)
-	bal.TotalOut = formatUSDC(totalOut)
+	bal.TotalOut = usdc.Format(totalOut)
 	bal.UpdatedAt = time.Now()
 
 	m.entries = append(m.entries, &Entry{
@@ -130,9 +183,9 @@ func (m *MemoryStore) Withdraw(ctx context.Context, agentAddr, amount, txHash st
 		return ErrAgentNotFound
 	}
 
-	avail, _ := parseUSDC(bal.Available)
-	totalOut, _ := parseUSDC(bal.TotalOut)
-	sub, _ := parseUSDC(amount)
+	avail, _ := usdc.Parse(bal.Available)
+	totalOut, _ := usdc.Parse(bal.TotalOut)
+	sub, _ := usdc.Parse(amount)
 
 	if avail.Cmp(sub) < 0 {
 		return ErrInsufficientBalance
@@ -141,8 +194,8 @@ func (m *MemoryStore) Withdraw(ctx context.Context, agentAddr, amount, txHash st
 	avail.Sub(avail, sub)
 	totalOut.Add(totalOut, sub)
 
-	bal.Available = formatUSDC(avail)
-	bal.TotalOut = formatUSDC(totalOut)
+	bal.Available = usdc.Format(avail)
+	bal.TotalOut = usdc.Format(totalOut)
 	bal.UpdatedAt = time.Now()
 
 	m.entries = append(m.entries, &Entry{
@@ -167,15 +220,15 @@ func (m *MemoryStore) Refund(ctx context.Context, agentAddr, amount, reference, 
 		return ErrAgentNotFound
 	}
 
-	avail, _ := parseUSDC(bal.Available)
-	totalOut, _ := parseUSDC(bal.TotalOut)
-	add, _ := parseUSDC(amount)
+	avail, _ := usdc.Parse(bal.Available)
+	totalOut, _ := usdc.Parse(bal.TotalOut)
+	add, _ := usdc.Parse(amount)
 
 	avail.Add(avail, add)
 	totalOut.Sub(totalOut, add)
 
-	bal.Available = formatUSDC(avail)
-	bal.TotalOut = formatUSDC(totalOut)
+	bal.Available = usdc.Format(avail)
+	bal.TotalOut = usdc.Format(totalOut)
 	bal.UpdatedAt = time.Now()
 
 	m.entries = append(m.entries, &Entry{
@@ -219,19 +272,42 @@ func (m *MemoryStore) Hold(ctx context.Context, agentAddr, amount, reference str
 		return ErrAgentNotFound
 	}
 
-	avail, _ := parseUSDC(bal.Available)
-	pend, _ := parseUSDC(bal.Pending)
-	sub, _ := parseUSDC(amount)
+	avail, _ := usdc.Parse(bal.Available)
+	pend, _ := usdc.Parse(bal.Pending)
+	sub, _ := usdc.Parse(amount)
 
-	if avail.Cmp(sub) < 0 {
-		return ErrInsufficientBalance
+	if avail.Cmp(sub) >= 0 {
+		// Normal hold from available
+		avail.Sub(avail, sub)
+		bal.Available = usdc.Format(avail)
+	} else {
+		// Credit-aware: hold available + draw gap from credit
+		creditLimit, _ := usdc.Parse(bal.CreditLimit)
+		creditUsed, _ := usdc.Parse(bal.CreditUsed)
+		creditAvailable := new(big.Int).Sub(creditLimit, creditUsed)
+		gap := new(big.Int).Sub(sub, avail)
+
+		if creditAvailable.Cmp(gap) < 0 {
+			return ErrInsufficientBalance
+		}
+
+		creditUsed.Add(creditUsed, gap)
+		bal.Available = "0.000000"
+		bal.CreditUsed = usdc.Format(creditUsed)
+
+		m.entries = append(m.entries, &Entry{
+			ID:          "entry_credit_draw_" + reference,
+			AgentAddr:   agentAddr,
+			Type:        "credit_draw",
+			Amount:      usdc.Format(gap),
+			Reference:   reference,
+			Description: "credit_draw_for_hold",
+			CreatedAt:   time.Now(),
+		})
 	}
 
-	avail.Sub(avail, sub)
 	pend.Add(pend, sub)
-
-	bal.Available = formatUSDC(avail)
-	bal.Pending = formatUSDC(pend)
+	bal.Pending = usdc.Format(pend)
 	bal.UpdatedAt = time.Now()
 
 	m.entries = append(m.entries, &Entry{
@@ -256,15 +332,19 @@ func (m *MemoryStore) ConfirmHold(ctx context.Context, agentAddr, amount, refere
 		return ErrAgentNotFound
 	}
 
-	pend, _ := parseUSDC(bal.Pending)
-	totalOut, _ := parseUSDC(bal.TotalOut)
-	sub, _ := parseUSDC(amount)
+	pend, _ := usdc.Parse(bal.Pending)
+	totalOut, _ := usdc.Parse(bal.TotalOut)
+	sub, _ := usdc.Parse(amount)
+
+	if pend.Cmp(sub) < 0 {
+		return ErrInsufficientBalance
+	}
 
 	pend.Sub(pend, sub)
 	totalOut.Add(totalOut, sub)
 
-	bal.Pending = formatUSDC(pend)
-	bal.TotalOut = formatUSDC(totalOut)
+	bal.Pending = usdc.Format(pend)
+	bal.TotalOut = usdc.Format(totalOut)
 	bal.UpdatedAt = time.Now()
 
 	m.entries = append(m.entries, &Entry{
@@ -289,15 +369,19 @@ func (m *MemoryStore) ReleaseHold(ctx context.Context, agentAddr, amount, refere
 		return ErrAgentNotFound
 	}
 
-	avail, _ := parseUSDC(bal.Available)
-	pend, _ := parseUSDC(bal.Pending)
-	sub, _ := parseUSDC(amount)
+	avail, _ := usdc.Parse(bal.Available)
+	pend, _ := usdc.Parse(bal.Pending)
+	sub, _ := usdc.Parse(amount)
+
+	if pend.Cmp(sub) < 0 {
+		return ErrInsufficientBalance
+	}
 
 	avail.Add(avail, sub)
 	pend.Sub(pend, sub)
 
-	bal.Available = formatUSDC(avail)
-	bal.Pending = formatUSDC(pend)
+	bal.Available = usdc.Format(avail)
+	bal.Pending = usdc.Format(pend)
 	bal.UpdatedAt = time.Now()
 
 	m.entries = append(m.entries, &Entry{
@@ -322,9 +406,9 @@ func (m *MemoryStore) EscrowLock(ctx context.Context, agentAddr, amount, referen
 		return ErrAgentNotFound
 	}
 
-	avail, _ := parseUSDC(bal.Available)
-	escrow, _ := parseUSDC(bal.Escrowed)
-	sub, _ := parseUSDC(amount)
+	avail, _ := usdc.Parse(bal.Available)
+	escrow, _ := usdc.Parse(bal.Escrowed)
+	sub, _ := usdc.Parse(amount)
 
 	if avail.Cmp(sub) < 0 {
 		return ErrInsufficientBalance
@@ -333,8 +417,8 @@ func (m *MemoryStore) EscrowLock(ctx context.Context, agentAddr, amount, referen
 	avail.Sub(avail, sub)
 	escrow.Add(escrow, sub)
 
-	bal.Available = formatUSDC(avail)
-	bal.Escrowed = formatUSDC(escrow)
+	bal.Available = usdc.Format(avail)
+	bal.Escrowed = usdc.Format(escrow)
 	bal.UpdatedAt = time.Now()
 
 	m.entries = append(m.entries, &Entry{
@@ -359,9 +443,9 @@ func (m *MemoryStore) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr, 
 		return ErrAgentNotFound
 	}
 
-	escrow, _ := parseUSDC(buyerBal.Escrowed)
-	totalOut, _ := parseUSDC(buyerBal.TotalOut)
-	sub, _ := parseUSDC(amount)
+	escrow, _ := usdc.Parse(buyerBal.Escrowed)
+	totalOut, _ := usdc.Parse(buyerBal.TotalOut)
+	sub, _ := usdc.Parse(amount)
 
 	if escrow.Cmp(sub) < 0 {
 		return ErrInsufficientBalance
@@ -369,30 +453,32 @@ func (m *MemoryStore) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr, 
 
 	escrow.Sub(escrow, sub)
 	totalOut.Add(totalOut, sub)
-	buyerBal.Escrowed = formatUSDC(escrow)
-	buyerBal.TotalOut = formatUSDC(totalOut)
+	buyerBal.Escrowed = usdc.Format(escrow)
+	buyerBal.TotalOut = usdc.Format(totalOut)
 	buyerBal.UpdatedAt = time.Now()
 
 	// Credit seller
 	sellerBal, ok := m.balances[sellerAddr]
 	if !ok {
 		sellerBal = &Balance{
-			AgentAddr: sellerAddr,
-			Available: "0",
-			Pending:   "0",
-			Escrowed:  "0",
-			TotalIn:   "0",
-			TotalOut:  "0",
+			AgentAddr:   sellerAddr,
+			Available:   "0",
+			Pending:     "0",
+			Escrowed:    "0",
+			CreditLimit: "0",
+			CreditUsed:  "0",
+			TotalIn:     "0",
+			TotalOut:    "0",
 		}
 		m.balances[sellerAddr] = sellerBal
 	}
 
-	sellerAvail, _ := parseUSDC(sellerBal.Available)
-	sellerTotalIn, _ := parseUSDC(sellerBal.TotalIn)
+	sellerAvail, _ := usdc.Parse(sellerBal.Available)
+	sellerTotalIn, _ := usdc.Parse(sellerBal.TotalIn)
 	sellerAvail.Add(sellerAvail, sub)
 	sellerTotalIn.Add(sellerTotalIn, sub)
-	sellerBal.Available = formatUSDC(sellerAvail)
-	sellerBal.TotalIn = formatUSDC(sellerTotalIn)
+	sellerBal.Available = usdc.Format(sellerAvail)
+	sellerBal.TotalIn = usdc.Format(sellerTotalIn)
 	sellerBal.UpdatedAt = time.Now()
 
 	m.entries = append(m.entries, &Entry{
@@ -417,9 +503,9 @@ func (m *MemoryStore) RefundEscrow(ctx context.Context, agentAddr, amount, refer
 		return ErrAgentNotFound
 	}
 
-	avail, _ := parseUSDC(bal.Available)
-	escrow, _ := parseUSDC(bal.Escrowed)
-	sub, _ := parseUSDC(amount)
+	avail, _ := usdc.Parse(bal.Available)
+	escrow, _ := usdc.Parse(bal.Escrowed)
+	sub, _ := usdc.Parse(amount)
 
 	if escrow.Cmp(sub) < 0 {
 		return ErrInsufficientBalance
@@ -428,8 +514,8 @@ func (m *MemoryStore) RefundEscrow(ctx context.Context, agentAddr, amount, refer
 	escrow.Sub(escrow, sub)
 	avail.Add(avail, sub)
 
-	bal.Available = formatUSDC(avail)
-	bal.Escrowed = formatUSDC(escrow)
+	bal.Available = usdc.Format(avail)
+	bal.Escrowed = usdc.Format(escrow)
 	bal.UpdatedAt = time.Now()
 
 	m.entries = append(m.entries, &Entry{
@@ -443,4 +529,115 @@ func (m *MemoryStore) RefundEscrow(ctx context.Context, agentAddr, amount, refer
 	})
 
 	return nil
+}
+
+func (m *MemoryStore) SetCreditLimit(ctx context.Context, agentAddr, limit string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	bal, ok := m.balances[agentAddr]
+	if !ok {
+		bal = &Balance{
+			AgentAddr:   agentAddr,
+			Available:   "0",
+			Pending:     "0",
+			Escrowed:    "0",
+			CreditLimit: "0",
+			CreditUsed:  "0",
+			TotalIn:     "0",
+			TotalOut:    "0",
+		}
+		m.balances[agentAddr] = bal
+	}
+
+	bal.CreditLimit = limit
+	bal.UpdatedAt = time.Now()
+
+	m.entries = append(m.entries, &Entry{
+		ID:          "entry_credit_limit_set",
+		AgentAddr:   agentAddr,
+		Type:        "credit_limit_set",
+		Amount:      limit,
+		Description: "credit_limit_set",
+		CreatedAt:   time.Now(),
+	})
+
+	return nil
+}
+
+func (m *MemoryStore) UseCredit(ctx context.Context, agentAddr, amount string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	bal, ok := m.balances[agentAddr]
+	if !ok {
+		return ErrAgentNotFound
+	}
+
+	creditLimit, _ := usdc.Parse(bal.CreditLimit)
+	creditUsed, _ := usdc.Parse(bal.CreditUsed)
+	add, _ := usdc.Parse(amount)
+
+	newUsed := new(big.Int).Add(creditUsed, add)
+	if newUsed.Cmp(creditLimit) > 0 {
+		return ErrInsufficientBalance
+	}
+
+	bal.CreditUsed = usdc.Format(newUsed)
+	bal.UpdatedAt = time.Now()
+
+	m.entries = append(m.entries, &Entry{
+		ID:          "entry_credit_draw",
+		AgentAddr:   agentAddr,
+		Type:        "credit_draw",
+		Amount:      amount,
+		Description: "credit_draw",
+		CreatedAt:   time.Now(),
+	})
+
+	return nil
+}
+
+func (m *MemoryStore) RepayCredit(ctx context.Context, agentAddr, amount string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	bal, ok := m.balances[agentAddr]
+	if !ok {
+		return ErrAgentNotFound
+	}
+
+	creditUsed, _ := usdc.Parse(bal.CreditUsed)
+	sub, _ := usdc.Parse(amount)
+
+	if creditUsed.Cmp(sub) < 0 {
+		// Can only repay what's owed
+		sub.Set(creditUsed)
+	}
+
+	creditUsed.Sub(creditUsed, sub)
+	bal.CreditUsed = usdc.Format(creditUsed)
+	bal.UpdatedAt = time.Now()
+
+	m.entries = append(m.entries, &Entry{
+		ID:          "entry_credit_repay",
+		AgentAddr:   agentAddr,
+		Type:        "credit_repay",
+		Amount:      usdc.Format(sub),
+		Description: "credit_repay",
+		CreatedAt:   time.Now(),
+	})
+
+	return nil
+}
+
+func (m *MemoryStore) GetCreditInfo(ctx context.Context, agentAddr string) (string, string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	bal, ok := m.balances[agentAddr]
+	if !ok {
+		return "0", "0", nil
+	}
+	return bal.CreditLimit, bal.CreditUsed, nil
 }

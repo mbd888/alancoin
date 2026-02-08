@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/mbd888/alancoin/internal/idgen"
 )
 
 // Handler provides HTTP endpoints for webhook management
@@ -56,7 +57,7 @@ func (h *Handler) CreateWebhook(c *gin.Context) {
 	}
 
 	// Generate ID and secret
-	id := generateID("wh_")
+	id := idgen.WithPrefix("wh_")
 	secret := generateSecret()
 
 	sub := &Subscription{
@@ -127,7 +128,25 @@ func (h *Handler) ListWebhooks(c *gin.Context) {
 
 // DeleteWebhook handles DELETE /agents/:address/webhooks/:webhookId
 func (h *Handler) DeleteWebhook(c *gin.Context) {
+	address := c.Param("address")
 	webhookID := c.Param("webhookId")
+
+	// Verify the webhook belongs to this agent before deleting
+	webhook, err := h.store.Get(c.Request.Context(), webhookID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "not_found",
+			"message": "Webhook not found",
+		})
+		return
+	}
+	if webhook.AgentAddr != address {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "Webhook does not belong to this agent",
+		})
+		return
+	}
 
 	if err := h.store.Delete(c.Request.Context(), webhookID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -137,18 +156,7 @@ func (h *Handler) DeleteWebhook(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"status":  "deleted",
-		"message": "Webhook deleted",
-	})
-}
-
-func generateID(prefix string) string {
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return prefix + hex.EncodeToString(b)
+	c.Status(http.StatusNoContent)
 }
 
 func generateSecret() string {

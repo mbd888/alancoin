@@ -13,11 +13,11 @@ package predictions
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/idgen"
 )
 
 var (
@@ -157,7 +157,7 @@ func (s *Service) MakePrediction(ctx context.Context, p *Prediction) (*Predictio
 		p.ConfidenceLevel = 5
 	}
 
-	p.ID = generateID("pred_")
+	p.ID = idgen.WithPrefix("pred_")
 	p.AuthorAddr = strings.ToLower(p.AuthorAddr)
 	p.Status = StatusPending
 	p.CreatedAt = time.Now()
@@ -268,12 +268,4 @@ func (s *Service) Vote(ctx context.Context, predictionID, agentAddr string, agre
 	}
 
 	return s.store.RecordVote(ctx, predictionID, strings.ToLower(agentAddr), agrees)
-}
-
-func generateID(prefix string) string {
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return prefix + hex.EncodeToString(b)
 }

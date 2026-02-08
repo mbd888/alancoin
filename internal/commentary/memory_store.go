@@ -2,12 +2,12 @@ package commentary
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/idgen"
 )
 
 // MemoryStore is an in-memory implementation of Store for testing
@@ -106,7 +106,7 @@ func (m *MemoryStore) PostComment(ctx context.Context, comment *Comment) error {
 	defer m.mu.Unlock()
 
 	if comment.ID == "" {
-		comment.ID = m.generateID("cmt_")
+		comment.ID = idgen.WithPrefix("cmt_")
 	}
 	if comment.CreatedAt.IsZero() {
 		comment.CreatedAt = time.Now()
@@ -316,12 +316,4 @@ func (m *MemoryStore) GetFollowing(ctx context.Context, agentAddr string) ([]str
 		}
 	}
 	return following, nil
-}
-
-func (m *MemoryStore) generateID(prefix string) string {
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return prefix + hex.EncodeToString(b)
 }

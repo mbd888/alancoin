@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 // PlatformPaymaster sponsors gas using the platform's ETH balance.
@@ -67,7 +68,7 @@ func (p *PlatformPaymaster) EstimateGasFee(ctx context.Context, req *EstimateReq
 	}
 
 	// Check against max
-	maxGasPrice := new(big.Int).Mul(big.NewInt(int64(p.config.MaxGasPrice)), big.NewInt(1e9)) // gwei to wei
+	maxGasPrice := new(big.Int).Mul(new(big.Int).SetUint64(p.config.MaxGasPrice), big.NewInt(1e9)) // gwei to wei
 	if gasPrice.Cmp(maxGasPrice) > 0 {
 		return nil, ErrGasPriceTooHigh
 	}
@@ -91,7 +92,7 @@ func (p *PlatformPaymaster) EstimateGasFee(ctx context.Context, req *EstimateReq
 	}
 
 	// Calculate ETH cost
-	gasCostWei := new(big.Int).Mul(gasPrice, big.NewInt(int64(gasLimit)))
+	gasCostWei := new(big.Int).Mul(gasPrice, new(big.Int).SetUint64(gasLimit))
 	gasCostETH := weiToETH(gasCostWei)
 
 	// Convert to USDC with markup using live oracle price
@@ -100,13 +101,13 @@ func (p *PlatformPaymaster) EstimateGasFee(ctx context.Context, req *EstimateReq
 	gasCostUSD *= (1 + p.config.GasMarkupPct) // Add markup
 
 	// Apply min/max
-	minFee, err := parseUSDC(p.config.MinGasFeeUSDC)
-	if err != nil {
-		return nil, fmt.Errorf("invalid min gas fee config: %w", err)
+	minFee, ok := usdc.Parse(p.config.MinGasFeeUSDC)
+	if !ok {
+		return nil, fmt.Errorf("invalid min gas fee config: %s", p.config.MinGasFeeUSDC)
 	}
-	maxFee, err := parseUSDC(p.config.MaxGasFeeUSDC)
-	if err != nil {
-		return nil, fmt.Errorf("invalid max gas fee config: %w", err)
+	maxFee, ok := usdc.Parse(p.config.MaxGasFeeUSDC)
+	if !ok {
+		return nil, fmt.Errorf("invalid max gas fee config: %s", p.config.MaxGasFeeUSDC)
 	}
 	gasCostUSDCBig := usdToBigUSDC(gasCostUSD)
 
@@ -118,9 +119,9 @@ func (p *PlatformPaymaster) EstimateGasFee(ctx context.Context, req *EstimateReq
 	}
 
 	// Calculate total
-	originalAmount, err := parseUSDC(req.Amount)
-	if err != nil {
-		return nil, fmt.Errorf("invalid amount: %w", err)
+	originalAmount, ok := usdc.Parse(req.Amount)
+	if !ok {
+		return nil, fmt.Errorf("invalid amount: %s", req.Amount)
 	}
 	totalWithGas := new(big.Int).Add(originalAmount, gasCostUSDCBig)
 
@@ -128,9 +129,9 @@ func (p *PlatformPaymaster) EstimateGasFee(ctx context.Context, req *EstimateReq
 		GasLimit:     gasLimit,
 		GasPriceWei:  gasPrice.String(),
 		GasCostETH:   fmt.Sprintf("%.8f", gasCostETH),
-		GasCostUSDC:  formatUSDC(gasCostUSDCBig),
+		GasCostUSDC:  usdc.Format(gasCostUSDCBig),
 		ETHPriceUSD:  fmt.Sprintf("%.2f", ethPrice),
-		TotalWithGas: formatUSDC(totalWithGas),
+		TotalWithGas: usdc.Format(totalWithGas),
 		ValidUntil:   time.Now().Add(30 * time.Second), // Estimate valid for 30s
 	}, nil
 }
@@ -150,31 +151,28 @@ func (p *PlatformPaymaster) SponsorTransaction(ctx context.Context, req *Sponsor
 		return nil, err
 	}
 
-	// Check daily limit
-	if err := p.checkDailyLimit(estimate.GasCostETH); err != nil {
+	// Atomically check daily limit and record spending
+	if err := p.checkAndRecordSpending(estimate.GasCostETH); err != nil {
 		return nil, err
 	}
 
 	// Calculate total to charge
-	originalAmount, err := parseUSDC(req.Amount)
-	if err != nil {
-		return nil, fmt.Errorf("invalid amount: %w", err)
+	originalAmount, ok := usdc.Parse(req.Amount)
+	if !ok {
+		return nil, fmt.Errorf("invalid amount: %s", req.Amount)
 	}
-	gasFee, err := parseUSDC(estimate.GasCostUSDC)
-	if err != nil {
-		return nil, fmt.Errorf("invalid gas fee: %w", err)
+	gasFee, ok := usdc.Parse(estimate.GasCostUSDC)
+	if !ok {
+		return nil, fmt.Errorf("invalid gas fee: %s", estimate.GasCostUSDC)
 	}
 	totalCharged := new(big.Int).Add(originalAmount, gasFee)
-
-	// Record spending (optimistic - actual spend tracked separately)
-	p.recordSpending(estimate.GasCostETH)
 
 	return &SponsorResult{
 		From:         req.From,
 		To:           req.To,
 		Amount:       req.Amount,
 		GasFeeUSDC:   estimate.GasCostUSDC,
-		TotalCharged: formatUSDC(totalCharged),
+		TotalCharged: usdc.Format(totalCharged),
 		GasPriceWei:  estimate.GasPriceWei,
 		GasCostETH:   estimate.GasCostETH,
 		Status:       "ready", // Ready for execution
@@ -190,8 +188,10 @@ func (p *PlatformPaymaster) GetBalance(ctx context.Context) (*big.Int, error) {
 	return p.client.BalanceAt(ctx, p.walletAddress, nil)
 }
 
-// checkDailyLimit checks if we've exceeded daily gas spending
-func (p *PlatformPaymaster) checkDailyLimit(gasCostETH string) error {
+// checkAndRecordSpending atomically checks the daily limit and records gas
+// spending in a single lock acquisition, preventing a TOCTOU race where
+// concurrent calls could each pass the check before either records.
+func (p *PlatformPaymaster) checkAndRecordSpending(gasCostETH string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -212,16 +212,10 @@ func (p *PlatformPaymaster) checkDailyLimit(gasCostETH string) error {
 		return ErrDailyLimitExceeded
 	}
 
+	// Record spending atomically with the check
+	p.dailySpent = newTotal
+
 	return nil
-}
-
-// recordSpending records gas spending
-func (p *PlatformPaymaster) recordSpending(gasCostETH string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	cost := parseETH(gasCostETH)
-	p.dailySpent = new(big.Int).Add(p.dailySpent, cost)
 }
 
 // GetDailySpending returns today's gas spending
@@ -257,29 +251,6 @@ func parseETH(s string) *big.Int {
 
 func formatETH(wei *big.Int) string {
 	return fmt.Sprintf("%.8f", weiToETH(wei))
-}
-
-func parseUSDC(s string) (*big.Int, error) {
-	if s == "" {
-		return nil, fmt.Errorf("empty amount")
-	}
-	f, ok := new(big.Float).SetString(s)
-	if !ok || f == nil {
-		return nil, fmt.Errorf("invalid amount: %s", s)
-	}
-	if f.Sign() < 0 {
-		return nil, fmt.Errorf("negative amount: %s", s)
-	}
-	f.Mul(f, big.NewFloat(1e6)) // USDC has 6 decimals
-	result, _ := f.Int(nil)
-	return result, nil
-}
-
-func formatUSDC(amount *big.Int) string {
-	f := new(big.Float).SetInt(amount)
-	f.Quo(f, big.NewFloat(1e6))
-	result, _ := f.Float64()
-	return fmt.Sprintf("%.6f", result)
 }
 
 func usdToBigUSDC(usd float64) *big.Int {

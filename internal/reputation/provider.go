@@ -99,8 +99,8 @@ func (p *RegistryProvider) calculateMetrics(agent *registry.Agent, txns []*regis
 		} else if tx.Status == "failed" || tx.Status == "reverted" {
 			m.FailedTxns++
 		} else {
-			// Pending or unknown - count as successful for now
-			m.SuccessfulTxns++
+			// Pending or unknown - do not count as successful or failed
+			m.TotalTransactions--
 		}
 
 		// Track counterparties (the other side of the txn)

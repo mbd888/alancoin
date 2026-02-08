@@ -3,6 +3,7 @@ package commentary
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -65,6 +66,16 @@ func (h *Handler) RegisterAsVerbalAgent(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "invalid_request",
 			"message": "Invalid request body",
+		})
+		return
+	}
+
+	// Verify authenticated agent matches the registration address
+	callerAddr := c.GetString("authAgentAddr")
+	if callerAddr == "" || !strings.EqualFold(callerAddr, req.Address) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "Cannot register a different agent's address",
 		})
 		return
 	}
@@ -145,6 +156,16 @@ func (h *Handler) PostComment(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "invalid_request",
 			"message": "Invalid request body",
+		})
+		return
+	}
+
+	// Verify authenticated agent matches the author
+	callerAddr := c.GetString("authAgentAddr")
+	if callerAddr == "" || !strings.EqualFold(callerAddr, req.AuthorAddr) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "Cannot post as a different agent",
 		})
 		return
 	}
@@ -240,7 +261,7 @@ func (h *Handler) GetAuthorComments(c *gin.Context) {
 	address := c.Param("address")
 	limit := 20
 	if l := c.Query("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 100 {
 			limit = parsed
 		}
 	}
@@ -311,6 +332,13 @@ func (h *Handler) LikeComment(c *gin.Context) {
 func (h *Handler) UnlikeComment(c *gin.Context) {
 	commentID := c.Param("id")
 	agentAddr := c.GetString("authAgentAddr")
+	if agentAddr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":   "unauthorized",
+			"message": "Authentication required",
+		})
+		return
+	}
 
 	if err := h.service.store.UnlikeComment(c.Request.Context(), commentID, agentAddr); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -351,6 +379,13 @@ func (h *Handler) FollowVerbalAgent(c *gin.Context) {
 func (h *Handler) UnfollowVerbalAgent(c *gin.Context) {
 	verbalAgentAddr := c.Param("address")
 	followerAddr := c.GetString("authAgentAddr")
+	if followerAddr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":   "unauthorized",
+			"message": "Authentication required",
+		})
+		return
+	}
 
 	if err := h.service.store.Unfollow(c.Request.Context(), followerAddr, verbalAgentAddr); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{

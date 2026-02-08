@@ -49,7 +49,11 @@ func CORSMiddleware(allowedOrigins []string) gin.HandlerFunc {
 			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
 			c.Header("Access-Control-Max-Age", "86400")
-			c.Header("Access-Control-Allow-Credentials", "true")
+			// Only set Allow-Credentials when NOT using wildcard origins
+			// (wildcard + credentials is a security vulnerability per CORS spec)
+			if !originsMap["*"] {
+				c.Header("Access-Control-Allow-Credentials", "true")
+			}
 		}
 
 		// Handle preflight

@@ -2,10 +2,11 @@ package commentary
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
+	"strconv"
+
+	"github.com/mbd888/alancoin/internal/idgen"
 )
 
 // PostgresStore implements Store with PostgreSQL
@@ -143,7 +144,7 @@ func (p *PostgresStore) UpdateVerbalAgent(ctx context.Context, agent *VerbalAgen
 func (p *PostgresStore) PostComment(ctx context.Context, comment *Comment) error {
 	// Generate ID if not set
 	if comment.ID == "" {
-		comment.ID = generateID("cmt_")
+		comment.ID = idgen.WithPrefix("cmt_")
 	}
 
 	refsJSON, err := json.Marshal(comment.References)
@@ -190,27 +191,27 @@ func (p *PostgresStore) ListComments(ctx context.Context, opts ListOptions) ([]*
 	argN := 1
 
 	if opts.Type != "" {
-		query += ` AND type = $` + string(rune('0'+argN))
+		query += ` AND type = $` + strconv.Itoa(argN)
 		args = append(args, opts.Type)
 		argN++
 	}
 	if opts.AuthorAddr != "" {
-		query += ` AND author_addr = $` + string(rune('0'+argN))
+		query += ` AND author_addr = $` + strconv.Itoa(argN)
 		args = append(args, opts.AuthorAddr)
 		argN++
 	}
 	if opts.Since != nil {
-		query += ` AND created_at > $` + string(rune('0'+argN))
+		query += ` AND created_at > $` + strconv.Itoa(argN)
 		args = append(args, opts.Since)
 		argN++
 	}
 
-	query += ` ORDER BY created_at DESC LIMIT $` + string(rune('0'+argN))
+	query += ` ORDER BY created_at DESC LIMIT $` + strconv.Itoa(argN)
 	args = append(args, opts.Limit)
 
 	if opts.Offset > 0 {
 		argN++
-		query += ` OFFSET $` + string(rune('0'+argN))
+		query += ` OFFSET $` + strconv.Itoa(argN)
 		args = append(args, opts.Offset)
 	}
 
@@ -289,8 +290,8 @@ func (p *PostgresStore) LikeComment(ctx context.Context, commentID, agentAddr st
 	}
 	defer tx.Rollback()
 
-	// Insert like
-	_, err = tx.ExecContext(ctx, `
+	// Insert like (only increment counter if actually inserted, not if duplicate)
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO comment_likes (comment_id, agent_addr) VALUES ($1, $2)
 		ON CONFLICT DO NOTHING
 	`, commentID, agentAddr)
@@ -298,10 +299,12 @@ func (p *PostgresStore) LikeComment(ctx context.Context, commentID, agentAddr st
 		return err
 	}
 
-	// Increment count
-	_, err = tx.ExecContext(ctx, `UPDATE comments SET likes = likes + 1 WHERE id = $1`, commentID)
-	if err != nil {
-		return err
+	affected, _ := result.RowsAffected()
+	if affected > 0 {
+		_, err = tx.ExecContext(ctx, `UPDATE comments SET likes = likes + 1 WHERE id = $1`, commentID)
+		if err != nil {
+			return err
+		}
 	}
 
 	return tx.Commit()
@@ -338,7 +341,7 @@ func (p *PostgresStore) Follow(ctx context.Context, followerAddr, verbalAgentAdd
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO verbal_follows (follower_addr, verbal_addr) VALUES ($1, $2)
 		ON CONFLICT DO NOTHING
 	`, followerAddr, verbalAgentAddr)
@@ -346,11 +349,14 @@ func (p *PostgresStore) Follow(ctx context.Context, followerAddr, verbalAgentAdd
 		return err
 	}
 
-	_, err = tx.ExecContext(ctx, `
-		UPDATE verbal_agents SET followers = followers + 1 WHERE address = $1
-	`, verbalAgentAddr)
-	if err != nil {
-		return err
+	affected, _ := result.RowsAffected()
+	if affected > 0 {
+		_, err = tx.ExecContext(ctx, `
+			UPDATE verbal_agents SET followers = followers + 1 WHERE address = $1
+		`, verbalAgentAddr)
+		if err != nil {
+			return err
+		}
 	}
 
 	return tx.Commit()
@@ -421,12 +427,4 @@ func (p *PostgresStore) GetFollowing(ctx context.Context, agentAddr string) ([]s
 		following = append(following, addr)
 	}
 	return following, rows.Err()
-}
-
-func generateID(prefix string) string {
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return prefix + hex.EncodeToString(b)
 }

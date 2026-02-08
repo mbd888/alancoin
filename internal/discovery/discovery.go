@@ -11,6 +11,7 @@ package discovery
 import (
 	"context"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -290,7 +291,7 @@ func (e *Engine) Recommend(ctx context.Context, query string, topN int) ([]Searc
 		recommendation = "Here are the top options to compare. " +
 			top.AgentName + " offers the best overall match."
 	default:
-		recommendation = "Found " + string(rune('0'+len(results))) + " matching services. " +
+		recommendation = "Found " + strconv.Itoa(len(results)) + " matching services. " +
 			"Top pick: " + top.AgentName + " (" + top.ServiceType + " at $" + top.Price + ")."
 	}
 

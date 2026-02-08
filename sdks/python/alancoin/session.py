@@ -16,11 +16,14 @@ call_service() discovers → selects → pays → calls in one step, and the
 context manager revokes the session key on exit.
 """
 
+import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Union
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 from .exceptions import AlancoinError, ValidationError
 from .session_keys import SessionKeyManager
@@ -201,8 +204,7 @@ class BudgetSession:
                     self._client.address, self._key_id
                 )
             except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning("Failed to revoke session key %s: %s", self._key_id, e)
+                logger.warning("Failed to revoke session key %s: %s", self._key_id, e)
         self._active = False
         self._skm = None
 
@@ -226,6 +228,11 @@ class BudgetSession:
             raise AlancoinError("Session is not active", code="session_inactive")
 
         amount_dec = Decimal(amount)
+        if self._budget.max_per_tx and amount_dec > Decimal(self._budget.max_per_tx):
+            raise AlancoinError(
+                f"Payment of ${amount} exceeds per-transaction limit of ${self._budget.max_per_tx}",
+                code="per_tx_limit_exceeded",
+            )
         if self._total_spent + amount_dec > Decimal(self._budget.max_total):
             raise AlancoinError(
                 f"Payment of ${amount} would exceed session budget "
@@ -308,6 +315,11 @@ class BudgetSession:
 
         # 3. Budget check
         price_dec = Decimal(service.price)
+        if self._budget.max_per_tx and price_dec > Decimal(self._budget.max_per_tx):
+            raise AlancoinError(
+                f"Service costs ${service.price} which exceeds per-transaction limit of ${self._budget.max_per_tx}",
+                code="per_tx_limit_exceeded",
+            )
         if self._total_spent + price_dec > Decimal(self._budget.max_total):
             raise AlancoinError(
                 f"Service costs ${service.price} but only "
@@ -345,8 +357,7 @@ class BudgetSession:
                 try:
                     self._client.confirm_escrow(escrow_id)
                 except Exception as e:
-                    import logging
-                    logging.getLogger(__name__).warning("Escrow confirmation failed for %s: %s - funds may be stuck", escrow_id, e)
+                    logger.warning("Escrow confirmation failed for %s: %s - funds may be stuck", escrow_id, e)
 
             return ServiceResult(
                 data=response_data,
@@ -360,8 +371,7 @@ class BudgetSession:
             try:
                 self._client.confirm_escrow(escrow_id)
             except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning("Escrow confirmation failed for %s: %s - funds may be stuck", escrow_id, e)
+                logger.warning("Escrow confirmation failed for %s: %s - funds may be stuck", escrow_id, e)
 
         # No endpoint — return payment confirmation
         return ServiceResult(
@@ -508,6 +518,24 @@ class BudgetSession:
             raise AlancoinError("Session is not active", code="session_inactive")
         return self._client.dispute_escrow(escrow_id, reason)
 
+    # -- Credit-aware balance -------------------------------------------------
+
+    def get_effective_balance(self) -> str:
+        """Get effective balance including available credit.
+
+        Returns the sum of available platform balance plus unused credit line.
+        This is the total amount the agent could spend right now.
+
+        Returns:
+            Effective balance as a string (e.g., "55.00").
+        """
+        balance_resp = self._client.get_platform_balance(self._client.address)
+        balance = balance_resp.get("balance", {})
+        available = Decimal(balance.get("available", "0"))
+        credit_limit = Decimal(balance.get("creditLimit", "0"))
+        credit_used = Decimal(balance.get("creditUsed", "0"))
+        return str(available + (credit_limit - credit_used))
+
     # -- Internals ------------------------------------------------------------
 
     def _select_service(
@@ -556,8 +584,7 @@ class BudgetSession:
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.RequestException as e:
-            import logging
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "Service endpoint call failed for %s: %s", service.endpoint, e
             )
             # Payment was already made — return error context (no internal details)

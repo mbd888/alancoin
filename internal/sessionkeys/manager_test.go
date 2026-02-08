@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 func TestSessionKeyCreate(t *testing.T) {
@@ -179,8 +181,8 @@ func TestSessionKeyUsageTracking(t *testing.T) {
 
 	// Check usage
 	key, _ = mgr.Get(ctx, key.ID)
-	if key.Usage.TotalSpent != "4" {
-		t.Errorf("Expected TotalSpent 4, got %s", key.Usage.TotalSpent)
+	if key.Usage.TotalSpent != "4.000000" {
+		t.Errorf("Expected TotalSpent 4.000000, got %s", key.Usage.TotalSpent)
 	}
 	if key.Usage.TransactionCount != 2 {
 		t.Errorf("Expected 2 transactions, got %d", key.Usage.TransactionCount)
@@ -201,22 +203,22 @@ func TestParseUSDC(t *testing.T) {
 		input    string
 		expected string // as formatted output
 	}{
-		{"1.00", "1"},
-		{"0.50", "0.5"},
-		{"0.001", "0.001"},
-		{"100", "100"},
+		{"1.00", "1.000000"},
+		{"0.50", "0.500000"},
+		{"0.001", "0.001000"},
+		{"100", "100.000000"},
 		{"0.000001", "0.000001"},
 	}
 
 	for _, tc := range tests {
-		big, ok := parseUSDC(tc.input)
+		big, ok := usdc.Parse(tc.input)
 		if !ok {
 			t.Errorf("Failed to parse %s", tc.input)
 			continue
 		}
-		result := formatUSDC(big)
+		result := usdc.Format(big)
 		if result != tc.expected {
-			t.Errorf("parseUSDC(%s) -> formatUSDC = %s, expected %s", tc.input, result, tc.expected)
+			t.Errorf("usdc.Parse(%s) -> formatUSDC = %s, expected %s", tc.input, result, tc.expected)
 		}
 	}
 }

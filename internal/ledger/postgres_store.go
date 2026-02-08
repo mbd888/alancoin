@@ -2,19 +2,12 @@ package ledger
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"time"
-)
 
-func generateID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
-}
+	"github.com/mbd888/alancoin/internal/idgen"
+)
 
 // PostgresStore implements Store with PostgreSQL
 type PostgresStore struct {
@@ -64,19 +57,25 @@ func (p *PostgresStore) GetBalance(ctx context.Context, agentAddr string) (*Bala
 	bal := &Balance{AgentAddr: agentAddr}
 
 	err := p.db.QueryRowContext(ctx, `
-		SELECT available, pending, COALESCE(escrowed, 0), total_in, total_out, updated_at
+		SELECT available, pending, COALESCE(escrowed, 0),
+		       COALESCE(credit_limit, 0), COALESCE(credit_used, 0),
+		       total_in, total_out, updated_at
 		FROM agent_balances WHERE agent_address = $1
-	`, agentAddr).Scan(&bal.Available, &bal.Pending, &bal.Escrowed, &bal.TotalIn, &bal.TotalOut, &bal.UpdatedAt)
+	`, agentAddr).Scan(&bal.Available, &bal.Pending, &bal.Escrowed,
+		&bal.CreditLimit, &bal.CreditUsed,
+		&bal.TotalIn, &bal.TotalOut, &bal.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		return &Balance{
-			AgentAddr: agentAddr,
-			Available: "0",
-			Pending:   "0",
-			Escrowed:  "0",
-			TotalIn:   "0",
-			TotalOut:  "0",
-			UpdatedAt: time.Now(),
+			AgentAddr:   agentAddr,
+			Available:   "0",
+			Pending:     "0",
+			Escrowed:    "0",
+			CreditLimit: "0",
+			CreditUsed:  "0",
+			TotalIn:     "0",
+			TotalOut:    "0",
+			UpdatedAt:   time.Now(),
 		}, nil
 	}
 	if err != nil {
@@ -85,7 +84,7 @@ func (p *PostgresStore) GetBalance(ctx context.Context, agentAddr string) (*Bala
 	return bal, nil
 }
 
-// Credit adds funds to an agent's balance
+// Credit adds funds to an agent's balance, auto-repaying credit first
 func (p *PostgresStore) Credit(ctx context.Context, agentAddr, amount, txHash, description string) error {
 	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
@@ -93,24 +92,28 @@ func (p *PostgresStore) Credit(ctx context.Context, agentAddr, amount, txHash, d
 	}
 	defer tx.Rollback()
 
-	// Upsert balance using native NUMERIC arithmetic
+	// Upsert balance, auto-repay credit in the same atomic transaction.
+	// If credit_used > 0, reduce it by min(amount, credit_used) and add remainder to available.
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO agent_balances (agent_address, available, total_in, updated_at)
 		VALUES ($1, $2::NUMERIC(20,6), $2::NUMERIC(20,6), NOW())
 		ON CONFLICT (agent_address) DO UPDATE SET
-			available  = agent_balances.available + $2::NUMERIC(20,6),
-			total_in   = agent_balances.total_in  + $2::NUMERIC(20,6),
-			updated_at = NOW()
+			available    = agent_balances.available
+			             + ($2::NUMERIC(20,6) - LEAST($2::NUMERIC(20,6), COALESCE(agent_balances.credit_used, 0))),
+			credit_used  = COALESCE(agent_balances.credit_used, 0)
+			             - LEAST($2::NUMERIC(20,6), COALESCE(agent_balances.credit_used, 0)),
+			total_in     = agent_balances.total_in + $2::NUMERIC(20,6),
+			updated_at   = NOW()
 	`, agentAddr, amount)
 	if err != nil {
 		return fmt.Errorf("failed to update balance: %w", err)
 	}
 
-	// Record entry
+	// Record deposit entry
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO ledger_entries (id, agent_address, type, amount, tx_hash, description, created_at)
 		VALUES ($1, $2, 'deposit', $3::NUMERIC(20,6), $4, $5, NOW())
-	`, generateID(), agentAddr, amount, txHash, description)
+	`, idgen.New(), agentAddr, amount, txHash, description)
 	if err != nil {
 		return fmt.Errorf("failed to record entry: %w", err)
 	}
@@ -118,8 +121,8 @@ func (p *PostgresStore) Credit(ctx context.Context, agentAddr, amount, txHash, d
 	return tx.Commit()
 }
 
-// Debit removes funds from an agent's balance with row-level locking.
-// The CHECK constraint on available >= 0 prevents overdraft at the DB level.
+// Debit removes funds from an agent's balance with credit support.
+// Uses available balance first, then draws from credit for any shortfall.
 func (p *PostgresStore) Debit(ctx context.Context, agentAddr, amount, reference, description string) error {
 	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
@@ -127,18 +130,20 @@ func (p *PostgresStore) Debit(ctx context.Context, agentAddr, amount, reference,
 	}
 	defer tx.Rollback()
 
-	// Lock the row and verify sufficient balance in one atomic step.
-	// The CHECK constraint (available >= 0) will cause this to fail
-	// if the debit would overdraw the account.
+	// Credit-aware debit: debit from available first, draw gap from credit.
+	// gap = max(0, amount - available)
+	// Fails if available + (credit_limit - credit_used) < amount.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE agent_balances SET
-			available  = available - $2::NUMERIC(20,6),
-			total_out  = total_out + $2::NUMERIC(20,6),
-			updated_at = NOW()
+			credit_used = COALESCE(credit_used, 0)
+			            + GREATEST(0, $2::NUMERIC(20,6) - available),
+			available   = GREATEST(0, available - $2::NUMERIC(20,6)),
+			total_out   = total_out + $2::NUMERIC(20,6),
+			updated_at  = NOW()
 		WHERE agent_address = $1
+		  AND available + (COALESCE(credit_limit, 0) - COALESCE(credit_used, 0)) >= $2::NUMERIC(20,6)
 	`, agentAddr, amount)
 	if err != nil {
-		// CHECK constraint violation means insufficient balance
 		return fmt.Errorf("failed to update balance: %w", err)
 	}
 
@@ -147,14 +152,20 @@ func (p *PostgresStore) Debit(ctx context.Context, agentAddr, amount, reference,
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
 	if rows == 0 {
-		return ErrAgentNotFound
+		// Check if agent exists to distinguish not-found from insufficient balance
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists)
+		if !exists {
+			return ErrAgentNotFound
+		}
+		return ErrInsufficientBalance
 	}
 
 	// Record entry
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
 		VALUES ($1, $2, 'spend', $3::NUMERIC(20,6), $4, $5, NOW())
-	`, generateID(), agentAddr, amount, reference, description)
+	`, idgen.New(), agentAddr, amount, reference, description)
 	if err != nil {
 		return fmt.Errorf("failed to record entry: %w", err)
 	}
@@ -193,7 +204,7 @@ func (p *PostgresStore) Refund(ctx context.Context, agentAddr, amount, reference
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
 		VALUES ($1, $2, 'refund', $3::NUMERIC(20,6), $4, $5, NOW())
-	`, generateID(), agentAddr, amount, reference, description)
+	`, idgen.New(), agentAddr, amount, reference, description)
 	if err != nil {
 		return fmt.Errorf("failed to record entry: %w", err)
 	}
@@ -233,7 +244,7 @@ func (p *PostgresStore) Withdraw(ctx context.Context, agentAddr, amount, txHash 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO ledger_entries (id, agent_address, type, amount, tx_hash, description, created_at)
 		VALUES ($1, $2, 'withdrawal', $3::NUMERIC(20,6), $4, 'withdrawal', NOW())
-	`, generateID(), agentAddr, amount, txHash)
+	`, idgen.New(), agentAddr, amount, txHash)
 	if err != nil {
 		return fmt.Errorf("failed to record entry: %w", err)
 	}
@@ -241,8 +252,8 @@ func (p *PostgresStore) Withdraw(ctx context.Context, agentAddr, amount, txHash 
 	return tx.Commit()
 }
 
-// Hold places a hold on funds (moves from available to pending).
-// Used for two-phase transactions: hold first, then confirm or release.
+// Hold places a hold on funds (moves from available to pending) with credit support.
+// If available < amount, draws the shortfall from credit line.
 func (p *PostgresStore) Hold(ctx context.Context, agentAddr, amount, reference string) error {
 	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
@@ -250,14 +261,16 @@ func (p *PostgresStore) Hold(ctx context.Context, agentAddr, amount, reference s
 	}
 	defer tx.Rollback()
 
-	// Atomic: decrease available, increase pending
-	// CHECK constraint on available >= 0 prevents overdraft
+	// Credit-aware hold: use available first, draw gap from credit, all goes to pending.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE agent_balances SET
-			available  = available - $2::NUMERIC(20,6),
-			pending    = pending   + $2::NUMERIC(20,6),
-			updated_at = NOW()
+			credit_used = COALESCE(credit_used, 0)
+			            + GREATEST(0, $2::NUMERIC(20,6) - available),
+			available   = GREATEST(0, available - $2::NUMERIC(20,6)),
+			pending     = pending + $2::NUMERIC(20,6),
+			updated_at  = NOW()
 		WHERE agent_address = $1
+		  AND available + (COALESCE(credit_limit, 0) - COALESCE(credit_used, 0)) >= $2::NUMERIC(20,6)
 	`, agentAddr, amount)
 	if err != nil {
 		return fmt.Errorf("failed to place hold: %w", err)
@@ -268,14 +281,19 @@ func (p *PostgresStore) Hold(ctx context.Context, agentAddr, amount, reference s
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
 	if rows == 0 {
-		return ErrAgentNotFound
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists)
+		if !exists {
+			return ErrAgentNotFound
+		}
+		return ErrInsufficientBalance
 	}
 
 	// Record hold entry
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
 		VALUES ($1, $2, 'hold', $3::NUMERIC(20,6), $4, 'pending_transfer', NOW())
-	`, generateID(), agentAddr, amount, reference)
+	`, idgen.New(), agentAddr, amount, reference)
 	if err != nil {
 		return fmt.Errorf("failed to record hold entry: %w", err)
 	}
@@ -315,7 +333,7 @@ func (p *PostgresStore) ConfirmHold(ctx context.Context, agentAddr, amount, refe
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
 		VALUES ($1, $2, 'spend', $3::NUMERIC(20,6), $4, 'transfer_confirmed', NOW())
-	`, generateID(), agentAddr, amount, reference)
+	`, idgen.New(), agentAddr, amount, reference)
 	if err != nil {
 		return fmt.Errorf("failed to record confirmation entry: %w", err)
 	}
@@ -354,7 +372,7 @@ func (p *PostgresStore) ReleaseHold(ctx context.Context, agentAddr, amount, refe
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
 		VALUES ($1, $2, 'release', $3::NUMERIC(20,6), $4, 'hold_released', NOW())
-	`, generateID(), agentAddr, amount, reference)
+	`, idgen.New(), agentAddr, amount, reference)
 	if err != nil {
 		return fmt.Errorf("failed to record release entry: %w", err)
 	}
@@ -392,7 +410,7 @@ func (p *PostgresStore) EscrowLock(ctx context.Context, agentAddr, amount, refer
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
 		VALUES ($1, $2, 'escrow_lock', $3::NUMERIC(20,6), $4, 'escrow_locked', NOW())
-	`, generateID(), agentAddr, amount, reference)
+	`, idgen.New(), agentAddr, amount, reference)
 	if err != nil {
 		return fmt.Errorf("failed to record escrow lock entry: %w", err)
 	}
@@ -444,7 +462,7 @@ func (p *PostgresStore) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
 		VALUES ($1, $2, 'escrow_release', $3::NUMERIC(20,6), $4, 'escrow_released_to_seller', NOW())
-	`, generateID(), buyerAddr, amount, reference)
+	`, idgen.New(), buyerAddr, amount, reference)
 	if err != nil {
 		return fmt.Errorf("failed to record buyer escrow release entry: %w", err)
 	}
@@ -452,7 +470,7 @@ func (p *PostgresStore) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
 		VALUES ($1, $2, 'escrow_receive', $3::NUMERIC(20,6), $4, 'escrow_payment_received', NOW())
-	`, generateID(), sellerAddr, amount, reference)
+	`, idgen.New(), sellerAddr, amount, reference)
 	if err != nil {
 		return fmt.Errorf("failed to record seller escrow receive entry: %w", err)
 	}
@@ -490,7 +508,7 @@ func (p *PostgresStore) RefundEscrow(ctx context.Context, agentAddr, amount, ref
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
 		VALUES ($1, $2, 'escrow_refund', $3::NUMERIC(20,6), $4, 'escrow_refunded', NOW())
-	`, generateID(), agentAddr, amount, reference)
+	`, idgen.New(), agentAddr, amount, reference)
 	if err != nil {
 		return fmt.Errorf("failed to record escrow refund entry: %w", err)
 	}
@@ -534,4 +552,129 @@ func (p *PostgresStore) HasDeposit(ctx context.Context, txHash string) (bool, er
 		SELECT COUNT(*) FROM ledger_entries WHERE tx_hash = $1 AND type = 'deposit'
 	`, txHash).Scan(&count)
 	return count > 0, err
+}
+
+// SetCreditLimit sets the maximum credit for an agent
+func (p *PostgresStore) SetCreditLimit(ctx context.Context, agentAddr, limit string) error {
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO agent_balances (agent_address, credit_limit, updated_at)
+		VALUES ($1, $2::NUMERIC(20,6), NOW())
+		ON CONFLICT (agent_address) DO UPDATE SET
+			credit_limit = $2::NUMERIC(20,6),
+			updated_at   = NOW()
+	`, agentAddr, limit)
+	if err != nil {
+		return fmt.Errorf("failed to set credit limit: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ledger_entries (id, agent_address, type, amount, description, created_at)
+		VALUES ($1, $2, 'credit_limit_set', $3::NUMERIC(20,6), 'credit_limit_set', NOW())
+	`, idgen.New(), agentAddr, limit)
+	if err != nil {
+		return fmt.Errorf("failed to record credit limit entry: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// UseCredit draws from the agent's credit line
+func (p *PostgresStore) UseCredit(ctx context.Context, agentAddr, amount string) error {
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// CHECK constraint ensures credit_used <= credit_limit
+	result, err := tx.ExecContext(ctx, `
+		UPDATE agent_balances SET
+			credit_used = COALESCE(credit_used, 0) + $2::NUMERIC(20,6),
+			updated_at  = NOW()
+		WHERE agent_address = $1
+		  AND COALESCE(credit_used, 0) + $2::NUMERIC(20,6) <= COALESCE(credit_limit, 0)
+	`, agentAddr, amount)
+	if err != nil {
+		return fmt.Errorf("failed to use credit: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrInsufficientBalance
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ledger_entries (id, agent_address, type, amount, description, created_at)
+		VALUES ($1, $2, 'credit_draw', $3::NUMERIC(20,6), 'credit_draw', NOW())
+	`, idgen.New(), agentAddr, amount)
+	if err != nil {
+		return fmt.Errorf("failed to record credit draw entry: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// RepayCredit reduces outstanding credit usage
+func (p *PostgresStore) RepayCredit(ctx context.Context, agentAddr, amount string) error {
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Repay up to what's owed: min(amount, credit_used)
+	result, err := tx.ExecContext(ctx, `
+		UPDATE agent_balances SET
+			credit_used = COALESCE(credit_used, 0) - LEAST($2::NUMERIC(20,6), COALESCE(credit_used, 0)),
+			updated_at  = NOW()
+		WHERE agent_address = $1
+	`, agentAddr, amount)
+	if err != nil {
+		return fmt.Errorf("failed to repay credit: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrAgentNotFound
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ledger_entries (id, agent_address, type, amount, description, created_at)
+		VALUES ($1, $2, 'credit_repay', LEAST($3::NUMERIC(20,6), (SELECT COALESCE(credit_used, 0) + LEAST($3::NUMERIC(20,6), COALESCE(credit_used, 0)) FROM agent_balances WHERE agent_address = $2)), 'credit_repay', NOW())
+	`, idgen.New(), agentAddr, amount)
+	if err != nil {
+		// Non-critical: repayment succeeded even if entry recording fails
+		return fmt.Errorf("failed to record credit repay entry: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// GetCreditInfo returns the current credit limit and usage
+func (p *PostgresStore) GetCreditInfo(ctx context.Context, agentAddr string) (string, string, error) {
+	var creditLimit, creditUsed string
+	err := p.db.QueryRowContext(ctx, `
+		SELECT COALESCE(credit_limit, 0), COALESCE(credit_used, 0)
+		FROM agent_balances WHERE agent_address = $1
+	`, agentAddr).Scan(&creditLimit, &creditUsed)
+
+	if err == sql.ErrNoRows {
+		return "0", "0", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return creditLimit, creditUsed, nil
 }

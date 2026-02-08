@@ -8,6 +8,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
+	"github.com/mbd888/alancoin/internal/usdc"
+	"github.com/mbd888/alancoin/internal/validation"
 )
 
 // TransferResult from a wallet transfer
@@ -249,6 +251,18 @@ func (h *Handler) Transact(c *gin.Context) {
 		return
 	}
 
+	// Validate address and amount format before signature verification
+	if errs := validation.Validate(
+		validation.ValidAddress("to", req.To),
+		validation.ValidAmount("amount", req.Amount),
+	); len(errs) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_failed",
+			"message": errs.Error(),
+		})
+		return
+	}
+
 	// Get the session key
 	key, err := h.manager.Get(c.Request.Context(), keyID)
 	if err != nil {
@@ -288,32 +302,13 @@ func (h *Handler) Transact(c *gin.Context) {
 		return
 	}
 
-	// Record usage (update nonce and spending)
-	if err := h.manager.RecordUsage(c.Request.Context(), keyID, req.Amount, req.Nonce); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "usage_tracking_failed",
-			"message": "Failed to record usage",
-		})
-		return
-	}
-
-	// Reload key to get updated usage
-	key, err = h.manager.Get(c.Request.Context(), keyID)
-	if err != nil || key == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "internal_error",
-			"message": "Failed to reload session key",
-		})
-		return
-	}
-
 	// Execute the transfer if wallet is configured
 	var txHash string
 	var executed bool
 
 	if h.wallet != nil {
 		// Parse amount to big.Int (USDC has 6 decimals)
-		amountBig, ok := parseUSDC(req.Amount)
+		amountBig, ok := usdc.Parse(req.Amount)
 		if !ok {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":   "invalid_amount",
@@ -354,8 +349,6 @@ func (h *Handler) Transact(c *gin.Context) {
 		executed = true
 
 		// Phase 2: Confirm hold (pending → total_out)
-		// The transfer was broadcast successfully. Even if confirmation
-		// takes time, the funds are committed.
 		if h.balance != nil {
 			_ = h.balance.ConfirmHold(c.Request.Context(), address, req.Amount, keyID)
 		}
@@ -364,6 +357,26 @@ func (h *Handler) Transact(c *gin.Context) {
 		if h.recorder != nil {
 			_ = h.recorder.RecordTransaction(c.Request.Context(), txHash, address, req.To, req.Amount, req.ServiceID)
 		}
+	}
+
+	// Record usage AFTER successful transfer (or in dry-run mode).
+	// Recording before transfer would permanently consume budget on transfer failure.
+	if err := h.manager.RecordUsage(c.Request.Context(), keyID, req.Amount, req.Nonce); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "usage_tracking_failed",
+			"message": "Failed to record usage",
+		})
+		return
+	}
+
+	// Reload key to get updated usage
+	key, err = h.manager.Get(c.Request.Context(), keyID)
+	if err != nil || key == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Failed to reload session key",
+		})
+		return
 	}
 
 	// Build response
@@ -425,14 +438,14 @@ func calculateRemaining(limit string, spent string) string {
 	if limit == "" {
 		return "unlimited"
 	}
-	limitBig, ok := parseUSDC(limit)
+	limitBig, ok := usdc.Parse(limit)
 	if !ok {
 		return "unknown"
 	}
-	spentBig, _ := parseUSDC(spent)
+	spentBig, _ := usdc.Parse(spent)
 	remaining := new(big.Int).Sub(limitBig, spentBig)
 	if remaining.Sign() < 0 {
 		return "0"
 	}
-	return formatUSDC(remaining)
+	return usdc.Format(remaining)
 }

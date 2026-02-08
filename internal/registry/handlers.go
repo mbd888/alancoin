@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/mbd888/alancoin/internal/logging"
+	"github.com/mbd888/alancoin/internal/validation"
 )
 
 // ReputationProvider supplies reputation scores for agents.
@@ -100,6 +101,19 @@ func (h *Handler) RecordTransaction(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "invalid_request",
 			"message": "Invalid request body",
+		})
+		return
+	}
+
+	// Validate addresses and amount
+	if errs := validation.Validate(
+		validation.ValidAddress("from", req.From),
+		validation.ValidAddress("to", req.To),
+		validation.ValidAmount("amount", req.Amount),
+	); len(errs) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_failed",
+			"message": errs.Error(),
 		})
 		return
 	}
@@ -724,6 +738,9 @@ func parseIntQuery(c *gin.Context, key string, defaultVal int) int {
 	if val := c.Query(key); val != "" {
 		var i int
 		if _, err := fmt.Sscanf(val, "%d", &i); err == nil && i > 0 {
+			if i > 1000 {
+				i = 1000
+			}
 			return i
 		}
 	}

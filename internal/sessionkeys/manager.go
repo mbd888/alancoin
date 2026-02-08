@@ -6,6 +6,9 @@ import (
 	"math/big"
 	"strings"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/idgen"
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 // Store defines the interface for session key persistence
@@ -79,7 +82,7 @@ func (m *Manager) Create(ctx context.Context, ownerAddr string, req *SessionKeyR
 
 	// Create the session key
 	key := &SessionKey{
-		ID:        GenerateID(),
+		ID:        idgen.WithPrefix("sk_"),
 		OwnerAddr: strings.ToLower(ownerAddr),
 		PublicKey: publicKey, // The session key's Ethereum address
 		CreatedAt: time.Now(),
@@ -212,12 +215,12 @@ func (m *Manager) RecordUsage(ctx context.Context, keyID string, amount string, 
 		return err
 	}
 
-	amountBig, _ := parseUSDC(amount)
+	amountBig, _ := usdc.Parse(amount)
 
 	// Update total spent
-	totalSpent, _ := parseUSDC(key.Usage.TotalSpent)
+	totalSpent, _ := usdc.Parse(key.Usage.TotalSpent)
 	newTotal := new(big.Int).Add(totalSpent, amountBig)
-	key.Usage.TotalSpent = formatUSDC(newTotal)
+	key.Usage.TotalSpent = usdc.Format(newTotal)
 
 	// Update daily spent (reset if new day)
 	today := time.Now().Format("2006-01-02")
@@ -225,9 +228,9 @@ func (m *Manager) RecordUsage(ctx context.Context, keyID string, amount string, 
 		key.Usage.SpentToday = "0"
 		key.Usage.LastResetDay = today
 	}
-	spentToday, _ := parseUSDC(key.Usage.SpentToday)
+	spentToday, _ := usdc.Parse(key.Usage.SpentToday)
 	newDaily := new(big.Int).Add(spentToday, amountBig)
-	key.Usage.SpentToday = formatUSDC(newDaily)
+	key.Usage.SpentToday = usdc.Format(newDaily)
 
 	// Update counters
 	key.Usage.TransactionCount++
@@ -258,32 +261,34 @@ func (m *Manager) validateTransaction(ctx context.Context, key *SessionKey, to s
 	}
 
 	// Parse amount
-	amountBig, ok := parseUSDC(amount)
+	amountBig, ok := usdc.Parse(amount)
 	if !ok {
 		return &ValidationError{Code: "invalid_amount", Message: "Invalid amount format"}
+	}
+	if amountBig.Sign() <= 0 {
+		return &ValidationError{Code: "invalid_amount", Message: "Amount must be positive"}
 	}
 
 	// Check per-transaction limit
 	if key.Permission.MaxPerTransaction != "" {
-		maxPerTx, ok := parseUSDC(key.Permission.MaxPerTransaction)
+		maxPerTx, ok := usdc.Parse(key.Permission.MaxPerTransaction)
 		if ok && amountBig.Cmp(maxPerTx) > 0 {
 			return ErrExceedsPerTx
 		}
 	}
 
 	// Check daily limit (reset if new day)
+	// Use a local variable -- do NOT mutate key.Usage here as this is a read-path
 	today := now.Format("2006-01-02")
 	spentToday := key.Usage.SpentToday
 	if key.Usage.LastResetDay != today {
 		spentToday = "0"
-		key.Usage.LastResetDay = today
-		key.Usage.SpentToday = "0"
 	}
 
 	if key.Permission.MaxPerDay != "" {
-		maxDaily, ok := parseUSDC(key.Permission.MaxPerDay)
+		maxDaily, ok := usdc.Parse(key.Permission.MaxPerDay)
 		if ok {
-			spent, _ := parseUSDC(spentToday)
+			spent, _ := usdc.Parse(spentToday)
 			newTotal := new(big.Int).Add(spent, amountBig)
 			if newTotal.Cmp(maxDaily) > 0 {
 				return ErrExceedsDaily
@@ -293,9 +298,9 @@ func (m *Manager) validateTransaction(ctx context.Context, key *SessionKey, to s
 
 	// Check total limit
 	if key.Permission.MaxTotal != "" {
-		maxTotal, ok := parseUSDC(key.Permission.MaxTotal)
+		maxTotal, ok := usdc.Parse(key.Permission.MaxTotal)
 		if ok {
-			spent, _ := parseUSDC(key.Usage.TotalSpent)
+			spent, _ := usdc.Parse(key.Usage.TotalSpent)
 			newTotal := new(big.Int).Add(spent, amountBig)
 			if newTotal.Cmp(maxTotal) > 0 {
 				return ErrExceedsTotal
@@ -359,50 +364,6 @@ func parseDuration(s string) (time.Duration, error) {
 		return time.Duration(d) * 24 * time.Hour, nil
 	}
 	return time.ParseDuration(s)
-}
-
-func parseUSDC(s string) (*big.Int, bool) {
-	if s == "" {
-		return big.NewInt(0), true
-	}
-
-	// Parse as decimal and convert to 6 decimal places (USDC)
-	parts := strings.Split(s, ".")
-	whole := parts[0]
-	var frac string
-	if len(parts) > 1 {
-		frac = parts[1]
-	}
-
-	// Pad or truncate to 6 decimals
-	for len(frac) < 6 {
-		frac += "0"
-	}
-	frac = frac[:6]
-
-	combined := whole + frac
-	result, ok := new(big.Int).SetString(combined, 10)
-	return result, ok
-}
-
-func formatUSDC(amount *big.Int) string {
-	s := amount.String()
-
-	// Pad with leading zeros if needed
-	for len(s) < 7 {
-		s = "0" + s
-	}
-
-	// Insert decimal point
-	whole := s[:len(s)-6]
-	frac := s[len(s)-6:]
-
-	// Trim trailing zeros from fraction
-	frac = strings.TrimRight(frac, "0")
-	if frac == "" {
-		return whole
-	}
-	return whole + "." + frac
 }
 
 func toLower(ss []string) []string {

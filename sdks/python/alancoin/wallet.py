@@ -248,7 +248,9 @@ def parse_usdc(amount: str) -> int:
             if len(parts) != 2:
                 raise ValueError("Invalid decimal format")
             integer_part = int(parts[0]) if parts[0] else 0
-            decimal_part = parts[1][:USDC_DECIMALS].ljust(USDC_DECIMALS, "0")
+            if len(parts[1]) > USDC_DECIMALS:
+                raise ValidationError(f"Amount has too many decimal places (max {USDC_DECIMALS}): {amount}")
+            decimal_part = parts[1].ljust(USDC_DECIMALS, "0")
             return integer_part * (10 ** USDC_DECIMALS) + int(decimal_part)
         else:
             return int(amount) * (10 ** USDC_DECIMALS)
@@ -267,13 +269,9 @@ def format_usdc(amount: int) -> str:
         Human-readable amount (e.g., "1.500000")
     """
     if amount is None or amount == 0:
-        return "0"
-    
+        return "0.000000"
+
     integer_part = amount // (10 ** USDC_DECIMALS)
     decimal_part = amount % (10 ** USDC_DECIMALS)
-    
-    if decimal_part == 0:
-        return str(integer_part)
-    
     decimal_str = str(decimal_part).zfill(USDC_DECIMALS)
     return f"{integer_part}.{decimal_str}"

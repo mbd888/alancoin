@@ -467,6 +467,11 @@ func ParseUSDC(amount string) (*big.Int, error) {
 		return nil, fmt.Errorf("invalid whole number")
 	}
 
+	// Reject negative amounts
+	if wholeBig.Sign() < 0 {
+		return nil, fmt.Errorf("negative amounts not allowed")
+	}
+
 	// Multiply whole by 10^6
 	multiplier := new(big.Int).Exp(big.NewInt(10), big.NewInt(USDCDecimals), nil)
 	result := new(big.Int).Mul(wholeBig, multiplier)

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/idgen"
 	"github.com/mbd888/alancoin/internal/wallet"
 )
 
@@ -220,7 +221,7 @@ func (m *MemoryStore) AddService(ctx context.Context, agentAddress string, servi
 
 	// Generate service ID if not set
 	if service.ID == "" {
-		service.ID = generateID()
+		service.ID = idgen.WithPrefix("svc_")
 	}
 	service.Active = true
 
@@ -353,7 +354,7 @@ func (m *MemoryStore) RecordTransaction(ctx context.Context, tx *Transaction) er
 	defer m.mu.Unlock()
 
 	if tx.ID == "" {
-		tx.ID = generateID()
+		tx.ID = idgen.WithPrefix("svc_")
 	}
 	tx.CreatedAt = time.Now()
 

@@ -3,6 +3,7 @@ package predictions
 import (
 	"context"
 	"database/sql"
+	"strconv"
 )
 
 // PostgresStore implements Store using PostgreSQL
@@ -125,17 +126,17 @@ func (p *PostgresStore) List(ctx context.Context, opts ListOptions) ([]*Predicti
 	n := 1
 
 	if opts.Status != "" {
-		query += " AND status = $" + string(rune('0'+n))
+		query += " AND status = $" + strconv.Itoa(n)
 		args = append(args, opts.Status)
 		n++
 	}
 	if opts.AuthorAddr != "" {
-		query += " AND author_addr = $" + string(rune('0'+n))
+		query += " AND author_addr = $" + strconv.Itoa(n)
 		args = append(args, opts.AuthorAddr)
 		n++
 	}
 
-	query += " ORDER BY created_at DESC LIMIT $" + string(rune('0'+n))
+	query += " ORDER BY created_at DESC LIMIT $" + strconv.Itoa(n)
 	args = append(args, opts.Limit)
 
 	rows, err := p.db.QueryContext(ctx, query, args...)
@@ -215,7 +216,16 @@ func (p *PostgresStore) RecordVote(ctx context.Context, predictionID, agentAddr 
 	}
 	defer tx.Rollback()
 
-	// Insert vote
+	// Check for existing vote to correctly adjust counts
+	var previousAgrees sql.NullBool
+	err = tx.QueryRowContext(ctx, `
+		SELECT agrees FROM prediction_votes WHERE prediction_id = $1 AND agent_addr = $2
+	`, predictionID, agentAddr).Scan(&previousAgrees)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+
+	// Upsert vote
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO prediction_votes (prediction_id, agent_addr, agrees)
 		VALUES ($1, $2, $3)
@@ -225,7 +235,14 @@ func (p *PostgresStore) RecordVote(ctx context.Context, predictionID, agentAddr 
 		return err
 	}
 
-	// Update counts
+	// Adjust counts: remove old vote if it existed, then add new vote
+	if previousAgrees.Valid {
+		if previousAgrees.Bool {
+			_, _ = tx.ExecContext(ctx, `UPDATE predictions SET agrees = agrees - 1 WHERE id = $1`, predictionID)
+		} else {
+			_, _ = tx.ExecContext(ctx, `UPDATE predictions SET disagrees = disagrees - 1 WHERE id = $1`, predictionID)
+		}
+	}
 	if agrees {
 		_, err = tx.ExecContext(ctx, `UPDATE predictions SET agrees = agrees + 1 WHERE id = $1`, predictionID)
 	} else {
@@ -251,8 +268,8 @@ func (p *PostgresStore) GetPredictorStats(ctx context.Context, authorAddr string
 	if err == sql.ErrNoRows {
 		return stats, nil // Return empty stats
 	}
-	if stats.TotalPredictions > 0 {
-		stats.Accuracy = float64(stats.Correct) / float64(stats.Correct+stats.Wrong)
+	if resolved := stats.Correct + stats.Wrong; resolved > 0 {
+		stats.Accuracy = float64(stats.Correct) / float64(resolved)
 	}
 	return stats, err
 }
@@ -280,8 +297,8 @@ func (p *PostgresStore) GetTopPredictors(ctx context.Context, limit int) ([]*Pre
 		); err != nil {
 			return nil, err
 		}
-		if s.TotalPredictions > 0 {
-			s.Accuracy = float64(s.Correct) / float64(s.Correct+s.Wrong)
+		if resolved := s.Correct + s.Wrong; resolved > 0 {
+			s.Accuracy = float64(s.Correct) / float64(resolved)
 		}
 		stats = append(stats, s)
 	}

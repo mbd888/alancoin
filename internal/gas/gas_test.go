@@ -3,6 +3,8 @@ package gas
 import (
 	"math/big"
 	"testing"
+
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -14,16 +16,16 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.GasMarkupPct < 0 {
 		t.Error("GasMarkupPct should be non-negative")
 	}
-	minFee, err := parseUSDC(cfg.MinGasFeeUSDC)
-	if err != nil {
-		t.Fatalf("parseUSDC(MinGasFeeUSDC): %v", err)
+	minFee, ok := usdc.Parse(cfg.MinGasFeeUSDC)
+	if !ok {
+		t.Fatalf("usdc.Parse(MinGasFeeUSDC) failed for %q", cfg.MinGasFeeUSDC)
 	}
 	if minFee.Sign() <= 0 {
 		t.Error("MinGasFeeUSDC should be positive")
 	}
-	maxFee, err := parseUSDC(cfg.MaxGasFeeUSDC)
-	if err != nil {
-		t.Fatalf("parseUSDC(MaxGasFeeUSDC): %v", err)
+	maxFee, ok := usdc.Parse(cfg.MaxGasFeeUSDC)
+	if !ok {
+		t.Fatalf("usdc.Parse(MaxGasFeeUSDC) failed for %q", cfg.MaxGasFeeUSDC)
 	}
 	if maxFee.Cmp(minFee) <= 0 {
 		t.Error("MaxGasFeeUSDC should be greater than MinGasFeeUSDC")
@@ -105,13 +107,13 @@ func TestParseUSDC(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		result, err := parseUSDC(tc.input)
-		if err != nil {
-			t.Errorf("parseUSDC(%s) unexpected error: %v", tc.input, err)
+		result, ok := usdc.Parse(tc.input)
+		if !ok {
+			t.Errorf("usdc.Parse(%s) failed unexpectedly", tc.input)
 			continue
 		}
 		if result.Int64() != tc.expected {
-			t.Errorf("parseUSDC(%s) = %d, expected %d", tc.input, result.Int64(), tc.expected)
+			t.Errorf("usdc.Parse(%s) = %d, expected %d", tc.input, result.Int64(), tc.expected)
 		}
 	}
 }
@@ -128,9 +130,9 @@ func TestFormatUSDC(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		result := formatUSDC(big.NewInt(tc.microUSDC))
+		result := usdc.Format(big.NewInt(tc.microUSDC))
 		if result != tc.expected {
-			t.Errorf("formatUSDC(%d) = %s, expected %s", tc.microUSDC, result, tc.expected)
+			t.Errorf("usdc.Format(%d) = %s, expected %s", tc.microUSDC, result, tc.expected)
 		}
 	}
 }

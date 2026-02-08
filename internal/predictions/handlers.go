@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -56,6 +57,16 @@ func (h *Handler) MakePrediction(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "invalid_request",
 			"message": "Invalid request body",
+		})
+		return
+	}
+
+	// Verify authenticated agent matches the author
+	callerAddr := c.GetString("authAgentAddr")
+	if callerAddr == "" || !strings.EqualFold(callerAddr, req.AuthorAddr) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "Cannot make predictions as a different agent",
 		})
 		return
 	}
@@ -205,6 +216,16 @@ func (h *Handler) Vote(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "invalid_request",
 			"message": "Invalid request body",
+		})
+		return
+	}
+
+	// Verify authenticated agent matches the voter
+	callerAddr := c.GetString("authAgentAddr")
+	if callerAddr == "" || !strings.EqualFold(callerAddr, req.AgentAddr) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "Cannot vote as a different agent",
 		})
 		return
 	}

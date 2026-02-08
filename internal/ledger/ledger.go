@@ -13,6 +13,8 @@ import (
 	"math/big"
 	"strings"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 var (
@@ -36,13 +38,15 @@ type Entry struct {
 
 // Balance represents an agent's balance
 type Balance struct {
-	AgentAddr string    `json:"agentAddr"`
-	Available string    `json:"available"` // Can be spent
-	Pending   string    `json:"pending"`   // Deposits awaiting confirmation
-	Escrowed  string    `json:"escrowed"`  // Locked in escrow awaiting service delivery
-	TotalIn   string    `json:"totalIn"`   // Lifetime deposits
-	TotalOut  string    `json:"totalOut"`  // Lifetime withdrawals + spending
-	UpdatedAt time.Time `json:"updatedAt"`
+	AgentAddr   string    `json:"agentAddr"`
+	Available   string    `json:"available"`   // Can be spent
+	Pending     string    `json:"pending"`     // Deposits awaiting confirmation
+	Escrowed    string    `json:"escrowed"`    // Locked in escrow awaiting service delivery
+	CreditLimit string    `json:"creditLimit"` // Maximum credit available
+	CreditUsed  string    `json:"creditUsed"`  // Current credit drawn
+	TotalIn     string    `json:"totalIn"`     // Lifetime deposits
+	TotalOut    string    `json:"totalOut"`    // Lifetime withdrawals + spending
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 // Store persists ledger data
@@ -70,6 +74,16 @@ type Store interface {
 	EscrowLock(ctx context.Context, agentAddr, amount, reference string) error
 	ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error
 	RefundEscrow(ctx context.Context, agentAddr, amount, reference string) error
+
+	// Credit line operations.
+	// SetCreditLimit sets the maximum credit for an agent.
+	// UseCredit draws from the agent's credit line.
+	// RepayCredit reduces outstanding credit usage.
+	// GetCreditInfo returns the current credit limit and usage.
+	SetCreditLimit(ctx context.Context, agentAddr, limit string) error
+	UseCredit(ctx context.Context, agentAddr, amount string) error
+	RepayCredit(ctx context.Context, agentAddr, amount string) error
+	GetCreditInfo(ctx context.Context, agentAddr string) (creditLimit, creditUsed string, err error)
 }
 
 // Ledger manages agent balances
@@ -89,6 +103,12 @@ func (l *Ledger) GetBalance(ctx context.Context, agentAddr string) (*Balance, er
 
 // Deposit credits an agent's balance (called when deposit detected on-chain)
 func (l *Ledger) Deposit(ctx context.Context, agentAddr, amount, txHash string) error {
+	// Validate amount
+	amountBig, ok := usdc.Parse(amount)
+	if !ok || amountBig.Sign() <= 0 {
+		return ErrInvalidAmount
+	}
+
 	// Check for duplicate
 	exists, err := l.store.HasDeposit(ctx, txHash)
 	if err != nil {
@@ -104,44 +124,29 @@ func (l *Ledger) Deposit(ctx context.Context, agentAddr, amount, txHash string) 
 // Spend debits an agent's balance (called by session key transactions)
 func (l *Ledger) Spend(ctx context.Context, agentAddr, amount, sessionKeyID string) error {
 	// Validate amount
-	amountBig, ok := parseUSDC(amount)
+	amountBig, ok := usdc.Parse(amount)
 	if !ok || amountBig.Sign() <= 0 {
 		return ErrInvalidAmount
 	}
+	_ = amountBig
 
-	// Check balance
-	bal, err := l.store.GetBalance(ctx, strings.ToLower(agentAddr))
-	if err != nil {
-		return err
-	}
-
-	availableBig, _ := parseUSDC(bal.Available)
-	if availableBig.Cmp(amountBig) < 0 {
-		return ErrInsufficientBalance
-	}
-
+	// Store.Debit handles insufficient balance atomically (DB CHECK constraint / in-lock check).
+	// Do NOT pre-check balance here: it creates a TOCTOU race where two concurrent
+	// requests both pass the check but only one can succeed.
 	return l.store.Debit(ctx, strings.ToLower(agentAddr), amount, sessionKeyID, "session_key_spend")
 }
 
 // Withdraw processes a withdrawal request
 func (l *Ledger) Withdraw(ctx context.Context, agentAddr, amount, txHash string) error {
 	// Validate amount
-	amountBig, ok := parseUSDC(amount)
+	amountBig, ok := usdc.Parse(amount)
 	if !ok || amountBig.Sign() <= 0 {
 		return ErrInvalidAmount
 	}
+	_ = amountBig
 
-	// Check balance
-	bal, err := l.store.GetBalance(ctx, strings.ToLower(agentAddr))
-	if err != nil {
-		return err
-	}
-
-	availableBig, _ := parseUSDC(bal.Available)
-	if availableBig.Cmp(amountBig) < 0 {
-		return ErrInsufficientBalance
-	}
-
+	// Store.Withdraw handles insufficient balance atomically.
+	// Do NOT pre-check balance here: it creates a TOCTOU race.
 	return l.store.Withdraw(ctx, strings.ToLower(agentAddr), amount, txHash)
 }
 
@@ -156,7 +161,7 @@ func (l *Ledger) GetHistory(ctx context.Context, agentAddr string, limit int) ([
 // Refund credits back an agent's balance (used when a transfer fails after debit)
 func (l *Ledger) Refund(ctx context.Context, agentAddr, amount, reference string) error {
 	// Validate amount
-	amountBig, ok := parseUSDC(amount)
+	amountBig, ok := usdc.Parse(amount)
 	if !ok || amountBig.Sign() <= 0 {
 		return ErrInvalidAmount
 	}
@@ -167,7 +172,7 @@ func (l *Ledger) Refund(ctx context.Context, agentAddr, amount, reference string
 // Hold places a hold on funds before an on-chain transfer.
 // Moves funds from available → pending so they can't be double-spent.
 func (l *Ledger) Hold(ctx context.Context, agentAddr, amount, reference string) error {
-	amountBig, ok := parseUSDC(amount)
+	amountBig, ok := usdc.Parse(amount)
 	if !ok || amountBig.Sign() <= 0 {
 		return ErrInvalidAmount
 	}
@@ -177,18 +182,26 @@ func (l *Ledger) Hold(ctx context.Context, agentAddr, amount, reference string) 
 // ConfirmHold finalizes a held amount after on-chain confirmation.
 // Moves funds from pending → total_out.
 func (l *Ledger) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
+	amountBig, ok := usdc.Parse(amount)
+	if !ok || amountBig.Sign() <= 0 {
+		return ErrInvalidAmount
+	}
 	return l.store.ConfirmHold(ctx, strings.ToLower(agentAddr), amount, reference)
 }
 
 // ReleaseHold returns held funds to available when a transfer fails.
 // Moves funds from pending → available.
 func (l *Ledger) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
+	amountBig, ok := usdc.Parse(amount)
+	if !ok || amountBig.Sign() <= 0 {
+		return ErrInvalidAmount
+	}
 	return l.store.ReleaseHold(ctx, strings.ToLower(agentAddr), amount, reference)
 }
 
-// CanSpend checks if an agent has sufficient balance
+// CanSpend checks if an agent has sufficient balance (including credit)
 func (l *Ledger) CanSpend(ctx context.Context, agentAddr, amount string) (bool, error) {
-	amountBig, ok := parseUSDC(amount)
+	amountBig, ok := usdc.Parse(amount)
 	if !ok {
 		return false, ErrInvalidAmount
 	}
@@ -198,14 +211,21 @@ func (l *Ledger) CanSpend(ctx context.Context, agentAddr, amount string) (bool, 
 		return false, err
 	}
 
-	availableBig, _ := parseUSDC(bal.Available)
-	return availableBig.Cmp(amountBig) >= 0, nil
+	availableBig, _ := usdc.Parse(bal.Available)
+	creditLimitBig, _ := usdc.Parse(bal.CreditLimit)
+	creditUsedBig, _ := usdc.Parse(bal.CreditUsed)
+
+	// Effective spendable = available + (credit_limit - credit_used)
+	creditAvailable := new(big.Int).Sub(creditLimitBig, creditUsedBig)
+	effective := new(big.Int).Add(availableBig, creditAvailable)
+
+	return effective.Cmp(amountBig) >= 0, nil
 }
 
 // EscrowLock locks funds in escrow before service delivery.
 // Moves funds from available → escrowed.
 func (l *Ledger) EscrowLock(ctx context.Context, agentAddr, amount, reference string) error {
-	amountBig, ok := parseUSDC(amount)
+	amountBig, ok := usdc.Parse(amount)
 	if !ok || amountBig.Sign() <= 0 {
 		return ErrInvalidAmount
 	}
@@ -215,48 +235,38 @@ func (l *Ledger) EscrowLock(ctx context.Context, agentAddr, amount, reference st
 // ReleaseEscrow releases escrowed funds to the seller after confirmation.
 // Moves from buyer's escrowed → seller's available.
 func (l *Ledger) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error {
+	amountBig, ok := usdc.Parse(amount)
+	if !ok || amountBig.Sign() <= 0 {
+		return ErrInvalidAmount
+	}
 	return l.store.ReleaseEscrow(ctx, strings.ToLower(buyerAddr), strings.ToLower(sellerAddr), amount, reference)
 }
 
 // RefundEscrow returns escrowed funds to the buyer after a dispute.
 // Moves from escrowed → available.
 func (l *Ledger) RefundEscrow(ctx context.Context, agentAddr, amount, reference string) error {
+	amountBig, ok := usdc.Parse(amount)
+	if !ok || amountBig.Sign() <= 0 {
+		return ErrInvalidAmount
+	}
 	return l.store.RefundEscrow(ctx, strings.ToLower(agentAddr), amount, reference)
 }
 
-// USDC helpers (6 decimals)
-func parseUSDC(s string) (*big.Int, bool) {
-	if s == "" {
-		return big.NewInt(0), true
-	}
-
-	// Handle decimal format like "1.50"
-	parts := strings.Split(s, ".")
-	whole := parts[0]
-	frac := ""
-	if len(parts) > 1 {
-		frac = parts[1]
-	}
-
-	// Pad or trim to 6 decimals
-	for len(frac) < 6 {
-		frac += "0"
-	}
-	frac = frac[:6]
-
-	combined := whole + frac
-	result, ok := new(big.Int).SetString(combined, 10)
-	return result, ok
+// SetCreditLimit sets the maximum credit for an agent
+func (l *Ledger) SetCreditLimit(ctx context.Context, agentAddr, limit string) error {
+	return l.store.SetCreditLimit(ctx, strings.ToLower(agentAddr), limit)
 }
 
-func formatUSDC(amount *big.Int) string {
-	if amount == nil {
-		return "0.000000"
+// RepayCredit reduces outstanding credit usage
+func (l *Ledger) RepayCredit(ctx context.Context, agentAddr, amount string) error {
+	amountBig, ok := usdc.Parse(amount)
+	if !ok || amountBig.Sign() <= 0 {
+		return ErrInvalidAmount
 	}
-	s := amount.String()
-	for len(s) < 7 {
-		s = "0" + s
-	}
-	decimal := len(s) - 6
-	return s[:decimal] + "." + s[decimal:]
+	return l.store.RepayCredit(ctx, strings.ToLower(agentAddr), amount)
+}
+
+// GetCreditInfo returns the current credit limit and usage
+func (l *Ledger) GetCreditInfo(ctx context.Context, agentAddr string) (creditLimit, creditUsed string, err error) {
+	return l.store.GetCreditInfo(ctx, strings.ToLower(agentAddr))
 }

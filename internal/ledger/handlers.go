@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 // validAmount checks that amount is a valid positive decimal number
@@ -124,7 +125,7 @@ func (h *Handler) RecordDeposit(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	c.JSON(http.StatusCreated, gin.H{
 		"status":  "credited",
 		"message": "Deposit credited to agent balance",
 	})
@@ -156,27 +157,10 @@ func (h *Handler) RequestWithdrawal(c *gin.Context) {
 		return
 	}
 
-	// Check balance first
-	canSpend, err := h.ledger.CanSpend(c.Request.Context(), address, req.Amount)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "balance_error",
-			"message": "Failed to check balance",
-		})
-		return
-	}
-	if !canSpend {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "insufficient_balance",
-			"message": "Insufficient balance for withdrawal",
-		})
-		return
-	}
-
 	// Execute withdrawal if executor is configured
 	if h.executor != nil {
 		// Parse amount
-		amountBig, ok := parseUSDC(req.Amount)
+		amountBig, ok := usdc.Parse(req.Amount)
 		if !ok {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":   "invalid_amount",
@@ -185,9 +169,27 @@ func (h *Handler) RequestWithdrawal(c *gin.Context) {
 			return
 		}
 
+		// Hold funds atomically before transfer to prevent TOCTOU double-spend
+		if err := h.ledger.Hold(c.Request.Context(), address, req.Amount, "withdrawal"); err != nil {
+			if err == ErrInsufficientBalance {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error":   "insufficient_balance",
+					"message": "Insufficient balance for withdrawal",
+				})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error":   "balance_error",
+					"message": "Failed to reserve funds",
+				})
+			}
+			return
+		}
+
 		// Execute on-chain transfer
 		txHash, err := h.executor.Transfer(c.Request.Context(), common.HexToAddress(address), amountBig)
 		if err != nil {
+			// Release the hold since transfer failed
+			_ = h.ledger.ReleaseHold(c.Request.Context(), address, req.Amount, "withdrawal")
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "transfer_failed",
 				"message": "Failed to execute withdrawal",
@@ -195,9 +197,8 @@ func (h *Handler) RequestWithdrawal(c *gin.Context) {
 			return
 		}
 
-		// Record in ledger
-		if err := h.ledger.Withdraw(c.Request.Context(), address, req.Amount, txHash); err != nil {
-			// Transfer succeeded but ledger update failed - critical inconsistency
+		// Confirm the hold (pending → total_out)
+		if err := h.ledger.ConfirmHold(c.Request.Context(), address, req.Amount, "withdrawal:"+txHash); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"status":  "partial_failure",
 				"error":   "ledger_sync_failed",
@@ -213,6 +214,23 @@ func (h *Handler) RequestWithdrawal(c *gin.Context) {
 			"message": "Withdrawal executed",
 			"amount":  req.Amount,
 			"txHash":  txHash,
+		})
+		return
+	}
+
+	// No executor - check balance before accepting
+	canSpend, err := h.ledger.CanSpend(c.Request.Context(), address, req.Amount)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "balance_error",
+			"message": "Failed to check balance",
+		})
+		return
+	}
+	if !canSpend {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "insufficient_balance",
+			"message": "Insufficient balance for withdrawal",
 		})
 		return
 	}

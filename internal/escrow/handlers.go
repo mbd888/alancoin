@@ -1,6 +1,7 @@
 package escrow
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -72,7 +73,7 @@ func (h *Handler) CreateEscrow(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "escrow_failed",
-			"message": err.Error(),
+			"message": "Failed to create escrow",
 		})
 		return
 	}
@@ -86,7 +87,7 @@ func (h *Handler) GetEscrow(c *gin.Context) {
 
 	escrow, err := h.service.Get(c.Request.Context(), id)
 	if err != nil {
-		if err == ErrEscrowNotFound {
+		if errors.Is(err, ErrEscrowNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"error":   "not_found",
 				"message": "Escrow not found",
@@ -110,6 +111,9 @@ func (h *Handler) ListEscrows(c *gin.Context) {
 	if l := c.Query("limit"); l != "" {
 		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
 			limit = parsed
+			if limit > 200 {
+				limit = 200
+			}
 		}
 	}
 
@@ -137,14 +141,14 @@ func (h *Handler) MarkDelivered(c *gin.Context) {
 	if err != nil {
 		status := http.StatusInternalServerError
 		code := "internal_error"
-		switch err {
-		case ErrEscrowNotFound:
+		switch {
+		case errors.Is(err, ErrEscrowNotFound):
 			status = http.StatusNotFound
 			code = "not_found"
-		case ErrUnauthorized:
+		case errors.Is(err, ErrUnauthorized):
 			status = http.StatusForbidden
 			code = "unauthorized"
-		case ErrAlreadyResolved, ErrInvalidStatus:
+		case errors.Is(err, ErrAlreadyResolved), errors.Is(err, ErrInvalidStatus):
 			status = http.StatusConflict
 			code = "invalid_state"
 		}
@@ -164,14 +168,14 @@ func (h *Handler) ConfirmEscrow(c *gin.Context) {
 	if err != nil {
 		status := http.StatusInternalServerError
 		code := "internal_error"
-		switch err {
-		case ErrEscrowNotFound:
+		switch {
+		case errors.Is(err, ErrEscrowNotFound):
 			status = http.StatusNotFound
 			code = "not_found"
-		case ErrUnauthorized:
+		case errors.Is(err, ErrUnauthorized):
 			status = http.StatusForbidden
 			code = "unauthorized"
-		case ErrAlreadyResolved, ErrInvalidStatus:
+		case errors.Is(err, ErrAlreadyResolved), errors.Is(err, ErrInvalidStatus):
 			status = http.StatusConflict
 			code = "invalid_state"
 		}
@@ -200,14 +204,14 @@ func (h *Handler) DisputeEscrow(c *gin.Context) {
 	if err != nil {
 		status := http.StatusInternalServerError
 		code := "internal_error"
-		switch err {
-		case ErrEscrowNotFound:
+		switch {
+		case errors.Is(err, ErrEscrowNotFound):
 			status = http.StatusNotFound
 			code = "not_found"
-		case ErrUnauthorized:
+		case errors.Is(err, ErrUnauthorized):
 			status = http.StatusForbidden
 			code = "unauthorized"
-		case ErrAlreadyResolved, ErrInvalidStatus:
+		case errors.Is(err, ErrAlreadyResolved), errors.Is(err, ErrInvalidStatus):
 			status = http.StatusConflict
 			code = "invalid_state"
 		}

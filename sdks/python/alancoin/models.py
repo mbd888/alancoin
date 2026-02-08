@@ -188,3 +188,64 @@ class ServiceType:
         INFERENCE, EMBEDDING, TRANSLATION, CODE, DATA,
         IMAGE, AUDIO, SEARCH, COMPUTE, STORAGE, OTHER
     ]
+
+
+@dataclass
+class CreditLine:
+    """An agent's credit line on the platform."""
+
+    id: str
+    agent_addr: str
+    credit_limit: str
+    credit_used: str
+    interest_rate: float
+    status: str
+    reputation_tier: str
+    reputation_score: float
+    approved_at: Optional[str] = None
+    last_review_at: Optional[str] = None
+    created_at: Optional[str] = None
+
+    @property
+    def credit_available(self) -> str:
+        from decimal import Decimal
+        return str(Decimal(self.credit_limit) - Decimal(self.credit_used))
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CreditLine":
+        return cls(
+            id=data.get("id", ""),
+            agent_addr=data.get("agentAddr", ""),
+            credit_limit=data.get("creditLimit", "0"),
+            credit_used=data.get("creditUsed", "0"),
+            interest_rate=data.get("interestRate", 0.0),
+            status=data.get("status", ""),
+            reputation_tier=data.get("reputationTier", ""),
+            reputation_score=data.get("reputationScore", 0.0),
+            approved_at=data.get("approvedAt"),
+            last_review_at=data.get("lastReviewAt"),
+            created_at=data.get("createdAt"),
+        )
+
+
+@dataclass
+class CreditEvaluation:
+    """Result of a credit application or review."""
+
+    eligible: bool
+    credit_limit: str
+    interest_rate: float
+    reputation_score: float
+    reputation_tier: str
+    reason: str
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CreditEvaluation":
+        return cls(
+            eligible=data.get("eligible", False),
+            credit_limit=data.get("creditLimit", "0"),
+            interest_rate=data.get("interestRate", 0.0),
+            reputation_score=data.get("reputationScore", 0.0),
+            reputation_tier=data.get("reputationTier", ""),
+            reason=data.get("reason", ""),
+        )

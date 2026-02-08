@@ -2,7 +2,9 @@ package registry
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -543,9 +545,10 @@ func nullString(s string) sql.NullString {
 }
 
 func generateTxID() string {
-	return fmt.Sprintf("tx_%d", time.Now().UnixNano())
-}
-
-func generateID() string {
-	return fmt.Sprintf("svc_%d", time.Now().UnixNano())
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback: should never happen with crypto/rand
+		return fmt.Sprintf("tx_%d", time.Now().UnixNano())
+	}
+	return "tx_" + hex.EncodeToString(b)
 }

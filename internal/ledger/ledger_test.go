@@ -4,6 +4,8 @@ import (
 	"context"
 	"math/big"
 	"testing"
+
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 // Tests
@@ -691,11 +693,11 @@ func TestLedger_EscrowHistoryEntries(t *testing.T) {
 // assertFundConservation verifies totalIn - totalOut = available + pending + escrowed
 func assertFundConservation(t *testing.T, bal *Balance, context string) {
 	t.Helper()
-	totalIn, _ := parseUSDC(bal.TotalIn)
-	totalOut, _ := parseUSDC(bal.TotalOut)
-	available, _ := parseUSDC(bal.Available)
-	pending, _ := parseUSDC(bal.Pending)
-	escrowed, _ := parseUSDC(bal.Escrowed)
+	totalIn, _ := usdc.Parse(bal.TotalIn)
+	totalOut, _ := usdc.Parse(bal.TotalOut)
+	available, _ := usdc.Parse(bal.Available)
+	pending, _ := usdc.Parse(bal.Pending)
+	escrowed, _ := usdc.Parse(bal.Escrowed)
 
 	// net = totalIn - totalOut
 	net := new(big.Int).Sub(totalIn, totalOut)
@@ -705,8 +707,8 @@ func assertFundConservation(t *testing.T, bal *Balance, context string) {
 
 	if net.Cmp(sum) != 0 {
 		t.Errorf("%s: fund conservation violated: totalIn(%s) - totalOut(%s) = %s, but available(%s) + pending(%s) + escrowed(%s) = %s",
-			context, bal.TotalIn, bal.TotalOut, formatUSDC(net),
-			bal.Available, bal.Pending, bal.Escrowed, formatUSDC(sum))
+			context, bal.TotalIn, bal.TotalOut, usdc.Format(net),
+			bal.Available, bal.Pending, bal.Escrowed, usdc.Format(sum))
 	}
 }
 
@@ -941,13 +943,13 @@ func TestParseUSDC(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		result, ok := parseUSDC(tt.input)
+		result, ok := usdc.Parse(tt.input)
 		if !ok {
-			t.Errorf("parseUSDC(%s) failed", tt.input)
+			t.Errorf("usdc.Parse(%s) failed", tt.input)
 			continue
 		}
 		if result.String() != tt.expected {
-			t.Errorf("parseUSDC(%s) = %s, want %s", tt.input, result.String(), tt.expected)
+			t.Errorf("usdc.Parse(%s) = %s, want %s", tt.input, result.String(), tt.expected)
 		}
 	}
 }

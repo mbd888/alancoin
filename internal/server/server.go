@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sync/atomic"
@@ -23,6 +24,7 @@ import (
 	"github.com/mbd888/alancoin/internal/auth"
 	"github.com/mbd888/alancoin/internal/commentary"
 	"github.com/mbd888/alancoin/internal/config"
+	"github.com/mbd888/alancoin/internal/credit"
 	"github.com/mbd888/alancoin/internal/discovery"
 	"github.com/mbd888/alancoin/internal/escrow"
 	"github.com/mbd888/alancoin/internal/gas"
@@ -63,10 +65,13 @@ type Server struct {
 	paymaster      gas.Paymaster
 	escrowService  *escrow.Service
 	escrowTimer    *escrow.Timer
+	creditService  *credit.Service
+	creditTimer    *credit.Timer
 	db             *sql.DB // nil if using in-memory
 	router         *gin.Engine
 	httpSrv        *http.Server
 	logger         *slog.Logger
+	cancelRunCtx   context.CancelFunc // cancels background goroutines started in Run
 
 	// Health state
 	ready   atomic.Bool
@@ -174,6 +179,20 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledger})
 		s.escrowTimer = escrow.NewTimer(s.escrowService, escrowStore, s.logger)
 		s.logger.Info("escrow enabled")
+
+		// Credit system (spend on credit, repay from earnings)
+		creditStore := credit.NewMemoryStore()
+		reputationProv := reputation.NewRegistryProvider(s.registry)
+		creditScorer := credit.NewScorer()
+		s.creditService = credit.NewService(
+			creditStore,
+			creditScorer,
+			reputationProv,
+			&creditMetricsAdapter{reputationProv},
+			&creditLedgerAdapter{s.ledger},
+		)
+		s.creditTimer = credit.NewTimer(s.creditService, s.logger)
+		s.logger.Info("credit system enabled")
 	} else {
 		s.registry = registry.NewMemoryStore()
 		s.logger.Info("using in-memory storage (data will not persist)")
@@ -201,6 +220,20 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledger})
 		s.escrowTimer = escrow.NewTimer(s.escrowService, escrowStore, s.logger)
 		s.logger.Info("escrow enabled (in-memory)")
+
+		// Credit system (in-memory) — use demo scorer with relaxed policies
+		creditStore := credit.NewMemoryStore()
+		reputationProv := reputation.NewRegistryProvider(s.registry)
+		creditScorer := credit.NewDemoScorer()
+		s.creditService = credit.NewService(
+			creditStore,
+			creditScorer,
+			reputationProv,
+			&creditMetricsAdapter{reputationProv},
+			&creditLedgerAdapter{s.ledger},
+		)
+		s.creditTimer = credit.NewTimer(s.creditService, s.logger)
+		s.logger.Info("credit system enabled (in-memory)")
 	}
 
 	// Create wallet if not injected
@@ -272,11 +305,14 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 // maskDSN hides password in connection string for logging
 func maskDSN(dsn string) string {
-	// Simple masking - replace password portion
-	if idx := len(dsn); idx > 20 {
-		return dsn[:20] + "..."
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "***"
 	}
-	return "***"
+	if u.User != nil {
+		u.User = url.UserPassword(u.User.Username(), "***")
+	}
+	return u.String()
 }
 
 // -----------------------------------------------------------------------------
@@ -434,7 +470,6 @@ func (s *Server) setupRoutes() {
 	v1.GET("/network/stats", registryHandler.GetNetworkStats)
 	v1.GET("/network/stats/enhanced", s.enhancedStatsHandler) // Demo-friendly extended stats
 	v1.GET("/feed", registryHandler.GetPublicFeed)
-	v1.POST("/transactions", registryHandler.RecordTransaction) // For demo - record transactions
 
 	// AI-powered natural language search
 	v1.GET("/search", s.naturalLanguageSearch)
@@ -452,6 +487,9 @@ func (s *Server) setupRoutes() {
 	protected := v1.Group("")
 	protected.Use(auth.Middleware(s.authMgr))
 	{
+		// Transaction recording requires auth to prevent reputation manipulation
+		protected.POST("/transactions", registryHandler.RecordTransaction)
+
 		// Agent mutations (must own the agent)
 		protected.DELETE("/agents/:address", auth.RequireOwnership(s.authMgr, "address"), registryHandler.DeleteAgent)
 
@@ -525,7 +563,7 @@ func (s *Server) setupRoutes() {
 		}
 
 		// Admin route for recording deposits (in production: webhook from blockchain indexer)
-		v1.POST("/admin/deposits", ledgerHandler.RecordDeposit)
+		protectedLedger.POST("/admin/deposits", ledgerHandler.RecordDeposit)
 	}
 
 	// Gas abstraction routes (agents pay USDC only, gas is sponsored)
@@ -588,6 +626,24 @@ func (s *Server) setupRoutes() {
 		protectedEscrow := v1.Group("")
 		protectedEscrow.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
 		escrowHandler.RegisterProtectedRoutes(protectedEscrow)
+	}
+
+	// Credit routes (agent credit lines - spend on credit, repay from earnings)
+	if s.creditService != nil {
+		creditHandler := credit.NewHandler(s.creditService)
+
+		// Public routes - anyone can view credit status
+		creditHandler.RegisterRoutes(v1)
+
+		// Protected routes - only authenticated agents can apply/repay/review
+		protectedCredit := v1.Group("")
+		protectedCredit.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		creditHandler.RegisterProtectedRoutes(protectedCredit)
+
+		// Admin routes - require authentication
+		adminCredit := v1.Group("/admin")
+		adminCredit.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		creditHandler.RegisterAdminRoutes(adminCredit)
 	}
 
 	// Predictions routes (verifiable predictions with reputation stakes)
@@ -676,8 +732,12 @@ func (s *Server) recordPayment(proof *paywall.PaymentProof) {
 
 	// Dispatch webhook to receiver
 	if s.webhooks != nil {
+		txHashID := proof.TxHash
+		if len(txHashID) > 16 {
+			txHashID = txHashID[:16]
+		}
 		event := &webhooks.Event{
-			ID:        "evt_" + proof.TxHash[:16],
+			ID:        "evt_" + txHashID,
 			Type:      webhooks.EventPaymentReceived,
 			Timestamp: time.Now(),
 			Data: map[string]interface{}{
@@ -1003,6 +1063,10 @@ func (s *Server) enhancedStatsHandler(c *gin.Context) {
 
 // Run starts the HTTP server with graceful shutdown
 func (s *Server) Run(ctx context.Context) error {
+	// Create a cancellable context for background goroutines so Shutdown() can stop them.
+	runCtx, cancel := context.WithCancel(ctx)
+	s.cancelRunCtx = cancel
+
 	s.httpSrv = &http.Server{
 		Addr:              ":" + s.cfg.Port,
 		Handler:           s.router,
@@ -1028,19 +1092,24 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Start deposit watcher
 	if s.depositWatcher != nil {
-		if err := s.depositWatcher.Start(ctx); err != nil {
+		if err := s.depositWatcher.Start(runCtx); err != nil {
 			s.logger.Error("failed to start deposit watcher", "error", err)
 		}
 	}
 
 	// Start realtime hub
 	if s.realtimeHub != nil {
-		go s.realtimeHub.Run(ctx)
+		go s.realtimeHub.Run(runCtx)
 	}
 
 	// Start escrow auto-release timer
 	if s.escrowTimer != nil {
-		go s.escrowTimer.Start(ctx)
+		go s.escrowTimer.Start(runCtx)
+	}
+
+	// Start credit default-check timer
+	if s.creditTimer != nil {
+		go s.creditTimer.Start(runCtx)
 	}
 
 	// Mark as ready after brief delay for startup
@@ -1071,6 +1140,11 @@ func (s *Server) Shutdown() error {
 	s.ready.Store(false)
 	s.logger.Info("starting graceful shutdown")
 
+	// Cancel the context for all background goroutines (hub, timers, watcher)
+	if s.cancelRunCtx != nil {
+		s.cancelRunCtx()
+	}
+
 	// Give load balancers time to stop sending traffic
 	time.Sleep(5 * time.Second)
 
@@ -1088,6 +1162,12 @@ func (s *Server) Shutdown() error {
 		s.logger.Info("escrow timer stopped")
 	}
 
+	// Stop credit timer
+	if s.creditTimer != nil {
+		s.creditTimer.Stop()
+		s.logger.Info("credit timer stopped")
+	}
+
 	// Stop deposit watcher
 	if s.depositWatcher != nil {
 		s.depositWatcher.Stop()
@@ -1097,6 +1177,15 @@ func (s *Server) Shutdown() error {
 	// Close wallet connection
 	if err := s.wallet.Close(); err != nil {
 		s.logger.Error("wallet close error", "error", err)
+	}
+
+	// Close database connection pool
+	if s.db != nil {
+		if err := s.db.Close(); err != nil {
+			s.logger.Error("database close error", "error", err)
+		} else {
+			s.logger.Info("database connection closed")
+		}
 	}
 
 	s.logger.Info("server stopped")
@@ -1213,6 +1302,40 @@ func (a *escrowLedgerAdapter) ReleaseEscrow(ctx context.Context, buyerAddr, sell
 
 func (a *escrowLedgerAdapter) RefundEscrow(ctx context.Context, agentAddr, amount, reference string) error {
 	return a.l.RefundEscrow(ctx, agentAddr, amount, reference)
+}
+
+// creditMetricsAdapter adapts reputation.RegistryProvider to credit.MetricsProvider
+type creditMetricsAdapter struct {
+	rep *reputation.RegistryProvider
+}
+
+func (a *creditMetricsAdapter) GetAgentMetrics(ctx context.Context, address string) (int, float64, int, float64, error) {
+	metrics, err := a.rep.GetAgentMetrics(ctx, address)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	var successRate float64
+	if metrics.TotalTransactions > 0 {
+		successRate = float64(metrics.SuccessfulTxns) / float64(metrics.TotalTransactions)
+	}
+	return metrics.TotalTransactions, successRate, metrics.DaysOnNetwork, metrics.TotalVolumeUSD, nil
+}
+
+// creditLedgerAdapter adapts ledger.Ledger to credit.LedgerService.
+type creditLedgerAdapter struct {
+	l *ledger.Ledger
+}
+
+func (a *creditLedgerAdapter) GetCreditInfo(ctx context.Context, agentAddr string) (string, string, error) {
+	return a.l.GetCreditInfo(ctx, agentAddr)
+}
+
+func (a *creditLedgerAdapter) SetCreditLimit(ctx context.Context, agentAddr, limit string) error {
+	return a.l.SetCreditLimit(ctx, agentAddr, limit)
+}
+
+func (a *creditLedgerAdapter) RepayCredit(ctx context.Context, agentAddr, amount string) error {
+	return a.l.RepayCredit(ctx, agentAddr, amount)
 }
 
 // registryChecker implements watcher.AgentChecker

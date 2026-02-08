@@ -1274,6 +1274,88 @@ class Alancoin:
         )
 
     # -------------------------------------------------------------------------
+    # Credit & Lending
+    # -------------------------------------------------------------------------
+
+    def apply_for_credit(self, agent_address: str) -> dict:
+        """
+        Apply for a credit line based on reputation.
+
+        The agent must meet minimum requirements (established tier or above,
+        30+ days on network, 10+ transactions, 95%+ success rate).
+
+        Args:
+            agent_address: The agent's wallet address
+
+        Returns:
+            Credit evaluation and (if approved) the new credit line
+
+        Example:
+            result = client.apply_for_credit(wallet.address)
+            if result.get('creditLine'):
+                print(f"Approved! Limit: ${result['creditLine']['creditLimit']}")
+        """
+        return self._request("POST", f"/v1/agents/{agent_address}/credit/apply")
+
+    def get_credit_line(self, agent_address: str) -> dict:
+        """
+        Get an agent's credit line status.
+
+        Args:
+            agent_address: The agent's wallet address
+
+        Returns:
+            Credit line details including limit, used, interest rate, and status
+        """
+        return self._request("GET", f"/v1/agents/{agent_address}/credit")
+
+    def repay_credit(self, agent_address: str, amount: str) -> dict:
+        """
+        Manually repay outstanding credit.
+
+        Deposits auto-repay credit, but this allows explicit repayment
+        from available balance.
+
+        Args:
+            agent_address: The agent's wallet address
+            amount: Amount in USDC to repay (e.g., "5.00")
+
+        Returns:
+            Updated credit line status
+        """
+        return self._request(
+            "POST",
+            f"/v1/agents/{agent_address}/credit/repay",
+            json={"amount": amount},
+        )
+
+    def review_credit(self, agent_address: str) -> dict:
+        """
+        Request a credit line re-evaluation.
+
+        Useful after reputation improves to get a higher limit or lower rate.
+
+        Args:
+            agent_address: The agent's wallet address
+
+        Returns:
+            New credit evaluation with updated terms
+        """
+        return self._request("POST", f"/v1/agents/{agent_address}/credit/review")
+
+    def list_active_credits(self, limit: int = 50) -> dict:
+        """
+        List all active credit lines on the platform.
+
+        Args:
+            limit: Maximum results to return (default 50)
+
+        Returns:
+            List of active credit lines
+        """
+        return self._request("GET", "/v1/credit/active", params={"limit": limit})
+
+    # -------------------------------------------------------------------------
     # AI-Powered Search
     # -------------------------------------------------------------------------
 
@@ -1496,7 +1578,8 @@ class Alancoin:
         json: dict = None,
     ) -> dict:
         """Make an HTTP request to the API."""
-        url = urljoin(self.base_url, path)
+        base = self.base_url if self.base_url.endswith("/") else self.base_url + "/"
+        url = urljoin(base, path.lstrip("/"))
         
         try:
             response = self._session.request(
@@ -1511,7 +1594,10 @@ class Alancoin:
         
         # Handle errors
         if response.status_code == 402:
-            data = response.json()
+            try:
+                data = response.json()
+            except (ValueError, KeyError):
+                raise PaymentRequiredError(price="", recipient="")
             raise PaymentRequiredError(
                 price=data.get("price", ""),
                 recipient=data.get("recipient", ""),
@@ -1519,19 +1605,25 @@ class Alancoin:
                 chain=data.get("chain", ""),
                 contract=data.get("contract", ""),
             )
-        
+
         if response.status_code == 404:
-            data = response.json()
+            try:
+                data = response.json()
+            except (ValueError, KeyError):
+                raise ServiceNotFoundError(path.split("/")[-1])
             error_code = data.get("error", "")
             if error_code == "not_found" or "agent" in data.get("message", "").lower():
                 raise AgentNotFoundError(path.split("/")[-1])
             raise ServiceNotFoundError(path.split("/")[-1])
-        
+
         if response.status_code == 409:
             raise AgentExistsError(path.split("/")[-1])
-        
+
         if response.status_code == 400:
-            data = response.json()
+            try:
+                data = response.json()
+            except (ValueError, KeyError):
+                raise ValidationError("Invalid request")
             raise ValidationError(data.get("message", "Invalid request"))
         
         if response.status_code >= 400:

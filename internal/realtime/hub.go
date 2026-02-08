@@ -68,6 +68,7 @@ type Client struct {
 	hub  *Hub
 	conn *websocket.Conn
 	send chan []byte
+	mu   sync.RWMutex
 	sub  Subscription
 }
 
@@ -114,8 +115,9 @@ func (h *Hub) Run(ctx context.Context) {
 			if int64(len(h.clients)) > h.peakClients {
 				h.peakClients = int64(len(h.clients))
 			}
+			n := len(h.clients)
 			h.mu.Unlock()
-			h.logger.Info("client connected", "total", len(h.clients))
+			h.logger.Info("client connected", "total", n)
 
 		case client := <-h.unregister:
 			h.mu.Lock()
@@ -123,8 +125,9 @@ func (h *Hub) Run(ctx context.Context) {
 				delete(h.clients, client)
 				close(client.send)
 			}
+			n := len(h.clients)
 			h.mu.Unlock()
-			h.logger.Info("client disconnected", "total", len(h.clients))
+			h.logger.Info("client disconnected", "total", n)
 
 		case event := <-h.broadcast:
 			h.totalEvents.Add(1)
@@ -157,7 +160,9 @@ func (h *Hub) Run(ctx context.Context) {
 
 // shouldSend checks if event matches client's subscription
 func (h *Hub) shouldSend(client *Client, event *Event) bool {
+	client.mu.RLock()
 	sub := client.sub
+	client.mu.RUnlock()
 
 	// All events subscribed
 	if sub.AllEvents {
@@ -305,7 +310,9 @@ func (c *Client) readPump() {
 		// Parse subscription update
 		var sub Subscription
 		if err := json.Unmarshal(message, &sub); err == nil {
+			c.mu.Lock()
 			c.sub = sub
+			c.mu.Unlock()
 		}
 	}
 }

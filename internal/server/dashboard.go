@@ -445,6 +445,47 @@ const dashboardHTML = `<!DOCTYPE html>
             font-size: 11px;
         }
 
+        /* Credit stats */
+        .credit-stat-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border);
+        }
+        .credit-stat-row:last-child {
+            border-bottom: none;
+        }
+        .credit-stat-label {
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+        .credit-stat-value {
+            font-weight: 500;
+            font-size: 13px;
+        }
+        .credit-stat-value.healthy {
+            color: var(--accent);
+        }
+        .credit-stat-value.warning {
+            color: var(--tier-elite);
+        }
+        .credit-stat-value.blue {
+            color: var(--blue);
+        }
+        .credit-util-bar {
+            height: 4px;
+            background: var(--border);
+            border-radius: 2px;
+            margin-top: 4px;
+            overflow: hidden;
+        }
+        .credit-util-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.5s ease;
+        }
+
         /* Empty state */
         .empty {
             text-align: center;
@@ -542,6 +583,14 @@ const dashboardHTML = `<!DOCTYPE html>
                     <span class="hero-stat-value mono" id="trusted-count" style="color:var(--tier-trusted)">0</span>
                     <span class="hero-stat-label">trusted+</span>
                 </div>
+                <div class="hero-stat">
+                    <span class="hero-stat-value mono" id="credit-extended" style="color:var(--blue)">$0</span>
+                    <span class="hero-stat-label">credit extended</span>
+                </div>
+                <div class="hero-stat">
+                    <span class="hero-stat-value mono" id="escrows-active" style="color:var(--tier-elite)">0</span>
+                    <span class="hero-stat-label">escrows</span>
+                </div>
             </div>
         </section>
 
@@ -574,6 +623,15 @@ const dashboardHTML = `<!DOCTYPE html>
                         <span class="section-title">Trust Distribution</span>
                     </div>
                     <div id="trust-distribution">
+                        <div class="empty">Loading...</div>
+                    </div>
+                </div>
+
+                <div class="sidebar-section">
+                    <div class="section-header">
+                        <span class="section-title">Credit & Escrow</span>
+                    </div>
+                    <div id="credit-stats">
                         <div class="empty">Loading...</div>
                     </div>
                 </div>
@@ -758,14 +816,52 @@ const dashboardHTML = `<!DOCTYPE html>
             }
         }
 
+        // Render credit & escrow stats section
+        function renderCreditStats(creditRes, agentsRes) {
+            const el = document.getElementById('credit-stats');
+            if (!el) return;
+
+            let lines = creditRes?.credit_lines || [];
+            let activeLines = lines.length;
+            let totalExtended = 0;
+            let totalUsed = 0;
+
+            lines.forEach(cl => {
+                totalExtended += parseFloat(cl.creditLimit || 0);
+                totalUsed += parseFloat(cl.creditUsed || 0);
+            });
+
+            let utilPct = totalExtended > 0 ? (totalUsed / totalExtended * 100) : 0;
+            let utilColor = utilPct < 50 ? 'var(--accent)' : utilPct < 80 ? 'var(--tier-elite)' : 'var(--red)';
+            let utilClass = utilPct < 50 ? 'healthy' : 'warning';
+
+            // Update hero metrics
+            const creditExtEl = document.getElementById('credit-extended');
+            if (creditExtEl) creditExtEl.textContent = '$' + formatUSD(totalExtended);
+
+            let html = '';
+            html += '<div class="credit-stat-row"><span class="credit-stat-label">Active Credit Lines</span><span class="credit-stat-value blue">' + activeLines + '</span></div>';
+            html += '<div class="credit-stat-row"><span class="credit-stat-label">Total Extended</span><span class="credit-stat-value">$' + formatUSD(totalExtended) + '</span></div>';
+            html += '<div class="credit-stat-row"><span class="credit-stat-label">Total Used</span><span class="credit-stat-value">$' + formatUSD(totalUsed) + '</span></div>';
+            html += '<div class="credit-stat-row"><span class="credit-stat-label">Utilization</span><span class="credit-stat-value ' + utilClass + '">' + utilPct.toFixed(1) + '%</span></div>';
+            html += '<div class="credit-util-bar"><div class="credit-util-fill" style="width:' + Math.min(utilPct, 100) + '%;background:' + utilColor + '"></div></div>';
+
+            if (activeLines === 0) {
+                html = '<div class="empty" style="padding:16px">No active credit lines</div>';
+            }
+
+            el.innerHTML = html;
+        }
+
         // Fetch and render
         async function loadData() {
             try {
-                const [statsRes, feedRes, agentsRes, repRes] = await Promise.all([
+                const [statsRes, feedRes, agentsRes, repRes, creditRes] = await Promise.all([
                     safeFetch('/v1/network/stats'),
                     safeFetch('/v1/feed?limit=15'),
                     safeFetch('/v1/agents?limit=10'),
-                    safeFetch('/v1/reputation?limit=100')
+                    safeFetch('/v1/reputation?limit=100'),
+                    safeFetch('/v1/credit/active')
                 ]);
 
                 // Build reputation lookup
@@ -816,6 +912,26 @@ const dashboardHTML = `<!DOCTYPE html>
                 const trustDist = document.getElementById('trust-distribution');
                 if (repRes?.tiers) {
                     trustDist.innerHTML = renderTrustDistribution(repRes.tiers);
+                }
+
+                // Credit & Escrow stats
+                renderCreditStats(creditRes, agentsRes);
+
+                // Escrow count from top agents (count active escrows)
+                const escrowEl = document.getElementById('escrows-active');
+                if (escrowEl && agentsRes?.agents) {
+                    // Fetch escrow counts for top agents
+                    let escrowCount = 0;
+                    const topAddrs = agentsRes.agents.slice(0, 5).map(a => a.address);
+                    const escrowResults = await Promise.all(
+                        topAddrs.map(addr => safeFetch('/v1/agents/' + addr + '/escrows?limit=50'))
+                    );
+                    escrowResults.forEach(res => {
+                        if (res?.escrows) {
+                            escrowCount += res.escrows.filter(e => e.status === 'pending' || e.status === 'delivered').length;
+                        }
+                    });
+                    escrowEl.textContent = formatCompact(escrowCount);
                 }
 
             } catch (err) {

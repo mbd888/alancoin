@@ -11,8 +11,6 @@
 package sessionkeys
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"time"
 )
 
@@ -142,15 +140,6 @@ var (
 	ErrSignatureExpired      = &ValidationError{Code: "signature_expired", Message: "Signature timestamp is too old"}
 	ErrInvalidPublicKey      = &ValidationError{Code: "invalid_public_key", Message: "Invalid public key format"}
 )
-
-// GenerateID creates a random session key ID
-func GenerateID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return "sk_" + hex.EncodeToString(b)
-}
 
 // IsActive returns true if the session key is currently valid
 func (sk *SessionKey) IsActive() bool {

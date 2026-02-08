@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 // ERC20 Transfer event signature
@@ -216,14 +217,14 @@ func (w *Watcher) processTransfer(ctx context.Context, vLog types.Log) error {
 	if w.checker != nil && !w.checker.IsAgent(ctx, fromAddr) {
 		w.logger.Info("deposit from non-agent, skipping",
 			"from", fromAddr,
-			"amount", formatUSDC(amount),
+			"amount", usdc.Format(amount),
 			"tx", txHash,
 		)
 		return nil
 	}
 
 	// Credit the agent's balance
-	amountStr := formatUSDC(amount)
+	amountStr := usdc.Format(amount)
 	if err := w.creditor.Deposit(ctx, fromAddr, amountStr, txHash); err != nil {
 		return fmt.Errorf("failed to credit balance: %w", err)
 	}
@@ -236,17 +237,4 @@ func (w *Watcher) processTransfer(ctx context.Context, vLog types.Log) error {
 
 	succeeded = true
 	return nil
-}
-
-// formatUSDC converts raw amount to decimal string (6 decimals)
-func formatUSDC(amount *big.Int) string {
-	if amount == nil {
-		return "0"
-	}
-	s := amount.String()
-	for len(s) < 7 {
-		s = "0" + s
-	}
-	decimal := len(s) - 6
-	return s[:decimal] + "." + s[decimal:]
 }
