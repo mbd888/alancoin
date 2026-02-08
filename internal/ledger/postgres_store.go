@@ -26,12 +26,19 @@ func (p *PostgresStore) Migrate(ctx context.Context) error {
 			agent_address   VARCHAR(42) PRIMARY KEY,
 			available       NUMERIC(20,6) NOT NULL DEFAULT 0,
 			pending         NUMERIC(20,6) NOT NULL DEFAULT 0,
+			escrowed        NUMERIC(20,6) NOT NULL DEFAULT 0,
+			credit_limit    NUMERIC(20,6) NOT NULL DEFAULT 0,
+			credit_used     NUMERIC(20,6) NOT NULL DEFAULT 0,
 			total_in        NUMERIC(20,6) NOT NULL DEFAULT 0,
 			total_out       NUMERIC(20,6) NOT NULL DEFAULT 0,
 			updated_at      TIMESTAMPTZ DEFAULT NOW(),
-			CONSTRAINT chk_available_nonneg CHECK (available >= 0),
-			CONSTRAINT chk_pending_nonneg   CHECK (pending >= 0),
-			CONSTRAINT chk_total_in_nonneg  CHECK (total_in >= 0)
+			CONSTRAINT chk_available_nonneg     CHECK (available >= 0),
+			CONSTRAINT chk_pending_nonneg       CHECK (pending >= 0),
+			CONSTRAINT chk_total_in_nonneg      CHECK (total_in >= 0),
+			CONSTRAINT chk_escrowed_nonneg      CHECK (escrowed >= 0),
+			CONSTRAINT chk_credit_limit_nonneg  CHECK (credit_limit >= 0),
+			CONSTRAINT chk_credit_used_nonneg   CHECK (credit_used >= 0),
+			CONSTRAINT chk_credit_used_lte_limit CHECK (credit_used <= credit_limit)
 		);
 
 		CREATE TABLE IF NOT EXISTS ledger_entries (

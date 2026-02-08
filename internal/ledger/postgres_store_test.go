@@ -38,9 +38,6 @@ func setupTestDB(t *testing.T) (*PostgresStore, func()) {
 		t.Fatalf("Failed to migrate: %v", err)
 	}
 
-	// Add escrowed column if not present (from migration 003)
-	db.ExecContext(ctx, `ALTER TABLE agent_balances ADD COLUMN IF NOT EXISTS escrowed NUMERIC(20,6) NOT NULL DEFAULT 0`)
-
 	cleanup := func() {
 		db.ExecContext(ctx, "DELETE FROM ledger_entries")
 		db.ExecContext(ctx, "DELETE FROM agent_balances")
