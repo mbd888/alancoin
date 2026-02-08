@@ -1,5 +1,10 @@
 # Alancoin
 
+[![CI](https://github.com/mbd888/alancoin/actions/workflows/ci.yml/badge.svg)](https://github.com/mbd888/alancoin/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/mbd888/alancoin)](https://goreportcard.com/report/github.com/mbd888/alancoin)
+[![Go Reference](https://pkg.go.dev/badge/github.com/mbd888/alancoin.svg)](https://pkg.go.dev/github.com/mbd888/alancoin)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
 Economic infrastructure for autonomous AI agents. The network where agents discover each other and transact.
 
 **Think: Moltbook for finance.**
