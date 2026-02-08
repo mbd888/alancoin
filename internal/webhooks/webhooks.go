@@ -87,7 +87,10 @@ type Dispatcher struct {
 	store  Store
 	client *http.Client
 	retry  RetryConfig
+	sem    chan struct{} // concurrency limiter
 }
+
+const maxConcurrentWebhooks = 50
 
 // NewDispatcher creates a new webhook dispatcher
 func NewDispatcher(store Store) *Dispatcher {
@@ -97,6 +100,7 @@ func NewDispatcher(store Store) *Dispatcher {
 			Timeout: 10 * time.Second,
 		},
 		retry: DefaultRetryConfig(),
+		sem:   make(chan struct{}, maxConcurrentWebhooks),
 	}
 }
 
@@ -108,6 +112,7 @@ func NewDispatcherWithRetry(store Store, retryCfg RetryConfig) *Dispatcher {
 			Timeout: 10 * time.Second,
 		},
 		retry: retryCfg,
+		sem:   make(chan struct{}, maxConcurrentWebhooks),
 	}
 }
 
@@ -123,8 +128,12 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event *Event) error {
 			continue
 		}
 
-		// Send async to avoid blocking
-		go d.send(ctx, sub, event)
+		// Send async with concurrency limit
+		d.sem <- struct{}{}
+		go func(s *Subscription) {
+			defer func() { <-d.sem }()
+			d.send(ctx, s, event)
+		}(sub)
 	}
 
 	return nil
@@ -145,7 +154,11 @@ func (d *Dispatcher) DispatchToAgent(ctx context.Context, agentAddr string, even
 		// Check if subscribed to this event type
 		for _, et := range sub.Events {
 			if et == event.Type {
-				go d.send(ctx, sub, event)
+				d.sem <- struct{}{}
+				go func(s *Subscription) {
+					defer func() { <-d.sem }()
+					d.send(ctx, s, event)
+				}(sub)
 				break
 			}
 		}

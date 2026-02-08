@@ -67,7 +67,14 @@ func RequireOwnership(m *Manager, paramName string) gin.HandlerFunc {
 		targetAddr := strings.ToLower(c.Param(paramName))
 
 		// Check ownership
-		apiKey := key.(*APIKey)
+		apiKey, ok := key.(*APIKey)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+				"error":   "internal_error",
+				"message": "Invalid authentication state",
+			})
+			return
+		}
 		if !strings.EqualFold(apiKey.AgentAddr, targetAddr) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error":   "forbidden",

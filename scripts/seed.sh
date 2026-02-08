@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 # Seed the Alancoin network with demo agents and transactions
 # This creates the initial content for the feed
 #

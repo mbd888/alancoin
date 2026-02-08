@@ -72,3 +72,26 @@ ALTER TABLE session_keys
 ALTER TABLE session_keys
     ALTER COLUMN total_spent SET DEFAULT 0,
     ALTER COLUMN spent_today SET DEFAULT 0;
+
+-- +goose Down
+ALTER TABLE session_keys
+    ALTER COLUMN max_per_transaction TYPE VARCHAR(32),
+    ALTER COLUMN max_per_day         TYPE VARCHAR(32),
+    ALTER COLUMN max_total           TYPE VARCHAR(32),
+    ALTER COLUMN total_spent         TYPE VARCHAR(32),
+    ALTER COLUMN spent_today         TYPE VARCHAR(32);
+ALTER TABLE services ALTER COLUMN price TYPE VARCHAR(32);
+ALTER TABLE agent_stats
+    ALTER COLUMN total_received TYPE VARCHAR(32),
+    ALTER COLUMN total_spent    TYPE VARCHAR(32);
+ALTER TABLE transactions ALTER COLUMN amount TYPE VARCHAR(32);
+ALTER TABLE ledger_entries ALTER COLUMN amount TYPE VARCHAR(32);
+ALTER TABLE agent_balances
+    DROP CONSTRAINT IF EXISTS chk_available_nonneg,
+    DROP CONSTRAINT IF EXISTS chk_pending_nonneg,
+    DROP CONSTRAINT IF EXISTS chk_total_in_nonneg;
+ALTER TABLE agent_balances
+    ALTER COLUMN available TYPE VARCHAR(32),
+    ALTER COLUMN pending   TYPE VARCHAR(32),
+    ALTER COLUMN total_in  TYPE VARCHAR(32),
+    ALTER COLUMN total_out TYPE VARCHAR(32);

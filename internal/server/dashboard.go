@@ -595,6 +595,14 @@ const dashboardHTML = `<!DOCTYPE html>
     </footer>
 
     <script>
+        // Escape HTML to prevent XSS
+        function escapeHtml(text) {
+            if (text == null) return '';
+            const div = document.createElement('div');
+            div.textContent = String(text);
+            return div.innerHTML;
+        }
+
         // Format helpers
         function formatUSD(amount) {
             const num = parseFloat(amount) || 0;
@@ -667,19 +675,19 @@ const dashboardHTML = `<!DOCTYPE html>
             return '<div class="tx' + (isNew ? ' new' : '') + '">' +
                 '<div class="tx-parties">' +
                     '<span class="tx-agent">' +
-                        '<span class="agent-avatar" style="background:' + fromColor + '">' + fromInitials + '</span>' +
-                        tx.fromName +
+                        '<span class="agent-avatar" style="background:' + fromColor + '">' + escapeHtml(fromInitials) + '</span>' +
+                        escapeHtml(tx.fromName) +
                         tierBadge((repByAddr[tx.fromAddress] || {}).tier) +
-                        '<span class="agent-tooltip">' + tx.fromAddress + '</span>' +
+                        '<span class="agent-tooltip">' + escapeHtml(tx.fromAddress) + '</span>' +
                     '</span>' +
                     '<span class="tx-arrow">\u2192</span>' +
                     '<span class="tx-agent">' +
-                        '<span class="agent-avatar" style="background:' + toColor + '">' + toInitials + '</span>' +
-                        tx.toName +
+                        '<span class="agent-avatar" style="background:' + toColor + '">' + escapeHtml(toInitials) + '</span>' +
+                        escapeHtml(tx.toName) +
                         tierBadge((repByAddr[tx.toAddress] || {}).tier) +
-                        '<span class="agent-tooltip">' + tx.toAddress + '</span>' +
+                        '<span class="agent-tooltip">' + escapeHtml(tx.toAddress) + '</span>' +
                     '</span>' +
-                    (tx.serviceName ? '<span class="tx-service">' + tx.serviceName + '</span>' : '') +
+                    (tx.serviceName ? '<span class="tx-service">' + escapeHtml(tx.serviceName) + '</span>' : '') +
                 '</div>' +
                 '<span class="tx-amount positive mono">$' + formatUSD(tx.amount) + '</span>' +
                 '<span class="tx-time mono">' + timeAgo(tx.timestamp) + '</span>' +
@@ -695,11 +703,11 @@ const dashboardHTML = `<!DOCTYPE html>
             const initials = getInitials(agent.name);
             const rep = repByAddr[agent.address] || {};
 
-            return '<a href="/agent/' + agent.address + '" class="agent-row" title="' + agent.address + '">' +
-                '<span class="agent-avatar" style="background:' + color + '">' + initials + '</span>' +
+            return '<a href="/agent/' + encodeURIComponent(agent.address) + '" class="agent-row" title="' + escapeHtml(agent.address) + '">' +
+                '<span class="agent-avatar" style="background:' + color + '">' + escapeHtml(initials) + '</span>' +
                 '<div class="agent-info">' +
-                    '<div class="agent-name">' + agent.name + tierBadge(rep.tier) + '</div>' +
-                    '<div class="agent-type">' + topService + '</div>' +
+                    '<div class="agent-name">' + escapeHtml(agent.name) + tierBadge(rep.tier) + '</div>' +
+                    '<div class="agent-type">' + escapeHtml(topService) + '</div>' +
                 '</div>' +
                 '<div class="agent-revenue">' +
                     '<div class="agent-revenue-value mono">$' + formatUSD(revenue) + '</div>' +

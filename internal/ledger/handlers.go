@@ -4,10 +4,19 @@ import (
 	"context"
 	"math/big"
 	"net/http"
+	"regexp"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 )
+
+// validAmount checks that amount is a valid positive decimal number
+var validAmount = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
+
+func isValidAmount(amount string) bool {
+	return validAmount.MatchString(strings.TrimSpace(amount))
+}
 
 // WithdrawalExecutor executes on-chain withdrawals
 type WithdrawalExecutor interface {
@@ -91,6 +100,14 @@ func (h *Handler) RecordDeposit(c *gin.Context) {
 		return
 	}
 
+	if !isValidAmount(req.Amount) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_amount",
+			"message": "Amount must be a positive decimal number",
+		})
+		return
+	}
+
 	err := h.ledger.Deposit(c.Request.Context(), req.AgentAddress, req.Amount, req.TxHash)
 	if err != nil {
 		if err == ErrDuplicateDeposit {
@@ -127,6 +144,14 @@ func (h *Handler) RequestWithdrawal(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "invalid_request",
 			"message": "Invalid request body",
+		})
+		return
+	}
+
+	if !isValidAmount(req.Amount) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_amount",
+			"message": "Amount must be a positive decimal number",
 		})
 		return
 	}
@@ -172,13 +197,13 @@ func (h *Handler) RequestWithdrawal(c *gin.Context) {
 
 		// Record in ledger
 		if err := h.ledger.Withdraw(c.Request.Context(), address, req.Amount, txHash); err != nil {
-			// Transfer succeeded but ledger update failed - log but don't fail
-			c.JSON(http.StatusOK, gin.H{
-				"status":  "completed",
-				"message": "Withdrawal executed",
+			// Transfer succeeded but ledger update failed - critical inconsistency
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"status":  "partial_failure",
+				"error":   "ledger_sync_failed",
+				"message": "On-chain transfer succeeded but ledger update failed - contact support",
 				"amount":  req.Amount,
 				"txHash":  txHash,
-				"warning": "Ledger update failed - balance may be incorrect",
 			})
 			return
 		}

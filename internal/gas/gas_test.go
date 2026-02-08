@@ -14,11 +14,17 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.GasMarkupPct < 0 {
 		t.Error("GasMarkupPct should be non-negative")
 	}
-	minFee := parseUSDC(cfg.MinGasFeeUSDC)
+	minFee, err := parseUSDC(cfg.MinGasFeeUSDC)
+	if err != nil {
+		t.Fatalf("parseUSDC(MinGasFeeUSDC): %v", err)
+	}
 	if minFee.Sign() <= 0 {
 		t.Error("MinGasFeeUSDC should be positive")
 	}
-	maxFee := parseUSDC(cfg.MaxGasFeeUSDC)
+	maxFee, err := parseUSDC(cfg.MaxGasFeeUSDC)
+	if err != nil {
+		t.Fatalf("parseUSDC(MaxGasFeeUSDC): %v", err)
+	}
 	if maxFee.Cmp(minFee) <= 0 {
 		t.Error("MaxGasFeeUSDC should be greater than MinGasFeeUSDC")
 	}
@@ -99,7 +105,11 @@ func TestParseUSDC(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		result := parseUSDC(tc.input)
+		result, err := parseUSDC(tc.input)
+		if err != nil {
+			t.Errorf("parseUSDC(%s) unexpected error: %v", tc.input, err)
+			continue
+		}
 		if result.Int64() != tc.expected {
 			t.Errorf("parseUSDC(%s) = %d, expected %d", tc.input, result.Int64(), tc.expected)
 		}

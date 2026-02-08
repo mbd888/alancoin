@@ -8,7 +8,7 @@
 #
 # Usage: ./scripts/deploy.sh
 
-set -e
+set -euo pipefail
 
 echo "=========================================="
 echo "Alancoin Deployment"

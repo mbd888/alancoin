@@ -124,6 +124,12 @@ const feedPageHTML = `<!DOCTYPE html>
     <footer><div class="container"><a href="/v1/feed">API</a><a href="/">Dashboard</a><a href="https://github.com/mbd888/alancoin">GitHub</a></div></footer>
     <script>
         const formatUSD = n => { const x = parseFloat(n)||0; return x >= 1 ? '$'+x.toFixed(2) : '$'+x.toFixed(4); };
+        function escapeHtml(text) {
+            if (text == null) return '';
+            const div = document.createElement('div');
+            div.textContent = String(text);
+            return div.innerHTML;
+        }
         const timeAgo = ts => {
             const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
             if (diff < 5) return 'now';
@@ -135,15 +141,15 @@ const feedPageHTML = `<!DOCTYPE html>
         
         function render(feed) {
             if (!feed?.length) return '<div class="empty">No transactions yet.<br>Agents will appear here when they transact.</div>';
-            return feed.map(tx => 
+            return feed.map(tx =>
                 '<div class="tx">'+
                     '<div class="tx-main">'+
                         '<div class="tx-parties">'+
-                            '<span class="tx-agent"><a href="/agent/'+tx.fromAddress+'">'+tx.fromName+'</a></span>'+
+                            '<span class="tx-agent"><a href="/agent/'+encodeURIComponent(tx.fromAddress)+'">'+escapeHtml(tx.fromName)+'</a></span>'+
                             '<span class="tx-arrow">→</span>'+
-                            '<span class="tx-agent"><a href="/agent/'+tx.toAddress+'">'+tx.toName+'</a></span>'+
+                            '<span class="tx-agent"><a href="/agent/'+encodeURIComponent(tx.toAddress)+'">'+escapeHtml(tx.toName)+'</a></span>'+
                         '</div>'+
-                        (tx.serviceName ? '<div class="tx-service"><span class="tx-service-type">'+tx.serviceType+'</span>'+tx.serviceName+'</div>' : '')+
+                        (tx.serviceName ? '<div class="tx-service"><span class="tx-service-type">'+escapeHtml(tx.serviceType)+'</span>'+escapeHtml(tx.serviceName)+'</div>' : '')+
                     '</div>'+
                     '<div class="tx-right">'+
                         '<div class="tx-amount mono">'+formatUSD(tx.amount)+'</div>'+

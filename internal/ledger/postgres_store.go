@@ -10,7 +10,9 @@ import (
 
 func generateID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
@@ -140,7 +142,10 @@ func (p *PostgresStore) Debit(ctx context.Context, agentAddr, amount, reference,
 		return fmt.Errorf("failed to update balance: %w", err)
 	}
 
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if rows == 0 {
 		return ErrAgentNotFound
 	}
@@ -176,7 +181,10 @@ func (p *PostgresStore) Refund(ctx context.Context, agentAddr, amount, reference
 		return fmt.Errorf("failed to update balance: %w", err)
 	}
 
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if rows == 0 {
 		return ErrAgentNotFound
 	}
@@ -213,7 +221,10 @@ func (p *PostgresStore) Withdraw(ctx context.Context, agentAddr, amount, txHash 
 		return fmt.Errorf("failed to update balance: %w", err)
 	}
 
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if rows == 0 {
 		return ErrAgentNotFound
 	}
@@ -252,7 +263,10 @@ func (p *PostgresStore) Hold(ctx context.Context, agentAddr, amount, reference s
 		return fmt.Errorf("failed to place hold: %w", err)
 	}
 
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if rows == 0 {
 		return ErrAgentNotFound
 	}
@@ -289,7 +303,10 @@ func (p *PostgresStore) ConfirmHold(ctx context.Context, agentAddr, amount, refe
 		return fmt.Errorf("failed to confirm hold: %w", err)
 	}
 
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if rows == 0 {
 		return ErrAgentNotFound
 	}
@@ -325,7 +342,10 @@ func (p *PostgresStore) ReleaseHold(ctx context.Context, agentAddr, amount, refe
 		return fmt.Errorf("failed to release hold: %w", err)
 	}
 
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if rows == 0 {
 		return ErrAgentNotFound
 	}
@@ -361,7 +381,10 @@ func (p *PostgresStore) EscrowLock(ctx context.Context, agentAddr, amount, refer
 		return fmt.Errorf("failed to lock escrow: %w", err)
 	}
 
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if rows == 0 {
 		return ErrAgentNotFound
 	}
@@ -396,7 +419,10 @@ func (p *PostgresStore) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr
 	if err != nil {
 		return fmt.Errorf("failed to debit buyer escrow: %w", err)
 	}
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if rows == 0 {
 		return ErrAgentNotFound
 	}
@@ -453,7 +479,10 @@ func (p *PostgresStore) RefundEscrow(ctx context.Context, agentAddr, amount, ref
 		return fmt.Errorf("failed to refund escrow: %w", err)
 	}
 
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
 	if rows == 0 {
 		return ErrAgentNotFound
 	}

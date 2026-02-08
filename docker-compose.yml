@@ -7,7 +7,7 @@ services:
     environment:
       POSTGRES_DB: alancoin
       POSTGRES_USER: alancoin
-      POSTGRES_PASSWORD: alancoin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alancoin}
     ports:
       - "5432:5432"
     volumes:
@@ -32,7 +32,7 @@ services:
       - PORT=8080
       - ENV=development
       - LOG_LEVEL=debug
-      - DATABASE_URL=postgres://alancoin:alancoin@postgres:5432/alancoin?sslmode=disable
+      - DATABASE_URL=postgres://alancoin:${POSTGRES_PASSWORD:-alancoin}@postgres:5432/alancoin?sslmode=disable
       - RPC_URL=https://sepolia.base.org
       - CHAIN_ID=84532
       - USDC_CONTRACT=0x036CbD53842c5426634e7929541eC2318f3dCF7e

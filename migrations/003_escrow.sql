@@ -28,3 +28,8 @@ CREATE INDEX IF NOT EXISTS idx_escrow_buyer ON escrows(buyer_addr);
 CREATE INDEX IF NOT EXISTS idx_escrow_seller ON escrows(seller_addr);
 CREATE INDEX IF NOT EXISTS idx_escrow_status ON escrows(status);
 CREATE INDEX IF NOT EXISTS idx_escrow_auto_release ON escrows(auto_release_at) WHERE status IN ('pending', 'delivered');
+
+-- +goose Down
+DROP TABLE IF EXISTS escrows;
+ALTER TABLE agent_balances DROP CONSTRAINT IF EXISTS chk_escrowed_nonneg;
+ALTER TABLE agent_balances DROP COLUMN IF EXISTS escrowed;

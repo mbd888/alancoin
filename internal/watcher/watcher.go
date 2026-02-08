@@ -185,8 +185,20 @@ func (w *Watcher) processTransfer(ctx context.Context, vLog types.Log) error {
 		w.mu.Unlock()
 		return nil
 	}
+	// Mark as in-progress to prevent concurrent duplicate processing.
+	// If processing fails, we remove it so the next poll can retry.
 	w.processed[txHash] = true
 	w.mu.Unlock()
+
+	// On failure, unmark so the transfer is retried on the next poll cycle.
+	var succeeded bool
+	defer func() {
+		if !succeeded {
+			w.mu.Lock()
+			delete(w.processed, txHash)
+			w.mu.Unlock()
+		}
+	}()
 
 	// Parse the Transfer event
 	// Topics[1] = from address (indexed)
@@ -222,6 +234,7 @@ func (w *Watcher) processTransfer(ctx context.Context, vLog types.Log) error {
 		"tx", txHash,
 	)
 
+	succeeded = true
 	return nil
 }
 

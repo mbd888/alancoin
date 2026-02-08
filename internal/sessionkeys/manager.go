@@ -276,6 +276,8 @@ func (m *Manager) validateTransaction(ctx context.Context, key *SessionKey, to s
 	spentToday := key.Usage.SpentToday
 	if key.Usage.LastResetDay != today {
 		spentToday = "0"
+		key.Usage.LastResetDay = today
+		key.Usage.SpentToday = "0"
 	}
 
 	if key.Permission.MaxPerDay != "" {

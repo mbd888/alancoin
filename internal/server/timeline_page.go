@@ -520,6 +520,13 @@ const timelinePageHTML = `<!DOCTYPE html>
             }
         }
         
+        function escapeHtml(text) {
+            if (text == null) return '';
+            const div = document.createElement('div');
+            div.textContent = String(text);
+            return div.innerHTML;
+        }
+
         function renderTransaction(event) {
             const d = event.data || {};
             const from = shortenAddr(d.from || '0x?');
@@ -535,12 +542,12 @@ const timelinePageHTML = `<!DOCTYPE html>
                         <span class="tx-time">${time}</span>
                     </div>
                     <div class="tx-flow">
-                        <span class="tx-address">${from}</span>
+                        <span class="tx-address">${escapeHtml(from)}</span>
                         <span class="tx-arrow">→</span>
-                        <span class="tx-address">${to}</span>
+                        <span class="tx-address">${escapeHtml(to)}</span>
                     </div>
-                    <div class="tx-amount">$${amount}</div>
-                    ${service ? ` + "`" + `<span class="tx-service">${service}</span>` + "`" + ` : ''}
+                    <div class="tx-amount">$${escapeHtml(amount)}</div>
+                    ${service ? ` + "`" + `<span class="tx-service">${escapeHtml(service)}</span>` + "`" + ` : ''}
                 </div>
             ` + "`" + `;
         }
@@ -557,14 +564,14 @@ const timelinePageHTML = `<!DOCTYPE html>
                 <div class="timeline-item comment-item">
                     <div class="comment-header">
                         <div class="comment-author">
-                            <div class="author-avatar">${name[0]}</div>
+                            <div class="author-avatar">${escapeHtml(name[0])}</div>
                             <div>
-                                <div class="author-name">@${name}</div>
+                                <div class="author-name">@${escapeHtml(name)}</div>
                             </div>
                         </div>
-                        <span class="comment-type type-${type}">${type}</span>
+                        <span class="comment-type type-${escapeHtml(type)}">${escapeHtml(type)}</span>
                     </div>
-                    <div class="comment-content">${content}</div>
+                    <div class="comment-content">${escapeHtml(content)}</div>
                     <div class="comment-footer">
                         <span class="comment-action">♥ ${likes}</span>
                         <span class="tx-time">${time}</span>
@@ -586,14 +593,14 @@ const timelinePageHTML = `<!DOCTYPE html>
                 <div class="timeline-item prediction-item">
                     <div class="comment-header">
                         <div class="comment-author">
-                            <div class="author-avatar">${name[0]}</div>
+                            <div class="author-avatar">${escapeHtml(name[0])}</div>
                             <div>
-                                <div class="author-name">@${name}</div>
+                                <div class="author-name">@${escapeHtml(name)}</div>
                                 <div class="author-specialty">Prediction</div>
                             </div>
                         </div>
                     </div>
-                    <div class="prediction-statement">🔮 ${statement}</div>
+                    <div class="prediction-statement">🔮 ${escapeHtml(statement)}</div>
                     <div class="prediction-meta">
                         <span class="prediction-confidence">${'🎯'.repeat(confidence)} Confidence</span>
                         <span>${time}</span>

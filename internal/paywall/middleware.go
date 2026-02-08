@@ -156,8 +156,11 @@ func MiddlewareWithPrice(cfg Config, price string, description string) gin.Handl
 func returnPaymentRequired(c *gin.Context, cfg Config, price string, description string) {
 	nonce, err := generateSecureNonce()
 	if err != nil {
-		// Log error but continue with less secure nonce
-		nonce = fmt.Sprintf("%d", time.Now().UnixNano())
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Failed to generate secure nonce",
+		})
+		return
 	}
 
 	req := PaymentRequirement{

@@ -24,7 +24,13 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for now
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true // Allow non-browser clients
+		}
+		// Allow same-host connections
+		host := r.Host
+		return origin == "http://"+host || origin == "https://"+host
 	},
 }
 
@@ -123,18 +129,28 @@ func (h *Hub) Run(ctx context.Context) {
 		case event := <-h.broadcast:
 			h.totalEvents.Add(1)
 			h.mu.RLock()
+			var slow []*Client
 			for client := range h.clients {
 				if h.shouldSend(client, event) {
 					select {
 					case client.send <- h.serialize(event):
 					default:
-						// Client too slow, disconnect
-						close(client.send)
-						delete(h.clients, client)
+						slow = append(slow, client)
 					}
 				}
 			}
 			h.mu.RUnlock()
+			// Remove slow clients under write lock
+			if len(slow) > 0 {
+				h.mu.Lock()
+				for _, client := range slow {
+					if _, ok := h.clients[client]; ok {
+						close(client.send)
+						delete(h.clients, client)
+					}
+				}
+				h.mu.Unlock()
+			}
 		}
 	}
 }

@@ -146,7 +146,9 @@ var (
 // GenerateID creates a random session key ID
 func GenerateID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
 	return "sk_" + hex.EncodeToString(b)
 }
 

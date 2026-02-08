@@ -3,6 +3,11 @@ linters:
     - errcheck
     - govet
     - staticcheck
+    - gosec
+    - bodyclose
+    - unused
+    - ineffassign
+    - gosimple
 
 linters-settings:
   errcheck:

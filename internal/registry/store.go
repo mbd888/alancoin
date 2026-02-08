@@ -148,7 +148,9 @@ func (m *MemoryStore) ListAgents(ctx context.Context, query AgentQuery) ([]*Agen
 		query.Limit = 100
 	}
 
-	var results []*Agent
+	// Pre-allocate with capacity hint to avoid repeated growing
+	maxResults := query.Offset + query.Limit
+	results := make([]*Agent, 0, min(maxResults, len(m.agents)))
 
 	for _, agent := range m.agents {
 		// Filter by service type if specified

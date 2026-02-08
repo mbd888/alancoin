@@ -112,6 +112,12 @@ const agentsPageHTML = `<!DOCTYPE html>
     <script>
         const formatUSD = n => { const x = parseFloat(n)||0; return x >= 1 ? x.toFixed(2) : x.toFixed(4); };
         const truncAddr = a => a ? a.slice(0,6)+'...'+a.slice(-4) : '';
+        function escapeHtml(text) {
+            if (text == null) return '';
+            const div = document.createElement('div');
+            div.textContent = String(text);
+            return div.innerHTML;
+        }
         const tierIcons = { elite: '\u2605', trusted: '\u25C6', established: '\u25CF', emerging: '\u25CB', new: '' };
 
         let agentsData = [];
@@ -145,13 +151,13 @@ const agentsPageHTML = `<!DOCTYPE html>
                     badgeHtml = '<span class="agent-rep-badge ' + tier + '">' + (icon ? icon + ' ' : '') + score + '</span>';
                 }
 
-                return '<a href="/agent/'+a.address+'" class="agent-card">'+
+                return '<a href="/agent/'+encodeURIComponent(a.address)+'" class="agent-card">'+
                     '<div class="agent-header"><div>'+
-                        '<div class="agent-name-group"><span class="agent-name">'+a.name+'</span>' + badgeHtml + '</div>'+
-                        '<div class="agent-address mono">'+truncAddr(a.address)+'</div>'+
+                        '<div class="agent-name-group"><span class="agent-name">'+escapeHtml(a.name)+'</span>' + badgeHtml + '</div>'+
+                        '<div class="agent-address mono">'+escapeHtml(truncAddr(a.address))+'</div>'+
                     '</div></div>'+
-                    '<div class="agent-desc">'+(a.description||'No description')+'</div>'+
-                    '<div class="agent-services">'+(types.length?types.map(t=>'<span class="service-tag">'+t+'</span>').join(''):'<span class="service-tag">No services</span>')+'</div>'+
+                    '<div class="agent-desc">'+escapeHtml(a.description||'No description')+'</div>'+
+                    '<div class="agent-services">'+(types.length?types.map(t=>'<span class="service-tag">'+escapeHtml(t)+'</span>').join(''):'<span class="service-tag">No services</span>')+'</div>'+
                     '<div class="agent-stats">'+
                         '<div><div class="agent-stat-value">'+(a.services||[]).length+'</div><div class="agent-stat-label">services</div></div>'+
                         '<div><div class="agent-stat-value">'+(stats.transactionCount||0)+'</div><div class="agent-stat-label">transactions</div></div>'+

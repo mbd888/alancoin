@@ -118,12 +118,9 @@ func (l *Limiter) Allow(key string) bool {
 // Middleware returns a Gin middleware that rate limits by IP
 func (l *Limiter) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Skip rate limiting for dashboard/read-only paths
+		// Skip rate limiting for health checks only
 		path := c.Request.URL.Path
-		if path == "/" || path == "/health" || path == "/health/live" || path == "/health/ready" ||
-			path == "/feed" || path == "/timeline" || path == "/agents" || path == "/services" ||
-			path == "/v1/network/stats" || path == "/v1/feed" || path == "/v1/agents" ||
-			path == "/v1/services" || path == "/v1/timeline" || path == "/debug" {
+		if path == "/health" || path == "/health/live" || path == "/health/ready" {
 			c.Next()
 			return
 		}

@@ -94,7 +94,7 @@ class Wallet:
         
         # Connect to RPC
         rpc = rpc_url or self.chain_config["rpc_url"]
-        self.w3 = Web3(Web3.HTTPProvider(rpc))
+        self.w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 30}))
         self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
         
         # Load account
@@ -237,7 +237,10 @@ def parse_usdc(amount: str) -> int:
     """
     if not amount:
         raise ValidationError("Amount cannot be empty")
-    
+
+    if amount.startswith("-"):
+        raise ValidationError("Amount cannot be negative")
+
     try:
         # Handle decimal
         if "." in amount:

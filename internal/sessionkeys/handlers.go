@@ -4,6 +4,7 @@ import (
 	"context"
 	"math/big"
 	"net/http"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
@@ -263,7 +264,7 @@ func (h *Handler) Transact(c *gin.Context) {
 	}
 
 	// Verify ownership
-	if key.OwnerAddr != address {
+	if !strings.EqualFold(key.OwnerAddr, address) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error":   "forbidden",
 			"message": "Session key does not belong to this agent",
@@ -297,7 +298,14 @@ func (h *Handler) Transact(c *gin.Context) {
 	}
 
 	// Reload key to get updated usage
-	key, _ = h.manager.Get(c.Request.Context(), keyID)
+	key, err = h.manager.Get(c.Request.Context(), keyID)
+	if err != nil || key == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Failed to reload session key",
+		})
+		return
+	}
 
 	// Execute the transfer if wallet is configured
 	var txHash string

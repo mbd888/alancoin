@@ -139,6 +139,12 @@ const servicesPageHTML = `<!DOCTYPE html>
     <footer><div class="container">Built on <a href="https://base.org">Base</a></div></footer>
     <script>
         const formatPrice = n => { const x = parseFloat(n)||0; return x >= 1 ? '$'+x.toFixed(2) : '$'+x.toFixed(4); };
+        function escapeHtml(text) {
+            if (text == null) return '';
+            const div = document.createElement('div');
+            div.textContent = String(text);
+            return div.innerHTML;
+        }
         const tierIcons = { elite: '\u2605', trusted: '\u25C6', established: '\u25CF', emerging: '\u25CB', new: '' };
         const tierClasses = { elite: 'elite', trusted: 'trusted', established: 'established', emerging: 'emerging', new: '' };
 
@@ -177,10 +183,10 @@ const servicesPageHTML = `<!DOCTYPE html>
 
                     return '<div class="service-row">'+
                         '<div class="service-main">'+
-                            '<span class="service-type-badge">'+s.type+'</span>'+
+                            '<span class="service-type-badge">'+escapeHtml(s.type)+'</span>'+
                             '<div class="service-info">'+
-                                '<div class="service-name">'+s.name+'</div>'+
-                                '<div class="service-agent">by <a href="/agent/'+s.agentAddress+'">'+s.agentName+'</a></div>'+
+                                '<div class="service-name">'+escapeHtml(s.name)+'</div>'+
+                                '<div class="service-agent">by <a href="/agent/'+encodeURIComponent(s.agentAddress)+'">'+escapeHtml(s.agentName)+'</a></div>'+
                                 repHtml+
                             '</div>'+
                         '</div>'+

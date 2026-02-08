@@ -100,8 +100,14 @@ func (p *PlatformPaymaster) EstimateGasFee(ctx context.Context, req *EstimateReq
 	gasCostUSD *= (1 + p.config.GasMarkupPct) // Add markup
 
 	// Apply min/max
-	minFee := parseUSDC(p.config.MinGasFeeUSDC)
-	maxFee := parseUSDC(p.config.MaxGasFeeUSDC)
+	minFee, err := parseUSDC(p.config.MinGasFeeUSDC)
+	if err != nil {
+		return nil, fmt.Errorf("invalid min gas fee config: %w", err)
+	}
+	maxFee, err := parseUSDC(p.config.MaxGasFeeUSDC)
+	if err != nil {
+		return nil, fmt.Errorf("invalid max gas fee config: %w", err)
+	}
 	gasCostUSDCBig := usdToBigUSDC(gasCostUSD)
 
 	if gasCostUSDCBig.Cmp(minFee) < 0 {
@@ -112,7 +118,10 @@ func (p *PlatformPaymaster) EstimateGasFee(ctx context.Context, req *EstimateReq
 	}
 
 	// Calculate total
-	originalAmount := parseUSDC(req.Amount)
+	originalAmount, err := parseUSDC(req.Amount)
+	if err != nil {
+		return nil, fmt.Errorf("invalid amount: %w", err)
+	}
 	totalWithGas := new(big.Int).Add(originalAmount, gasCostUSDCBig)
 
 	return &GasEstimate{
@@ -147,8 +156,14 @@ func (p *PlatformPaymaster) SponsorTransaction(ctx context.Context, req *Sponsor
 	}
 
 	// Calculate total to charge
-	originalAmount := parseUSDC(req.Amount)
-	gasFee := parseUSDC(estimate.GasCostUSDC)
+	originalAmount, err := parseUSDC(req.Amount)
+	if err != nil {
+		return nil, fmt.Errorf("invalid amount: %w", err)
+	}
+	gasFee, err := parseUSDC(estimate.GasCostUSDC)
+	if err != nil {
+		return nil, fmt.Errorf("invalid gas fee: %w", err)
+	}
 	totalCharged := new(big.Int).Add(originalAmount, gasFee)
 
 	// Record spending (optimistic - actual spend tracked separately)
@@ -244,17 +259,20 @@ func formatETH(wei *big.Int) string {
 	return fmt.Sprintf("%.8f", weiToETH(wei))
 }
 
-func parseUSDC(s string) *big.Int {
+func parseUSDC(s string) (*big.Int, error) {
 	if s == "" {
-		return big.NewInt(0)
+		return nil, fmt.Errorf("empty amount")
 	}
-	f, _ := new(big.Float).SetString(s)
-	if f == nil {
-		return big.NewInt(0)
+	f, ok := new(big.Float).SetString(s)
+	if !ok || f == nil {
+		return nil, fmt.Errorf("invalid amount: %s", s)
+	}
+	if f.Sign() < 0 {
+		return nil, fmt.Errorf("negative amount: %s", s)
 	}
 	f.Mul(f, big.NewFloat(1e6)) // USDC has 6 decimals
 	result, _ := f.Int(nil)
-	return result
+	return result, nil
 }
 
 func formatUSDC(amount *big.Int) string {

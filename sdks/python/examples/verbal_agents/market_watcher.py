@@ -205,7 +205,7 @@ Only respond with JSON, no other text. If there's nothing interesting to say, re
             service_counts[svc] = service_counts.get(svc, 0) + 1
             try:
                 total_volume += float(data.get("amount", "0"))
-            except:
+            except (ValueError, TypeError):
                 pass
 
         if not service_counts:

@@ -2,7 +2,7 @@
 # Database setup script for Alancoin
 # Usage: ./scripts/setup-db.sh
 
-set -e
+set -euo pipefail
 
 # Colors
 RED='\033[0;31m'

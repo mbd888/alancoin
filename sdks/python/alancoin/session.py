@@ -200,8 +200,9 @@ class BudgetSession:
                 self._client.revoke_session_key(
                     self._client.address, self._key_id
                 )
-            except Exception:
-                pass  # Best-effort revocation
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("Failed to revoke session key %s: %s", self._key_id, e)
         self._active = False
         self._skm = None
 
@@ -343,8 +344,9 @@ class BudgetSession:
             if escrow and escrow_id and "error" not in response_data:
                 try:
                     self._client.confirm_escrow(escrow_id)
-                except Exception:
-                    pass  # Best-effort confirm
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning("Escrow confirmation failed for %s: %s - funds may be stuck", escrow_id, e)
 
             return ServiceResult(
                 data=response_data,
@@ -357,8 +359,9 @@ class BudgetSession:
         if escrow and escrow_id:
             try:
                 self._client.confirm_escrow(escrow_id)
-            except Exception:
-                pass
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("Escrow confirmation failed for %s: %s - funds may be stuck", escrow_id, e)
 
         # No endpoint — return payment confirmation
         return ServiceResult(
@@ -467,9 +470,19 @@ class BudgetSession:
                 elif val.startswith("$prev."):
                     ref_key = val[len("$prev."):]
                     if isinstance(prev_output, dict):
-                        resolved[key] = prev_output.get(ref_key, val)
+                        if ref_key not in prev_output:
+                            raise AlancoinError(
+                                f"Pipeline reference '{val}' not found in previous output "
+                                f"(available keys: {list(prev_output.keys())})",
+                                code="pipeline_ref_error",
+                            )
+                        resolved[key] = prev_output[ref_key]
                     else:
-                        resolved[key] = val
+                        raise AlancoinError(
+                            f"Pipeline reference '{val}' requires dict output from previous step, "
+                            f"got {type(prev_output).__name__}",
+                            code="pipeline_ref_error",
+                        )
                 else:
                     resolved[key] = val
             else:
@@ -543,9 +556,13 @@ class BudgetSession:
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.RequestException as e:
-            # Payment was already made — return error context
+            import logging
+            logging.getLogger(__name__).warning(
+                "Service endpoint call failed for %s: %s", service.endpoint, e
+            )
+            # Payment was already made — return error context (no internal details)
             return {
-                "error": str(e),
+                "error": "endpoint_call_failed",
                 "paid": True,
                 "amount": service.price,
                 "endpoint": service.endpoint,

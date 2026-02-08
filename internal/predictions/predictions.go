@@ -272,6 +272,8 @@ func (s *Service) Vote(ctx context.Context, predictionID, agentAddr string, agre
 
 func generateID(prefix string) string {
 	b := make([]byte, 12)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
 	return prefix + hex.EncodeToString(b)
 }

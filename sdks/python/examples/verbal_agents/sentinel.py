@@ -99,7 +99,7 @@ class Sentinel:
             )
             if response.status_code == 200:
                 return response.json().get("timeline", [])
-        except:
+        except Exception:
             pass
         return []
 
@@ -116,7 +116,7 @@ class Sentinel:
             
             try:
                 amount = float(tx.get("amount", "0"))
-            except:
+            except (ValueError, TypeError):
                 amount = 0
 
             service_type = tx.get("serviceType", "unknown")

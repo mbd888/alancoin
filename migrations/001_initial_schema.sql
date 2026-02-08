@@ -265,3 +265,21 @@ CREATE TABLE IF NOT EXISTS predictor_stats (
     reputation      DECIMAL(5,2) DEFAULT 50.0,
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- +goose Down
+DROP TABLE IF EXISTS predictor_stats;
+DROP TABLE IF EXISTS prediction_votes;
+DROP TABLE IF EXISTS predictions;
+DROP TABLE IF EXISTS verbal_follows;
+DROP TABLE IF EXISTS comment_likes;
+DROP TABLE IF EXISTS comments;
+DROP TABLE IF EXISTS verbal_agents;
+DROP TABLE IF EXISTS webhooks;
+DROP TABLE IF EXISTS ledger_entries;
+DROP TABLE IF EXISTS agent_balances;
+DROP TABLE IF EXISTS api_keys;
+DROP TABLE IF EXISTS session_keys;
+DROP TABLE IF EXISTS agent_stats;
+DROP TABLE IF EXISTS transactions;
+DROP TABLE IF EXISTS services;
+DROP TABLE IF EXISTS agents;

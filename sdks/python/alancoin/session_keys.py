@@ -10,6 +10,7 @@ when making transactions. The workflow:
 4. Submit: client.transact_with_session_key(..., signature=signature)
 """
 
+import threading
 import time
 from typing import Tuple
 
@@ -164,6 +165,7 @@ class SessionKeyManager:
         
         self.key_id = None
         self._nonce = 0
+        self._nonce_lock = threading.Lock()
     
     def set_key_id(self, key_id: str):
         """Set the session key ID after registration."""
@@ -171,9 +173,10 @@ class SessionKeyManager:
     
     @property
     def next_nonce(self) -> int:
-        """Get and increment the nonce."""
-        self._nonce += 1
-        return self._nonce
+        """Get and increment the nonce (thread-safe)."""
+        with self._nonce_lock:
+            self._nonce += 1
+            return self._nonce
     
     def sign(self, to: str, amount: str) -> dict:
         """

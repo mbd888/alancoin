@@ -321,6 +321,8 @@ func (s *Service) ListByAgent(ctx context.Context, agentAddr string, limit int) 
 
 func generateEscrowID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
 	return fmt.Sprintf("esc_%x", b)
 }

@@ -148,6 +148,12 @@ const agentProfileHTML = `<!DOCTYPE html>
         const addr = location.pathname.split('/agent/')[1];
         const formatUSD = n => { const x = parseFloat(n)||0; return x >= 1 ? '$'+x.toFixed(2) : '$'+x.toFixed(4); };
         const truncAddr = a => a ? a.slice(0,6)+'...'+a.slice(-4) : '';
+        function escapeHtml(text) {
+            if (text == null) return '';
+            const div = document.createElement('div');
+            div.textContent = String(text);
+            return div.innerHTML;
+        }
         const tierIcons = { elite: '\u2605', trusted: '\u25C6', established: '\u25CF', emerging: '\u25CB', new: '' };
         const compColors = {
             volumeScore: '#8b5cf6',
@@ -217,9 +223,9 @@ const agentProfileHTML = `<!DOCTYPE html>
                 '<div class="profile-header">'+
                     '<div class="profile-avatar">\uD83E\uDD16</div>'+
                     '<div class="profile-info">'+
-                        '<h1 class="profile-name">'+agent.name+'</h1>'+
-                        '<div class="profile-address mono"><a href="https://sepolia.basescan.org/address/'+agent.address+'" target="_blank">'+agent.address+'</a></div>'+
-                        '<div class="profile-desc">'+(agent.description||'No description')+'</div>'+
+                        '<h1 class="profile-name">'+escapeHtml(agent.name)+'</h1>'+
+                        '<div class="profile-address mono"><a href="https://sepolia.basescan.org/address/'+encodeURIComponent(agent.address)+'" target="_blank">'+escapeHtml(agent.address)+'</a></div>'+
+                        '<div class="profile-desc">'+escapeHtml(agent.description||'No description')+'</div>'+
                     '</div>'+
                 '</div>'+
 
@@ -237,8 +243,8 @@ const agentProfileHTML = `<!DOCTYPE html>
                     (services.length ? services.map(s =>
                         '<div class="service-card">'+
                             '<div class="service-left">'+
-                                '<span class="service-type">'+s.type+'</span>'+
-                                '<span class="service-name">'+s.name+'</span>'+
+                                '<span class="service-type">'+escapeHtml(s.type)+'</span>'+
+                                '<span class="service-name">'+escapeHtml(s.name)+'</span>'+
                             '</div>'+
                             '<span class="service-price mono">'+formatUSD(s.price)+'</span>'+
                         '</div>'
@@ -251,9 +257,9 @@ const agentProfileHTML = `<!DOCTYPE html>
                         const isOut = tx.from.toLowerCase() === agent.address.toLowerCase();
                         return '<div class="tx-row">'+
                             '<div class="tx-parties">'+
-                                '<span class="tx-agent'+(isOut?' self':'')+'">'+(!isOut?truncAddr(tx.from):agent.name)+'</span>'+
+                                '<span class="tx-agent'+(isOut?' self':'')+'">'+escapeHtml(!isOut?truncAddr(tx.from):agent.name)+'</span>'+
                                 '<span class="tx-arrow">\u2192</span>'+
-                                '<span class="tx-agent'+(!isOut?' self':'')+'">'+( isOut?truncAddr(tx.to):agent.name)+'</span>'+
+                                '<span class="tx-agent'+(!isOut?' self':'')+'">'+escapeHtml(isOut?truncAddr(tx.to):agent.name)+'</span>'+
                             '</div>'+
                             '<div class="tx-meta">'+
                                 '<div class="tx-amount '+(isOut?'out':'in')+' mono">'+(isOut?'-':'+')+formatUSD(tx.amount)+'</div>'+

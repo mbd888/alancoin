@@ -772,7 +772,7 @@ func (s *Server) registerAgentWithAPIKey(c *gin.Context) {
 		"apiKey":  rawKey,
 		"keyId":   keyInfo.ID,
 		"warning": "Store this API key securely. It will not be shown again.",
-		"usage":   "Include 'Authorization: Bearer " + rawKey + "' header in requests.",
+		"usage":   "Include 'Authorization: Bearer <apiKey>' header in requests.",
 	})
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -70,7 +71,9 @@ func (p *PostgresStore) GetAgent(ctx context.Context, address string) (*Agent, e
 
 	agent.CreatedAt = createdAt
 	agent.UpdatedAt = updatedAt
-	_ = json.Unmarshal(metadata, &agent.Metadata)
+	if err := json.Unmarshal(metadata, &agent.Metadata); err != nil {
+		slog.Warn("failed to unmarshal agent metadata", "address", agent.Address, "error", err)
+	}
 
 	// Load services
 	services, _ := p.getAgentServices(ctx, address)
@@ -245,7 +248,9 @@ func (p *PostgresStore) GetService(ctx context.Context, agentAddress, serviceID 
 		return nil, fmt.Errorf("failed to get service: %w", err)
 	}
 
-	_ = json.Unmarshal(metadata, &svc.Metadata)
+	if err := json.Unmarshal(metadata, &svc.Metadata); err != nil {
+		slog.Warn("failed to unmarshal service metadata", "service", svc.ID, "error", err)
+	}
 	return &svc, nil
 }
 
@@ -368,7 +373,9 @@ func (p *PostgresStore) GetTransaction(ctx context.Context, id string) (*Transac
 	}
 
 	tx.ServiceID = serviceID.String
-	_ = json.Unmarshal(metadata, &tx.Metadata)
+	if err := json.Unmarshal(metadata, &tx.Metadata); err != nil {
+		slog.Warn("failed to unmarshal transaction metadata", "tx", tx.ID, "error", err)
+	}
 	return &tx, nil
 }
 
@@ -499,7 +506,9 @@ func (p *PostgresStore) getAgentServices(ctx context.Context, address string) ([
 			continue
 		}
 		svc.AgentAddress = address
-		_ = json.Unmarshal(metadata, &svc.Metadata)
+		if err := json.Unmarshal(metadata, &svc.Metadata); err != nil {
+			slog.Warn("failed to unmarshal service metadata", "service", svc.ID, "error", err)
+		}
 		services = append(services, svc)
 	}
 	return services, nil

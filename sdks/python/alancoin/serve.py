@@ -309,7 +309,8 @@ class ServiceAgent:
                 try:
                     result = _call_handler(svc.handler, params)
                 except Exception as e:
-                    self._json(500, {"error": str(e)})
+                    logger.exception("Service handler error for %s", stype)
+                    self._json(500, {"error": "internal_error", "message": "Service handler failed"})
                     return
 
                 self._json(200, result)

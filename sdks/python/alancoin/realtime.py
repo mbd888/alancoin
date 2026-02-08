@@ -83,6 +83,7 @@ class RealtimeClient:
         
         self._ws: Optional[websocket.WebSocketApp] = None
         self._handlers: Dict[str, List[Callable]] = {}
+        self._handlers_lock = threading.Lock()
         self._subscription = Subscription()
         self._connected = False
         self._running = False
@@ -102,9 +103,10 @@ class RealtimeClient:
         Example:
             client.on("transaction", lambda tx: print(tx))
         """
-        if event_type not in self._handlers:
-            self._handlers[event_type] = []
-        self._handlers[event_type].append(handler)
+        with self._handlers_lock:
+            if event_type not in self._handlers:
+                self._handlers[event_type] = []
+            self._handlers[event_type].append(handler)
         return self
 
     def subscribe(
@@ -218,7 +220,8 @@ class RealtimeClient:
 
     def _emit(self, event_type: str, data: Any):
         """Emit event to registered handlers."""
-        handlers = self._handlers.get(event_type, [])
+        with self._handlers_lock:
+            handlers = list(self._handlers.get(event_type, []))
         for handler in handlers:
             try:
                 handler(data)

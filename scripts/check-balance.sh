@@ -1,7 +1,7 @@
 #!/bin/bash
 # Check USDC balance on Base Sepolia
 
-set -e
+set -euo pipefail
 
 # Load .env if exists
 if [ -f .env ]; then
