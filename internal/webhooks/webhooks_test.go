@@ -201,7 +201,7 @@ func TestDispatch_IncludesSignature(t *testing.T) {
 	var mu sync.Mutex
 	var gotSig string
 	var gotBody []byte
-	secret := "test_webhook_secret"
+	secret := "test_webhook_secret" //nolint:gosec // test credential
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()

@@ -151,6 +151,7 @@ func TestClient_Get_NoPay(t *testing.T) {
 
 	resp, err := client.Get(server.URL)
 	require.NoError(t, err)
+	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
@@ -171,6 +172,7 @@ func TestClient_Get_402_NoPay(t *testing.T) {
 
 	resp, err := client.Get(server.URL)
 	require.NoError(t, err)
+	defer resp.Body.Close()
 	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
 }
 

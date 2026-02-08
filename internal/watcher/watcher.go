@@ -152,8 +152,8 @@ func (w *Watcher) checkForDeposits(ctx context.Context) error {
 
 	// Query for Transfer events to our platform address
 	query := ethereum.FilterQuery{
-		FromBlock: big.NewInt(int64(w.lastBlock + 1)),
-		ToBlock:   big.NewInt(int64(currentBlock)),
+		FromBlock: new(big.Int).SetUint64(w.lastBlock + 1),
+		ToBlock:   new(big.Int).SetUint64(currentBlock),
 		Addresses: []common.Address{w.config.USDCContract},
 		Topics: [][]common.Hash{
 			{transferEventSig}, // Transfer event
