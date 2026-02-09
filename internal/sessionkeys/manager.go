@@ -438,8 +438,9 @@ func (m *Manager) CreateDelegated(ctx context.Context, parentKeyID string, req *
 	// 15. Update parent nonce
 	parent.Usage.LastNonce = req.Nonce
 	if err := m.store.Update(ctx, parent); err != nil {
-		// Non-fatal: child was created, nonce update failed
-		// Next delegation will still work with a higher nonce
+		// Child was created, nonce update failed.
+		// Next delegation will still work with a higher nonce.
+		_ = err
 	}
 
 	return childKey, nil
