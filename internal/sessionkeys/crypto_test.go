@@ -156,7 +156,7 @@ func TestValidateSignedReplayProtection(t *testing.T) {
 	}
 
 	// Record usage to update nonce
-	mgr.RecordUsage(ctx, key.ID, "1.00", 1)
+	_ = mgr.RecordUsage(ctx, key.ID, "1.00", 1)
 
 	// Replay with same nonce should fail
 	err = mgr.ValidateSigned(ctx, key.ID, signedReq1)

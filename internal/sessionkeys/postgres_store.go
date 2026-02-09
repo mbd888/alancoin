@@ -131,7 +131,7 @@ func (p *PostgresStore) GetByOwner(ctx context.Context, ownerAddr string) ([]*Se
 	if err != nil {
 		return nil, fmt.Errorf("failed to list session keys: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var keys []*SessionKey
 	for rows.Next() {

@@ -157,6 +157,6 @@ func TestGenerateSecureNonce(t *testing.T) {
 
 func BenchmarkGenerateSecureNonce(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		generateSecureNonce()
+		_, _ = generateSecureNonce()
 	}
 }

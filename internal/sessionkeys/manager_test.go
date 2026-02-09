@@ -176,8 +176,8 @@ func TestSessionKeyUsageTracking(t *testing.T) {
 	key, _ := mgr.Create(ctx, "0x1234", req)
 
 	// Record some usage (with nonce)
-	mgr.RecordUsage(ctx, key.ID, "2.50", 1)
-	mgr.RecordUsage(ctx, key.ID, "1.50", 2)
+	_ = mgr.RecordUsage(ctx, key.ID, "2.50", 1)
+	_ = mgr.RecordUsage(ctx, key.ID, "1.50", 2)
 
 	// Check usage
 	key, _ = mgr.Get(ctx, key.ID)

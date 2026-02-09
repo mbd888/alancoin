@@ -112,7 +112,7 @@ func (p *PostgresStore) ListVerbalAgents(ctx context.Context, limit, offset int)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var agents []*VerbalAgent
 	for rows.Next() {
@@ -219,7 +219,7 @@ func (p *PostgresStore) ListComments(ctx context.Context, opts ListOptions) ([]*
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return p.scanComments(rows)
 }
@@ -236,7 +236,7 @@ func (p *PostgresStore) ListByAuthor(ctx context.Context, authorAddr string, lim
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return p.scanComments(rows)
 }
@@ -258,7 +258,7 @@ func (p *PostgresStore) ListByReference(ctx context.Context, refType, refID stri
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return p.scanComments(rows)
 }
