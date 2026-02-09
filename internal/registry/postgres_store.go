@@ -324,7 +324,7 @@ func (p *PostgresStore) DiscoverServices(ctx context.Context, filter ServiceFilt
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover services: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []*ServiceListing
 	for rows.Next() {
@@ -407,7 +407,7 @@ func (p *PostgresStore) ListTransactions(ctx context.Context, agentAddress strin
 	if err != nil {
 		return nil, fmt.Errorf("failed to list transactions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var transactions []*Transaction
 	for rows.Next() {
@@ -438,7 +438,7 @@ func (p *PostgresStore) GetRecentTransactions(ctx context.Context, limit int) ([
 	if err != nil {
 		return nil, fmt.Errorf("failed to get recent transactions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var transactions []*Transaction
 	for rows.Next() {
@@ -506,7 +506,7 @@ func (p *PostgresStore) getAgentServices(ctx context.Context, address string) ([
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var services []Service
 	for rows.Next() {
