@@ -22,6 +22,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -o /app/bin/alancoin \
     ./cmd/server
 
+# Build migrate binary
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags="-w -s" \
+    -o /app/bin/migrate \
+    ./cmd/migrate
+
 # Runtime stage
 FROM alpine:3.19
 
@@ -34,9 +40,11 @@ RUN apk add --no-cache ca-certificates tzdata
 RUN addgroup -g 1000 alancoin && \
     adduser -u 1000 -G alancoin -s /bin/sh -D alancoin
 
-# Copy binary and migrations from builder
+# Copy binaries, migrations, and entrypoint from builder
 COPY --from=builder /app/bin/alancoin /app/alancoin
+COPY --from=builder /app/bin/migrate /app/migrate
 COPY --from=builder /app/migrations /app/migrations
+COPY --from=builder /app/docker-entrypoint.sh /app/docker-entrypoint.sh
 
 # Use non-root user
 USER alancoin
@@ -48,5 +56,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health/live || exit 1
 
-# Run
-ENTRYPOINT ["/app/alancoin"]
+# Run migrations then start server
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
