@@ -139,7 +139,7 @@ func TestClient_Get_NoPay(t *testing.T) {
 	// Create a server that returns 200
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"message":"success"}`))
+		_, _ = w.Write([]byte(`{"message":"success"}`))
 	}))
 	defer server.Close()
 
@@ -160,7 +160,7 @@ func TestClient_Get_402_NoPay(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Payment-Required", "true")
 		w.WriteHeader(http.StatusPaymentRequired)
-		w.Write([]byte(`{"price":"0.001","currency":"USDC","chain":"base-sepolia","chainId":84532,"recipient":"0x123"}`))
+		_, _ = w.Write([]byte(`{"price":"0.001","currency":"USDC","chain":"base-sepolia","chainId":84532,"recipient":"0x123"}`))
 	}))
 	defer server.Close()
 

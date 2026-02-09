@@ -85,7 +85,7 @@ func TestClient_DoRequest_HTTPError_WithAPIMessage(t *testing.T) {
 func TestClient_DoRequest_HTTPError_NonJSON(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
-		w.Write([]byte("upstream timeout"))
+		_, _ = w.Write([]byte("upstream timeout"))
 	}))
 	defer ts.Close()
 
@@ -99,7 +99,7 @@ func TestClient_DoRequest_HTTPError_NonJSON(t *testing.T) {
 func TestClient_DoRequest_HTTPError_InsufficientBalance(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error":   "insufficient_balance",
 			"message": "Available balance 0.500000 is less than requested 10.000000",
 		})
@@ -138,7 +138,7 @@ func TestClient_DiscoverServices_QueryParams(t *testing.T) {
 		assert.Equal(t, "translation", r.URL.Query().Get("type"))
 		assert.Equal(t, "0.05", r.URL.Query().Get("maxPrice"))
 		assert.Equal(t, "reputation", r.URL.Query().Get("sortBy"))
-		w.Write([]byte(`{"services":[]}`))
+		_, _ = w.Write([]byte(`{"services":[]}`))
 	}))
 	defer ts.Close()
 
@@ -151,7 +151,7 @@ func TestClient_DiscoverServices_EmptyParams(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Empty(t, r.URL.Query().Get("type"))
 		assert.Empty(t, r.URL.Query().Get("maxPrice"))
-		w.Write([]byte(`{"services":[]}`))
+		_, _ = w.Write([]byte(`{"services":[]}`))
 	}))
 	defer ts.Close()
 
@@ -164,7 +164,7 @@ func TestClient_ListAgents_QueryParams(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "inference", r.URL.Query().Get("serviceType"))
 		assert.Equal(t, "5", r.URL.Query().Get("limit"))
-		w.Write([]byte(`{"agents":[]}`))
+		_, _ = w.Write([]byte(`{"agents":[]}`))
 	}))
 	defer ts.Close()
 
@@ -176,7 +176,7 @@ func TestClient_ListAgents_QueryParams(t *testing.T) {
 func TestClient_ListAgents_ZeroLimit(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Empty(t, r.URL.Query().Get("limit"), "limit=0 should not be sent")
-		w.Write([]byte(`{"agents":[]}`))
+		_, _ = w.Write([]byte(`{"agents":[]}`))
 	}))
 	defer ts.Close()
 
@@ -198,7 +198,7 @@ func TestClient_CreateEscrow_RequestBody(t *testing.T) {
 		assert.Equal(t, "1.50", m["amount"])
 		assert.Equal(t, "svc-42", m["serviceId"])
 
-		json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "e1"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "e1"}})
 	}))
 	defer ts.Close()
 
@@ -215,7 +215,7 @@ func TestClient_DisputeEscrow_RequestBody(t *testing.T) {
 		json.Unmarshal(body, &m)
 		assert.Equal(t, "bad quality", m["reason"])
 
-		json.NewEncoder(w).Encode(map[string]any{"status": "refunded"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "refunded"})
 	}))
 	defer ts.Close()
 
@@ -238,7 +238,7 @@ func TestClient_CallEndpoint_Headers(t *testing.T) {
 		json.Unmarshal(body, &m)
 		assert.Equal(t, "hello", m["text"])
 
-		json.NewEncoder(w).Encode(map[string]any{"result": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": "ok"})
 	}))
 	defer ts.Close()
 
@@ -250,7 +250,7 @@ func TestClient_CallEndpoint_Headers(t *testing.T) {
 func TestClient_CallEndpoint_ServiceReturns500(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
-		w.Write([]byte("internal error"))
+		_, _ = w.Write([]byte("internal error"))
 	}))
 	defer ts.Close()
 
@@ -264,7 +264,7 @@ func TestClient_CallEndpoint_ServiceReturns500(t *testing.T) {
 func TestClient_CallEndpoint_ServiceReturns402(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(402)
-		json.NewEncoder(w).Encode(map[string]any{"error": "payment_required", "message": "pay me first"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "payment_required", "message": "pay me first"})
 	}))
 	defer ts.Close()
 
@@ -284,7 +284,7 @@ func TestHandleDiscoverServices(t *testing.T) {
 		assert.Equal(t, "Bearer sk_test_key", r.Header.Get("Authorization"))
 		assert.Equal(t, "translation", r.URL.Query().Get("type"))
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"services": []map[string]any{
 				{
 					"id": "svc-1", "name": "TranslatorBot", "address": "0xSELLER1",
@@ -323,7 +323,7 @@ func TestHandleDiscoverServices(t *testing.T) {
 func TestHandleDiscoverServices_NoParams(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/services", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"services": []map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{"services": []map[string]any{
 			{"id": "s1", "name": "Foo", "address": "0x1", "type": "t", "price": "1.00"},
 		}})
 	})
@@ -340,7 +340,7 @@ func TestHandleDiscoverServices_NoParams(t *testing.T) {
 func TestHandleDiscoverServices_EmptyResults(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/services", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"services": []map[string]any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"services": []map[string]any{}})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -356,7 +356,7 @@ func TestHandleDiscoverServices_APIError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/services", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]any{"error": "internal", "message": "db down"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "internal", "message": "db down"})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -374,7 +374,7 @@ func TestHandleDiscoverServices_PassesAllQueryParams(t *testing.T) {
 		assert.Equal(t, "inference", r.URL.Query().Get("type"))
 		assert.Equal(t, "0.50", r.URL.Query().Get("maxPrice"))
 		assert.Equal(t, "value", r.URL.Query().Get("sortBy"))
-		json.NewEncoder(w).Encode(map[string]any{"services": []map[string]any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"services": []map[string]any{}})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -402,7 +402,7 @@ func TestHandleCallService_HappyPath(t *testing.T) {
 		json.Unmarshal(body, &params)
 		assert.Equal(t, "Hello world", params["text"])
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"translation": "Hola mundo",
 			"language":    "es",
 		})
@@ -411,7 +411,7 @@ func TestHandleCallService_HappyPath(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/services", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"services": []map[string]any{{
 				"id": "svc-1", "name": "TranslatorBot", "address": "0xSELLER",
 				"type": "translation", "price": "0.005", "endpoint": serviceServer.URL,
@@ -425,10 +425,10 @@ func TestHandleCallService_HappyPath(t *testing.T) {
 		assert.Equal(t, "0xSELLER", body["sellerAddr"])
 		assert.Equal(t, "0.005", body["amount"])
 
-		json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "esc-123"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "esc-123"}})
 	})
 	mux.HandleFunc("/v1/escrow/esc-123/confirm", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"status": "released"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "released"})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -459,7 +459,7 @@ func TestHandleCallService_MissingServiceType(t *testing.T) {
 func TestHandleCallService_NoServicesFound(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/services", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"services": []map[string]any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"services": []map[string]any{}})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -477,7 +477,7 @@ func TestHandleCallService_DiscoveryFails(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/services", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
-		w.Write([]byte(`{"error":"internal","message":"database unreachable"}`))
+		_, _ = w.Write([]byte(`{"error":"internal","message":"database unreachable"}`))
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -494,7 +494,7 @@ func TestHandleCallService_DiscoveryFails(t *testing.T) {
 func TestHandleCallService_EscrowCreationFails(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/services", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"services": []map[string]any{{
 				"id": "s1", "name": "Bot", "address": "0xS", "type": "t", "price": "100.00", "endpoint": "http://x",
 			}},
@@ -502,7 +502,7 @@ func TestHandleCallService_EscrowCreationFails(t *testing.T) {
 	})
 	mux.HandleFunc("/v1/escrow", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": "insufficient_balance", "message": "Available balance 0.50 is less than 100.00",
 		})
 	})
@@ -522,20 +522,20 @@ func TestHandleCallService_EscrowCreationFails(t *testing.T) {
 func TestHandleCallService_ServiceEndpointFails(t *testing.T) {
 	serviceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
-		w.Write([]byte("model overloaded"))
+		_, _ = w.Write([]byte("model overloaded"))
 	}))
 	defer serviceServer.Close()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/services", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"services": []map[string]any{{
 				"id": "s1", "name": "Bot", "address": "0xS", "type": "t", "price": "0.01", "endpoint": serviceServer.URL,
 			}},
 		})
 	})
 	mux.HandleFunc("/v1/escrow", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "esc-fail"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "esc-fail"}})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -556,13 +556,13 @@ func TestHandleCallService_ServiceEndpointFails(t *testing.T) {
 
 func TestHandleCallService_ConfirmFails(t *testing.T) {
 	serviceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"result": "done"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": "done"})
 	}))
 	defer serviceServer.Close()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/services", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"services": []map[string]any{{
 				"id": "s1", "name": "Bot", "address": "0xS", "type": "t", "price": "0.01", "endpoint": serviceServer.URL,
 			}},
@@ -570,14 +570,14 @@ func TestHandleCallService_ConfirmFails(t *testing.T) {
 	})
 	mux.HandleFunc("/v1/escrow", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/escrow" {
-			json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "esc-cf"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "esc-cf"}})
 			return
 		}
 		http.NotFound(w, r)
 	})
 	mux.HandleFunc("/v1/escrow/esc-cf/confirm", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(409)
-		json.NewEncoder(w).Encode(map[string]any{"error": "conflict", "message": "already released"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "conflict", "message": "already released"})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -596,14 +596,14 @@ func TestHandleCallService_ConfirmFails(t *testing.T) {
 
 func TestHandleCallService_PreferReputation(t *testing.T) {
 	serviceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}))
 	defer serviceServer.Close()
 
 	var escrowSeller string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/services", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"services": []map[string]any{
 				{"id": "s1", "name": "CheapBad", "address": "0xBAD", "type": "t", "price": "0.001", "endpoint": serviceServer.URL, "reputationScore": 10.0},
 				{"id": "s2", "name": "ExpensiveGood", "address": "0xGOOD", "type": "t", "price": "0.100", "endpoint": serviceServer.URL, "reputationScore": 98.0},
@@ -614,10 +614,10 @@ func TestHandleCallService_PreferReputation(t *testing.T) {
 		var body map[string]string
 		json.NewDecoder(r.Body).Decode(&body)
 		escrowSeller = body["sellerAddr"]
-		json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "esc-rep"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "esc-rep"}})
 	})
 	mux.HandleFunc("/v1/escrow/esc-rep/confirm", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"status": "released"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "released"})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -639,23 +639,23 @@ func TestHandleCallService_NoParams(t *testing.T) {
 		var m map[string]any
 		json.Unmarshal(body, &m)
 		assert.Empty(t, m, "empty params should send empty JSON object")
-		json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
 	}))
 	defer serviceServer.Close()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/services", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"services": []map[string]any{{
 				"id": "s1", "name": "Bot", "address": "0xS", "type": "t", "price": "0.01", "endpoint": serviceServer.URL,
 			}},
 		})
 	})
 	mux.HandleFunc("/v1/escrow", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "esc-np"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "esc-np"}})
 	})
 	mux.HandleFunc("/v1/escrow/esc-np/confirm", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"status": "released"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "released"})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -671,7 +671,7 @@ func TestHandleCallService_NoParams(t *testing.T) {
 func TestHandleCallService_ServiceEndpointUnreachable(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/services", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"services": []map[string]any{{
 				"id": "s1", "name": "DeadBot", "address": "0xS", "type": "t",
 				"price": "0.01", "endpoint": "http://127.0.0.1:1/dead",
@@ -679,7 +679,7 @@ func TestHandleCallService_ServiceEndpointUnreachable(t *testing.T) {
 		})
 	})
 	mux.HandleFunc("/v1/escrow", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "esc-dead"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "esc-dead"}})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -702,7 +702,7 @@ func TestHandleCallService_ServiceEndpointUnreachable(t *testing.T) {
 func TestHandleCheckBalance(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/agents/0xBUYER/balance", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"balance": map[string]any{
 				"available": "42.500000",
 				"pending":   "1.000000",
@@ -729,7 +729,7 @@ func TestHandleCheckBalance(t *testing.T) {
 func TestHandleCheckBalance_ZeroPendingAndEscrowed(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/agents/0xBUYER/balance", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"balance": map[string]any{
 				"available": "10.000000",
 				"pending":   "0",
@@ -752,7 +752,7 @@ func TestHandleCheckBalance_ZeroPendingAndEscrowed(t *testing.T) {
 func TestHandleCheckBalance_FlatResponse(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/agents/0xBUYER/balance", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"available": "7.250000",
 			"pending":   "0",
 			"escrowed":  "0",
@@ -772,7 +772,7 @@ func TestHandleCheckBalance_APIError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/agents/0xBUYER/balance", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
-		json.NewEncoder(w).Encode(map[string]any{"error": "not_found", "message": "agent not registered"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "not_found", "message": "agent not registered"})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -791,7 +791,7 @@ func TestHandleCheckBalance_APIError(t *testing.T) {
 func TestHandleGetReputation(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/reputation/0xAGENT", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"address":     "0xAGENT",
 			"score":       87.5,
 			"tier":        "trusted",
@@ -828,7 +828,7 @@ func TestHandleGetReputation_APIError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/reputation/0xNOBODY", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
-		json.NewEncoder(w).Encode(map[string]any{"error": "not_found", "message": "agent not found"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "not_found", "message": "agent not found"})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -845,7 +845,7 @@ func TestHandleGetReputation_APIError(t *testing.T) {
 func TestHandleGetReputation_MinimalFields(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/reputation/0xNEW", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"address": "0xNEW",
 			"score":   0.0,
 			"tier":    "new",
@@ -872,7 +872,7 @@ func TestHandleGetReputation_MinimalFields(t *testing.T) {
 func TestHandleListAgents(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/agents", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"agents": []map[string]any{
 				{"name": "TranslatorBot", "address": "0xA1", "description": "Translates text"},
 				{"name": "SummarizerBot", "address": "0xA2", "description": "Summarizes documents"},
@@ -897,7 +897,7 @@ func TestHandleListAgents(t *testing.T) {
 func TestHandleListAgents_Empty(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/agents", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"agents": []map[string]any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"agents": []map[string]any{}})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -913,7 +913,7 @@ func TestHandleListAgents_PassesFilters(t *testing.T) {
 	mux.HandleFunc("/v1/agents", func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "translation", r.URL.Query().Get("serviceType"))
 		assert.Equal(t, "3", r.URL.Query().Get("limit"))
-		json.NewEncoder(w).Encode(map[string]any{"agents": []map[string]any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"agents": []map[string]any{}})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -929,7 +929,7 @@ func TestHandleListAgents_APIError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/agents", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
-		w.Write([]byte("oops"))
+		_, _ = w.Write([]byte("oops"))
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -943,7 +943,7 @@ func TestHandleListAgents_APIError(t *testing.T) {
 func TestHandleListAgents_DirectArray(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/agents", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode([]map[string]any{
+		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{"name": "AgentOne", "address": "0x1"},
 		})
 	})
@@ -964,7 +964,7 @@ func TestHandleListAgents_DirectArray(t *testing.T) {
 func TestHandleGetNetworkStats(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/platform", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"platform": "alancoin",
 			"chain":    "base-sepolia",
 			"version":  "1.0.0",
@@ -986,7 +986,7 @@ func TestHandleGetNetworkStats_APIError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/platform", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(503)
-		json.NewEncoder(w).Encode(map[string]any{"error": "unavailable", "message": "maintenance"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "unavailable", "message": "maintenance"})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -1012,7 +1012,7 @@ func TestHandlePayAgent(t *testing.T) {
 		assert.Equal(t, "2.50", body["amount"])
 		assert.True(t, strings.HasPrefix(body["serviceId"], "direct-payment:"))
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"escrow": map[string]any{"id": "esc-789"},
 		})
 	})
@@ -1042,7 +1042,7 @@ func TestHandlePayAgent_NoMemo(t *testing.T) {
 		var body map[string]string
 		json.NewDecoder(r.Body).Decode(&body)
 		gotServiceID = body["serviceId"]
-		json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "esc-nm"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"escrow": map[string]any{"id": "esc-nm"}})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -1081,7 +1081,7 @@ func TestHandlePayAgent_EscrowFails(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/escrow", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": "insufficient_balance", "message": "not enough funds",
 		})
 	})
@@ -1110,7 +1110,7 @@ func TestHandleDisputeEscrow(t *testing.T) {
 		var body map[string]string
 		json.NewDecoder(r.Body).Decode(&body)
 		assert.Equal(t, "Service returned garbage", body["reason"])
-		json.NewEncoder(w).Encode(map[string]any{"status": "refunded"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "refunded"})
 	})
 
 	h, cleanup := newTestSetup(mux)
@@ -1154,7 +1154,7 @@ func TestHandleDisputeEscrow_APIError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/escrow/esc-gone/dispute", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(409)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": "conflict", "message": "escrow already released",
 		})
 	})
@@ -1383,17 +1383,17 @@ func TestHandlers_ConcurrentCalls(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/agents/0xBUYER/balance", func(w http.ResponseWriter, r *http.Request) {
 		callCount.Add(1)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"balance": map[string]any{"available": "10.00", "pending": "0", "escrowed": "0"},
 		})
 	})
 	mux.HandleFunc("/v1/services", func(w http.ResponseWriter, r *http.Request) {
 		callCount.Add(1)
-		json.NewEncoder(w).Encode(map[string]any{"services": []map[string]any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"services": []map[string]any{}})
 	})
 	mux.HandleFunc("/v1/reputation/0xA", func(w http.ResponseWriter, r *http.Request) {
 		callCount.Add(1)
-		json.NewEncoder(w).Encode(map[string]any{"score": 50.0, "tier": "new"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"score": 50.0, "tier": "new"})
 	})
 
 	h, cleanup := newTestSetup(mux)
