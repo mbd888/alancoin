@@ -198,6 +198,8 @@ func (s *Service) Revoke(ctx context.Context, agentAddr, reason string) (*Credit
 }
 
 // CheckDefaults scans for overdue credit lines (90+ days) and marks them as defaulted.
+// It also re-evaluates all active credit lines, adjusting limits downward if
+// an agent's reputation has dropped since the last review.
 func (s *Service) CheckDefaults(ctx context.Context) (int, error) {
 	overdue, err := s.store.ListOverdue(ctx, 90, 100)
 	if err != nil {
@@ -219,7 +221,26 @@ func (s *Service) CheckDefaults(ctx context.Context) (int, error) {
 		defaulted++
 	}
 
+	// Re-evaluate all active credit lines to catch reputation downgrades
+	_ = s.ReviewAllActive(ctx)
+
 	return defaulted, nil
+}
+
+// ReviewAllActive re-evaluates all active credit lines and adjusts limits
+// based on current reputation. This catches reputation downgrades that
+// should reduce or suspend a credit line.
+func (s *Service) ReviewAllActive(ctx context.Context) error {
+	lines, err := s.store.ListActive(ctx, 1000)
+	if err != nil {
+		return fmt.Errorf("failed to list active credit lines: %w", err)
+	}
+
+	for _, line := range lines {
+		_, _, _ = s.Review(ctx, line.AgentAddr)
+	}
+
+	return nil
 }
 
 // ListActive returns all active credit lines.

@@ -3,7 +3,11 @@ package webhooks
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -46,6 +50,15 @@ func (h *Handler) CreateWebhook(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "invalid_request",
 			"message": "Invalid request body",
+		})
+		return
+	}
+
+	// Validate webhook URL to prevent SSRF attacks
+	if err := validateWebhookURL(req.URL); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_url",
+			"message": err.Error(),
 		})
 		return
 	}
@@ -157,6 +170,57 @@ func (h *Handler) DeleteWebhook(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
+}
+
+// validateWebhookURL checks that a webhook URL is safe to call.
+// Blocks private/internal IPs to prevent SSRF attacks.
+func validateWebhookURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL format")
+	}
+
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return fmt.Errorf("URL scheme must be http or https")
+	}
+
+	if u.Host == "" {
+		return fmt.Errorf("URL must have a host")
+	}
+
+	host := u.Hostname()
+
+	// Block known internal hostnames
+	blocked := []string{"localhost", "metadata.google.internal"}
+	for _, b := range blocked {
+		if strings.EqualFold(host, b) {
+			return fmt.Errorf("URL host is not allowed")
+		}
+	}
+
+	// Block private/loopback/link-local IP addresses
+	ip := net.ParseIP(host)
+	if ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("URL must not point to a private or internal IP address")
+		}
+	}
+
+	// Also resolve the hostname and check resolved IPs
+	if ip == nil {
+		ips, err := net.LookupHost(host)
+		if err != nil {
+			return fmt.Errorf("cannot resolve URL host: %s", host)
+		}
+		for _, ipStr := range ips {
+			resolved := net.ParseIP(ipStr)
+			if resolved != nil && (resolved.IsLoopback() || resolved.IsPrivate() || resolved.IsLinkLocalUnicast() || resolved.IsUnspecified()) {
+				return fmt.Errorf("URL host resolves to a private or internal IP address")
+			}
+		}
+	}
+
+	return nil
 }
 
 func generateSecret() string {

@@ -2,6 +2,7 @@
 package ratelimit
 
 import (
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -125,7 +126,12 @@ func (l *Limiter) Middleware() gin.HandlerFunc {
 			return
 		}
 
-		key := c.ClientIP()
+		// Use the direct connection IP, not c.ClientIP() which trusts
+		// X-Forwarded-For and can be spoofed to bypass rate limiting.
+		key, _, _ := net.SplitHostPort(c.Request.RemoteAddr)
+		if key == "" {
+			key = c.Request.RemoteAddr
+		}
 
 		// Allow authenticated requests higher limits
 		if apiKey := c.GetHeader("Authorization"); apiKey != "" {

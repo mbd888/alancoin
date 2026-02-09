@@ -181,7 +181,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.logger.Info("escrow enabled")
 
 		// Credit system (spend on credit, repay from earnings)
-		creditStore := credit.NewMemoryStore()
+		creditStore := credit.NewPostgresStore(db)
+		if err := creditStore.Migrate(ctx); err != nil {
+			s.logger.Warn("failed to migrate credit store", "error", err)
+		}
 		reputationProv := reputation.NewRegistryProvider(s.registry)
 		creditScorer := credit.NewScorer()
 		s.creditService = credit.NewService(
@@ -455,8 +458,9 @@ func (s *Server) setupRoutes() {
 	reputationProvider := reputation.NewRegistryProvider(s.registry)
 	registryHandler.SetReputation(reputationProvider)
 
-	// Wire on-chain transaction verifier so POST /transactions checks receipts
-	if s.wallet != nil {
+	// Wire on-chain transaction verifier so POST /transactions checks receipts.
+	// Only in production (with DB) — in demo mode, transactions are auto-confirmed.
+	if s.wallet != nil && s.db != nil {
 		registryHandler.SetVerifier(&walletVerifierAdapter{s.wallet})
 	}
 

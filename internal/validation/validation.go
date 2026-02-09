@@ -146,7 +146,7 @@ func AddressParamMiddleware() gin.HandlerFunc {
 	}
 }
 
-// ValidAmount checks if a value is a valid USDC amount
+// ValidAmount checks if a value is a valid USDC amount (must be positive)
 func ValidAmount(field, value string) func() *ValidationError {
 	return func() *ValidationError {
 		if value == "" {
@@ -154,6 +154,7 @@ func ValidAmount(field, value string) func() *ValidationError {
 		}
 		// Should be a positive decimal number with at most one decimal point
 		decimalCount := 0
+		hasNonZero := false
 		for i, c := range value {
 			if c == '.' {
 				decimalCount++
@@ -168,6 +169,12 @@ func ValidAmount(field, value string) func() *ValidationError {
 			if c < '0' || c > '9' {
 				return &ValidationError{Field: field, Message: "invalid amount format"}
 			}
+			if c != '0' {
+				hasNonZero = true
+			}
+		}
+		if !hasNonZero {
+			return &ValidationError{Field: field, Message: "amount must be greater than zero"}
 		}
 		return nil
 	}

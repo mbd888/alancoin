@@ -70,6 +70,10 @@ func (p *RegistryProvider) GetScore(ctx context.Context, address string) (float6
 	return score.Score, string(score.Tier), nil
 }
 
+// maxTxPerCounterparty caps how many transactions with the same counterparty
+// count toward reputation. This prevents wash-trading between colluding agents.
+const maxTxPerCounterparty = 5
+
 func (p *RegistryProvider) calculateMetrics(agent *registry.Agent, txns []*registry.Transaction) *Metrics {
 	m := &Metrics{
 		FirstSeen: agent.CreatedAt,
@@ -83,34 +87,45 @@ func (p *RegistryProvider) calculateMetrics(agent *registry.Agent, txns []*regis
 		}
 	}
 
-	// Track unique counterparties
+	// Track unique counterparties and per-counterparty tx counts
 	counterparties := make(map[string]bool)
+	counterpartyCounts := make(map[string]int)
 
 	for _, tx := range txns {
-		m.TotalTransactions++
-
-		// Parse amount (stored as string like "1.50")
-		amount := parseAmount(tx.Amount)
-		m.TotalVolumeUSD += amount
-
-		// Track success/failure
-		if tx.Status == "confirmed" || tx.Status == "completed" {
-			m.SuccessfulTxns++
-		} else if tx.Status == "failed" || tx.Status == "reverted" {
-			m.FailedTxns++
-		} else {
-			// Pending or unknown - do not count as successful or failed
-			m.TotalTransactions--
-		}
-
-		// Track counterparties (the other side of the txn)
+		// Determine counterparty
+		var counterparty string
 		if strings.EqualFold(tx.From, agent.Address) {
-			counterparties[strings.ToLower(tx.To)] = true
+			counterparty = strings.ToLower(tx.To)
 		} else {
-			counterparties[strings.ToLower(tx.From)] = true
+			counterparty = strings.ToLower(tx.From)
+		}
+		counterparties[counterparty] = true
+
+		// Cap per-counterparty contribution to prevent wash-trading.
+		// Only the first maxTxPerCounterparty transactions with each
+		// counterparty count toward reputation metrics.
+		counterpartyCounts[counterparty]++
+		capped := counterpartyCounts[counterparty] > maxTxPerCounterparty
+
+		if !capped {
+			m.TotalTransactions++
+
+			// Parse amount (stored as string like "1.50")
+			amount := parseAmount(tx.Amount)
+			m.TotalVolumeUSD += amount
+
+			// Track success/failure
+			if tx.Status == "confirmed" || tx.Status == "completed" {
+				m.SuccessfulTxns++
+			} else if tx.Status == "failed" || tx.Status == "reverted" {
+				m.FailedTxns++
+			} else {
+				// Pending or unknown - do not count as successful or failed
+				m.TotalTransactions--
+			}
 		}
 
-		// Track last active
+		// Track last active (always, regardless of cap)
 		if tx.CreatedAt.After(m.LastActive) {
 			m.LastActive = tx.CreatedAt
 		}

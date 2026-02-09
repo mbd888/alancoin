@@ -170,29 +170,35 @@ class DemoRunner:
         print(f"[{timestamp}] {emoji} {message}")
 
     def api_call(self, method: str, endpoint: str, json_data: dict = None,
-                 api_key: str = None) -> Optional[dict]:
-        """Make an API call with error handling."""
+                 api_key: str = None, retries: int = 2) -> Optional[dict]:
+        """Make an API call with error handling and retry on rate limit."""
         url = f"{self.base_url}{endpoint}"
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        try:
-            if method == "GET":
-                resp = requests.get(url, headers=headers, timeout=10)
-            elif method == "POST":
-                resp = requests.post(url, json=json_data, headers=headers, timeout=10)
-            elif method == "DELETE":
-                resp = requests.delete(url, headers=headers, timeout=10)
-            else:
-                raise ValueError(f"Unknown method: {method}")
+        for attempt in range(retries + 1):
+            try:
+                if method == "GET":
+                    resp = requests.get(url, headers=headers, timeout=10)
+                elif method == "POST":
+                    resp = requests.post(url, json=json_data, headers=headers, timeout=10)
+                elif method == "DELETE":
+                    resp = requests.delete(url, headers=headers, timeout=10)
+                else:
+                    raise ValueError(f"Unknown method: {method}")
 
-            if resp.status_code >= 400:
+                if resp.status_code == 429 and attempt < retries:
+                    time.sleep(1.0)
+                    continue
+
+                if resp.status_code >= 400:
+                    return None
+                return resp.json() if resp.text else {}
+            except Exception as e:
+                self.log("!", f"API error: {e}")
                 return None
-            return resp.json() if resp.text else {}
-        except Exception as e:
-            self.log("!", f"API error: {e}")
-            return None
+        return None
 
     def api_call_raw(self, method: str, endpoint: str, json_data: dict = None,
                      api_key: str = None):
@@ -389,9 +395,10 @@ class DemoRunner:
                 "from": from_agent["address"],
                 "to": to_agent["address"],
                 "amount": amount,
-            })
+            }, api_key=from_agent["api_key"])
             if result:
                 success += 1
+            time.sleep(0.15)
 
         self.log("✓", f"Executed {success} reputation-building transactions")
 
@@ -462,21 +469,18 @@ class DemoRunner:
             f"/v1/agents/{address}/sessions",
             {
                 "publicKey": session_key_addr,
-                "permissions": {
-                    "maxPerTransaction": "0.50",
-                    "maxPerDay": "5.00",
-                    "maxTotal": "50.00",
-                    "allowedServiceTypes": ["data", "compute"],
-                    "validAfter": datetime.utcnow().isoformat() + "Z",
-                    "expiresAt": "24h",
-                },
+                "maxPerTransaction": "0.50",
+                "maxPerDay": "5.00",
+                "maxTotal": "50.00",
+                "allowedServiceTypes": ["data", "compute"],
+                "expiresIn": "24h",
                 "label": "demo-trading-key",
             },
             api_key=api_key,
         )
 
         if result:
-            key_id = result.get("sessionKey", {}).get("id", "unknown")
+            key_id = result.get("id", "unknown")
             self.log("✅", f"Session key created: {key_id}")
             self.log("  ", "")
             self.log("🛡️", "This is BOUNDED AUTONOMY:")
@@ -566,9 +570,10 @@ class DemoRunner:
                         "from": address,
                         "to": to_agent["address"],
                         "amount": amount,
-                    })
+                    }, api_key=api_key)
                     if result:
                         total_spent += float(amount)
+                    time.sleep(0.15)
 
             self.log("💸", f"  Spent ${total_spent:.2f} on services")
 
@@ -603,9 +608,10 @@ class DemoRunner:
                         "from": from_agent["address"],
                         "to": address,
                         "amount": amount,
-                    })
+                    }, api_key=from_agent["api_key"])
                     if result:
                         total_earned += float(amount)
+                    time.sleep(0.15)
 
             self.log("💰", f"  Earned ${total_earned:.2f} from services")
 
@@ -667,7 +673,7 @@ class DemoRunner:
                 "from": buyer["address"],
                 "to": seller["address"],
                 "amount": price,
-            })
+            }, api_key=buyer["api_key"])
 
             if result:
                 total_cost += float(price)
@@ -835,7 +841,7 @@ class DemoRunner:
             "from": from_agent["address"],
             "to": to_agent["address"],
             "amount": amount,
-        })
+        }, api_key=from_agent["api_key"])
 
         if result:
             self.log("💸", f"{from_name} -> {to_name}: ${amount} ({service})")
@@ -890,7 +896,7 @@ class DemoRunner:
             txns = stats.get("totalTransactions", 0)
 
         if credit_data:
-            credit_lines_list = credit_data.get("credit_lines", [])
+            credit_lines_list = credit_data.get("credit_lines") or []
             credit_lines = len(credit_lines_list)
             total_credit = sum(float(cl.get("creditLimit", "0")) for cl in credit_lines_list)
             credit_extended = f"${total_credit:.2f}"

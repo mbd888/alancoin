@@ -286,6 +286,12 @@ func (h *Handler) Transact(c *gin.Context) {
 		return
 	}
 
+	// Acquire per-key lock to prevent nonce TOCTOU replay attacks.
+	// The lock serializes validate → transfer → record for the same session key,
+	// so a concurrent request cannot reuse the same nonce between validation and recording.
+	unlockKey := h.manager.LockKey(keyID)
+	defer unlockKey()
+
 	// Validate the signed transaction (signature + permissions)
 	if err := h.manager.ValidateSigned(c.Request.Context(), keyID, &req); err != nil {
 		if validationErr, ok := err.(*ValidationError); ok {

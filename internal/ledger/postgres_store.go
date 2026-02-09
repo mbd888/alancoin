@@ -227,13 +227,14 @@ func (p *PostgresStore) Withdraw(ctx context.Context, agentAddr, amount, txHash 
 	}
 	defer tx.Rollback()
 
-	// Atomic debit — CHECK constraint prevents overdraft
+	// Atomic debit with balance guard — prevents overdraft without relying on CHECK constraint error
 	result, err := tx.ExecContext(ctx, `
 		UPDATE agent_balances SET
 			available  = available - $2::NUMERIC(20,6),
 			total_out  = total_out + $2::NUMERIC(20,6),
 			updated_at = NOW()
 		WHERE agent_address = $1
+		  AND available >= $2::NUMERIC(20,6)
 	`, agentAddr, amount)
 	if err != nil {
 		return fmt.Errorf("failed to update balance: %w", err)
@@ -244,7 +245,12 @@ func (p *PostgresStore) Withdraw(ctx context.Context, agentAddr, amount, txHash 
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
 	if rows == 0 {
-		return ErrAgentNotFound
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists)
+		if !exists {
+			return ErrAgentNotFound
+		}
+		return ErrInsufficientBalance
 	}
 
 	// Record entry
@@ -323,6 +329,7 @@ func (p *PostgresStore) ConfirmHold(ctx context.Context, agentAddr, amount, refe
 			total_out  = total_out + $2::NUMERIC(20,6),
 			updated_at = NOW()
 		WHERE agent_address = $1
+		  AND pending >= $2::NUMERIC(20,6)
 	`, agentAddr, amount)
 	if err != nil {
 		return fmt.Errorf("failed to confirm hold: %w", err)
@@ -333,7 +340,12 @@ func (p *PostgresStore) ConfirmHold(ctx context.Context, agentAddr, amount, refe
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
 	if rows == 0 {
-		return ErrAgentNotFound
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists)
+		if !exists {
+			return ErrAgentNotFound
+		}
+		return ErrInsufficientBalance
 	}
 
 	// Record confirmation entry
@@ -362,6 +374,7 @@ func (p *PostgresStore) ReleaseHold(ctx context.Context, agentAddr, amount, refe
 			pending    = pending   - $2::NUMERIC(20,6),
 			updated_at = NOW()
 		WHERE agent_address = $1
+		  AND pending >= $2::NUMERIC(20,6)
 	`, agentAddr, amount)
 	if err != nil {
 		return fmt.Errorf("failed to release hold: %w", err)
@@ -372,7 +385,12 @@ func (p *PostgresStore) ReleaseHold(ctx context.Context, agentAddr, amount, refe
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
 	if rows == 0 {
-		return ErrAgentNotFound
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists)
+		if !exists {
+			return ErrAgentNotFound
+		}
+		return ErrInsufficientBalance
 	}
 
 	// Record release entry
@@ -638,6 +656,17 @@ func (p *PostgresStore) RepayCredit(ctx context.Context, agentAddr, amount strin
 	}
 	defer tx.Rollback()
 
+	// Capture the actual repay amount (min of requested amount and outstanding credit)
+	// before the UPDATE modifies credit_used.
+	var actualRepay string
+	err = tx.QueryRowContext(ctx, `
+		SELECT LEAST($2::NUMERIC(20,6), COALESCE(credit_used, 0))
+		FROM agent_balances WHERE agent_address = $1
+	`, agentAddr, amount).Scan(&actualRepay)
+	if err != nil {
+		return ErrAgentNotFound
+	}
+
 	// Repay up to what's owed: min(amount, credit_used)
 	result, err := tx.ExecContext(ctx, `
 		UPDATE agent_balances SET
@@ -659,10 +688,9 @@ func (p *PostgresStore) RepayCredit(ctx context.Context, agentAddr, amount strin
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO ledger_entries (id, agent_address, type, amount, description, created_at)
-		VALUES ($1, $2, 'credit_repay', LEAST($3::NUMERIC(20,6), (SELECT COALESCE(credit_used, 0) + LEAST($3::NUMERIC(20,6), COALESCE(credit_used, 0)) FROM agent_balances WHERE agent_address = $2)), 'credit_repay', NOW())
-	`, idgen.New(), agentAddr, amount)
+		VALUES ($1, $2, 'credit_repay', $3::NUMERIC(20,6), 'credit_repay', NOW())
+	`, idgen.New(), agentAddr, actualRepay)
 	if err != nil {
-		// Non-critical: repayment succeeded even if entry recording fails
 		return fmt.Errorf("failed to record credit repay entry: %w", err)
 	}
 

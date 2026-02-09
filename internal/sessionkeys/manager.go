@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mbd888/alancoin/internal/idgen"
@@ -33,6 +34,18 @@ type ServiceResolver interface {
 type Manager struct {
 	store    Store
 	resolver ServiceResolver
+	keyLocks sync.Map // per-key locks to prevent nonce TOCTOU replay
+}
+
+// LockKey acquires a per-key mutex and returns the unlock function.
+// Callers must defer the returned function to release the lock.
+// This serializes validate+record for the same session key, preventing
+// concurrent requests from replaying the same nonce.
+func (m *Manager) LockKey(keyID string) func() {
+	v, _ := m.keyLocks.LoadOrStore(keyID, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // NewManager creates a new session key manager

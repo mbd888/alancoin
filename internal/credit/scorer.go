@@ -70,8 +70,15 @@ func NewScorer() *Scorer {
 // They remove the days-on-network requirement so freshly registered agents
 // can demonstrate the credit flow.
 var DemoPolicies = map[string]*CreditPolicy{
-	"new":      nil,
-	"emerging": nil,
+	"new": nil,
+	"emerging": {
+		MinReputationScore: 15,
+		MinDaysOnNetwork:   0,
+		MinTransactions:    5,
+		MinSuccessRate:     0.80,
+		MaxCreditLimit:     2,
+		InterestRate:       0.12,
+	},
 	"established": {
 		MinReputationScore: 40,
 		MinDaysOnNetwork:   0,

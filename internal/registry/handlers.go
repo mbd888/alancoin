@@ -118,10 +118,20 @@ func (h *Handler) RecordTransaction(c *gin.Context) {
 		return
 	}
 
-	status := "pending"
+	// Reject self-trade (prevents reputation gaming)
+	if strings.EqualFold(req.From, req.To) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "self_trade",
+			"message": "Sender and recipient cannot be the same address",
+		})
+		return
+	}
+
+	status := "confirmed" // Default to confirmed in demo/in-memory mode
 
 	// Verify on-chain if verifier is available
 	if h.verifier != nil {
+		status = "pending"
 		verified, err := h.verifier.VerifyPayment(ctx, req.From, req.Amount, req.TxHash)
 		if err != nil {
 			logger.Warn("on-chain verification failed, recording as pending",

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -108,6 +109,14 @@ type Service struct {
 	store    Store
 	ledger   LedgerService
 	recorder TransactionRecorder
+	locks    sync.Map // per-escrow ID locks to prevent race conditions
+}
+
+// escrowLock returns a mutex for the given escrow ID.
+// This prevents concurrent state transitions (e.g. confirm + auto-release racing).
+func (s *Service) escrowLock(id string) *sync.Mutex {
+	v, _ := s.locks.LoadOrStore(id, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // NewService creates a new escrow service.
@@ -126,6 +135,10 @@ func (s *Service) WithRecorder(r TransactionRecorder) *Service {
 
 // Create creates a new escrow and locks buyer funds.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (*Escrow, error) {
+	if strings.EqualFold(req.BuyerAddr, req.SellerAddr) {
+		return nil, errors.New("buyer and seller cannot be the same address")
+	}
+
 	autoRelease := DefaultAutoRelease
 	if req.AutoRelease != "" {
 		d, err := time.ParseDuration(req.AutoRelease)
@@ -164,6 +177,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Escrow, error
 
 // MarkDelivered marks the escrow as delivered by the seller.
 func (s *Service) MarkDelivered(ctx context.Context, id, callerAddr string) (*Escrow, error) {
+	mu := s.escrowLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+
 	escrow, err := s.store.Get(ctx, id)
 	if err != nil {
 		return nil, err
@@ -195,6 +212,10 @@ func (s *Service) MarkDelivered(ctx context.Context, id, callerAddr string) (*Es
 
 // Confirm releases escrowed funds to the seller.
 func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, error) {
+	mu := s.escrowLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+
 	escrow, err := s.store.Get(ctx, id)
 	if err != nil {
 		return nil, err
@@ -238,6 +259,10 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 
 // Dispute refunds escrowed funds to the buyer.
 func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*Escrow, error) {
+	mu := s.escrowLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+
 	escrow, err := s.store.Get(ctx, id)
 	if err != nil {
 		return nil, err
@@ -283,6 +308,17 @@ func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*
 
 // AutoRelease releases expired escrows to the seller.
 func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
+	mu := s.escrowLock(escrow.ID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Re-read from store under lock to prevent stale-state races
+	fresh, err := s.store.Get(ctx, escrow.ID)
+	if err != nil {
+		return err
+	}
+	escrow = fresh
+
 	if escrow.IsTerminal() {
 		return ErrAlreadyResolved
 	}
