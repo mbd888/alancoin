@@ -100,7 +100,10 @@ func (p *PostgresStore) UpdateAgent(ctx context.Context, agent *Agent) error {
 		return fmt.Errorf("failed to update agent: %w", err)
 	}
 
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
 	if rows == 0 {
 		return ErrAgentNotFound
 	}
@@ -117,7 +120,10 @@ func (p *PostgresStore) DeleteAgent(ctx context.Context, address string) error {
 		return fmt.Errorf("failed to delete agent: %w", err)
 	}
 
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
 	if rows == 0 {
 		return ErrAgentNotFound
 	}
@@ -152,18 +158,21 @@ func (p *PostgresStore) ListAgents(ctx context.Context, filter AgentFilter) ([]*
 	if err != nil {
 		return nil, fmt.Errorf("failed to list agents: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var agents []*Agent
 	for rows.Next() {
 		var address string
 		if err := rows.Scan(&address); err != nil {
-			continue
+			return nil, fmt.Errorf("scan agent address: %w", err)
 		}
 		agent, err := p.GetAgent(ctx, address)
 		if err == nil {
 			agents = append(agents, agent)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate agents: %w", err)
 	}
 
 	return agents, nil

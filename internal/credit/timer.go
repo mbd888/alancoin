@@ -3,6 +3,7 @@ package credit
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -12,6 +13,7 @@ type Timer struct {
 	interval time.Duration
 	logger   *slog.Logger
 	stop     chan struct{}
+	once     sync.Once
 }
 
 // NewTimer creates a new credit default-check timer.
@@ -41,9 +43,9 @@ func (t *Timer) Start(ctx context.Context) {
 	}
 }
 
-// Stop signals the timer to stop.
+// Stop signals the timer to stop. Safe to call multiple times.
 func (t *Timer) Stop() {
-	close(t.stop)
+	t.once.Do(func() { close(t.stop) })
 }
 
 func (t *Timer) checkDefaults(ctx context.Context) {

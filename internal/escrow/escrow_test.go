@@ -710,9 +710,9 @@ func TestEscrow_ListByAgentAsSeller(t *testing.T) {
 
 	seller := "0xseller"
 
-	svc.Create(ctx, CreateRequest{BuyerAddr: "0xb1", SellerAddr: seller, Amount: "1.00"})
-	svc.Create(ctx, CreateRequest{BuyerAddr: "0xb2", SellerAddr: seller, Amount: "2.00"})
-	svc.Create(ctx, CreateRequest{BuyerAddr: "0xb3", SellerAddr: "0xother", Amount: "3.00"})
+	_, _ = svc.Create(ctx, CreateRequest{BuyerAddr: "0xb1", SellerAddr: seller, Amount: "1.00"})
+	_, _ = svc.Create(ctx, CreateRequest{BuyerAddr: "0xb2", SellerAddr: seller, Amount: "2.00"})
+	_, _ = svc.Create(ctx, CreateRequest{BuyerAddr: "0xb3", SellerAddr: "0xother", Amount: "3.00"})
 
 	list, err := svc.ListByAgent(ctx, seller, 100)
 	if err != nil {

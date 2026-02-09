@@ -67,6 +67,7 @@ type Server struct {
 	escrowTimer    *escrow.Timer
 	creditService  *credit.Service
 	creditTimer    *credit.Timer
+	rateLimiter    *ratelimit.Limiter
 	db             *sql.DB // nil if using in-memory
 	router         *gin.Engine
 	httpSrv        *http.Server
@@ -345,8 +346,8 @@ func (s *Server) setupMiddleware() {
 	s.router.Use(validation.RequestSizeMiddleware(validation.MaxRequestSize))
 
 	// Rate limiting
-	limiter := ratelimit.New(ratelimit.DefaultConfig())
-	s.router.Use(limiter.Middleware())
+	s.rateLimiter = ratelimit.New(ratelimit.DefaultConfig())
+	s.router.Use(s.rateLimiter.Middleware())
 
 	// Prometheus metrics
 	s.router.Use(metrics.Middleware())
@@ -1171,6 +1172,12 @@ func (s *Server) Shutdown() error {
 	if s.creditTimer != nil {
 		s.creditTimer.Stop()
 		s.logger.Info("credit timer stopped")
+	}
+
+	// Stop rate limiter cleanup goroutine
+	if s.rateLimiter != nil {
+		s.rateLimiter.Stop()
+		s.logger.Info("rate limiter stopped")
 	}
 
 	// Stop deposit watcher

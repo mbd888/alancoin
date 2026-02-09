@@ -3,6 +3,7 @@ package predictions
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strconv"
 )
 
@@ -238,9 +239,13 @@ func (p *PostgresStore) RecordVote(ctx context.Context, predictionID, agentAddr 
 	// Adjust counts: remove old vote if it existed, then add new vote
 	if previousAgrees.Valid {
 		if previousAgrees.Bool {
-			_, _ = tx.ExecContext(ctx, `UPDATE predictions SET agrees = agrees - 1 WHERE id = $1`, predictionID)
+			if _, err = tx.ExecContext(ctx, `UPDATE predictions SET agrees = agrees - 1 WHERE id = $1`, predictionID); err != nil {
+				return fmt.Errorf("decrement agrees: %w", err)
+			}
 		} else {
-			_, _ = tx.ExecContext(ctx, `UPDATE predictions SET disagrees = disagrees - 1 WHERE id = $1`, predictionID)
+			if _, err = tx.ExecContext(ctx, `UPDATE predictions SET disagrees = disagrees - 1 WHERE id = $1`, predictionID); err != nil {
+				return fmt.Errorf("decrement disagrees: %w", err)
+			}
 		}
 	}
 	if agrees {

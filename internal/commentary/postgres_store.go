@@ -395,7 +395,7 @@ func (p *PostgresStore) GetFollowers(ctx context.Context, verbalAgentAddr string
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var followers []string
 	for rows.Next() {
@@ -416,7 +416,7 @@ func (p *PostgresStore) GetFollowing(ctx context.Context, agentAddr string) ([]s
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var following []string
 	for rows.Next() {

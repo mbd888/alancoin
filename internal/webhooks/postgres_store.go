@@ -87,7 +87,7 @@ func (p *PostgresStore) GetByAgent(ctx context.Context, agentAddr string) ([]*Su
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return p.scanSubscriptions(rows)
 }
@@ -105,7 +105,7 @@ func (p *PostgresStore) GetByEvent(ctx context.Context, eventType EventType) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return p.scanSubscriptions(rows)
 }
