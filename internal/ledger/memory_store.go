@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/idgen"
 	"github.com/mbd888/alancoin/internal/usdc"
 )
 
@@ -167,7 +168,7 @@ func (m *MemoryStore) Debit(ctx context.Context, agentAddr, amount, reference, d
 	bal.UpdatedAt = time.Now()
 
 	m.entries = append(m.entries, &Entry{
-		ID:          "entry_spend",
+		ID:          idgen.WithPrefix("entry_"),
 		AgentAddr:   agentAddr,
 		Type:        "spend",
 		Amount:      amount,
@@ -604,7 +605,7 @@ func (m *MemoryStore) SetCreditLimit(ctx context.Context, agentAddr, limit strin
 	bal.UpdatedAt = time.Now()
 
 	m.entries = append(m.entries, &Entry{
-		ID:          "entry_credit_limit_set",
+		ID:          idgen.WithPrefix("entry_"),
 		AgentAddr:   agentAddr,
 		Type:        "credit_limit_set",
 		Amount:      limit,
@@ -637,7 +638,7 @@ func (m *MemoryStore) UseCredit(ctx context.Context, agentAddr, amount string) e
 	bal.UpdatedAt = time.Now()
 
 	m.entries = append(m.entries, &Entry{
-		ID:          "entry_credit_draw",
+		ID:          idgen.WithPrefix("entry_"),
 		AgentAddr:   agentAddr,
 		Type:        "credit_draw",
 		Amount:      amount,
@@ -670,7 +671,7 @@ func (m *MemoryStore) RepayCredit(ctx context.Context, agentAddr, amount string)
 	bal.UpdatedAt = time.Now()
 
 	m.entries = append(m.entries, &Entry{
-		ID:          "entry_credit_repay",
+		ID:          idgen.WithPrefix("entry_"),
 		AgentAddr:   agentAddr,
 		Type:        "credit_repay",
 		Amount:      usdc.Format(sub),

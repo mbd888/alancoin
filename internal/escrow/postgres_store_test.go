@@ -32,6 +32,28 @@ func setupTestDB(t *testing.T) (*PostgresStore, *sql.DB, func()) {
 	store := NewPostgresStore(db)
 	ctx := context.Background()
 
+	// Ensure table exists (mirrors migration 003_escrow.sql)
+	_, err = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS escrows (
+			id               VARCHAR(36) PRIMARY KEY,
+			buyer_addr       VARCHAR(42) NOT NULL,
+			seller_addr      VARCHAR(42) NOT NULL,
+			amount           NUMERIC(20,6) NOT NULL,
+			service_id       VARCHAR(255),
+			session_key_id   VARCHAR(255),
+			status           VARCHAR(20) NOT NULL DEFAULT 'pending',
+			auto_release_at  TIMESTAMPTZ NOT NULL,
+			delivered_at     TIMESTAMPTZ,
+			resolved_at      TIMESTAMPTZ,
+			dispute_reason   TEXT,
+			resolution       TEXT,
+			created_at       TIMESTAMPTZ DEFAULT NOW(),
+			updated_at       TIMESTAMPTZ DEFAULT NOW()
+		)`)
+	if err != nil {
+		t.Fatalf("Failed to create escrows table: %v", err)
+	}
+
 	cleanup := func() {
 		db.ExecContext(ctx, "DELETE FROM escrows")
 		db.Close()

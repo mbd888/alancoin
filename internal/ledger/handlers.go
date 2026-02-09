@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"regexp"
@@ -30,16 +31,17 @@ type WithdrawalExecutor interface {
 type Handler struct {
 	ledger   *Ledger
 	executor WithdrawalExecutor // nil = withdrawals are pending only
+	logger   *slog.Logger
 }
 
 // NewHandler creates a new ledger handler
-func NewHandler(ledger *Ledger) *Handler {
-	return &Handler{ledger: ledger}
+func NewHandler(ledger *Ledger, logger *slog.Logger) *Handler {
+	return &Handler{ledger: ledger, logger: logger}
 }
 
 // NewHandlerWithWithdrawals creates a handler that can execute withdrawals
-func NewHandlerWithWithdrawals(ledger *Ledger, executor WithdrawalExecutor) *Handler {
-	return &Handler{ledger: ledger, executor: executor}
+func NewHandlerWithWithdrawals(ledger *Ledger, executor WithdrawalExecutor, logger *slog.Logger) *Handler {
+	return &Handler{ledger: ledger, executor: executor, logger: logger}
 }
 
 // RegisterRoutes sets up ledger routes
@@ -203,7 +205,10 @@ func (h *Handler) RequestWithdrawal(c *gin.Context) {
 		txHash, err := h.executor.Transfer(c.Request.Context(), common.HexToAddress(address), amountBig)
 		if err != nil {
 			// Release the hold since transfer failed
-			_ = h.ledger.ReleaseHold(c.Request.Context(), address, req.Amount, holdRef)
+			if relErr := h.ledger.ReleaseHold(c.Request.Context(), address, req.Amount, holdRef); relErr != nil {
+				h.logger.Error("ReleaseHold failed after withdrawal transfer error: funds stuck in pending",
+					"agent", address, "amount", req.Amount, "holdRef", holdRef, "error", relErr)
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "transfer_failed",
 				"message": "Failed to execute withdrawal",

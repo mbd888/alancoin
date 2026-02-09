@@ -3,6 +3,7 @@ package sessionkeys
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"strings"
@@ -61,21 +62,23 @@ type Handler struct {
 	recorder TransactionRecorder // For recording txs (optional)
 	balance  BalanceService      // For checking/debiting balances (optional)
 	events   EventEmitter        // For broadcasting events (optional)
-	demoMode bool                // Skip on-chain transfers, use ledger only
+	logger   *slog.Logger
+	demoMode bool // Skip on-chain transfers, use ledger only
 }
 
 // NewHandler creates a new session key handler
-func NewHandler(manager *Manager) *Handler {
-	return &Handler{manager: manager}
+func NewHandler(manager *Manager, logger *slog.Logger) *Handler {
+	return &Handler{manager: manager, logger: logger}
 }
 
 // NewHandlerWithExecution creates a handler that can execute real transfers
-func NewHandlerWithExecution(manager *Manager, wallet WalletService, recorder TransactionRecorder, balance BalanceService) *Handler {
+func NewHandlerWithExecution(manager *Manager, wallet WalletService, recorder TransactionRecorder, balance BalanceService, logger *slog.Logger) *Handler {
 	return &Handler{
 		manager:  manager,
 		wallet:   wallet,
 		recorder: recorder,
 		balance:  balance,
+		logger:   logger,
 	}
 }
 
@@ -357,17 +360,36 @@ func (h *Handler) Transact(c *gin.Context) {
 			// Ledger hold was already placed above, just confirm it.
 			txHash = fmt.Sprintf("0x%016x%016x", time.Now().UnixNano(), time.Now().UnixNano()^0xdeadbeef)
 			executed = true
-			_ = h.balance.ConfirmHold(c.Request.Context(), address, req.Amount, keyID)
+			if err := h.balance.ConfirmHold(c.Request.Context(), address, req.Amount, keyID); err != nil {
+				h.logger.Error("demo ConfirmHold failed: funds stuck in pending",
+					"agent", address, "amount", req.Amount, "keyId", keyID, "error", err)
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error":   "ledger_error",
+					"message": "Failed to confirm balance hold",
+				})
+				return
+			}
 
 			// Credit the recipient in the ledger (deposit, not refund)
-			_ = h.balance.Deposit(c.Request.Context(), req.To, req.Amount, txHash)
+			if err := h.balance.Deposit(c.Request.Context(), req.To, req.Amount, txHash); err != nil {
+				h.logger.Error("demo Deposit failed: sender debited but recipient not credited",
+					"from", address, "to", req.To, "amount", req.Amount, "txHash", txHash, "error", err)
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error":   "ledger_error",
+					"message": "Failed to credit recipient",
+				})
+				return
+			}
 		} else {
 			// Production: execute on-chain transfer
 			result, err := h.wallet.Transfer(c.Request.Context(), common.HexToAddress(req.To), amountBig)
 			if err != nil {
 				// Release the hold since transfer failed
 				if h.balance != nil {
-					_ = h.balance.ReleaseHold(c.Request.Context(), address, req.Amount, keyID)
+					if relErr := h.balance.ReleaseHold(c.Request.Context(), address, req.Amount, keyID); relErr != nil {
+						h.logger.Warn("ReleaseHold failed after transfer error: funds may be stuck in pending",
+							"agent", address, "amount", req.Amount, "keyId", keyID, "error", relErr)
+					}
 				}
 				c.JSON(http.StatusInternalServerError, gin.H{
 					"error":   "transfer_failed",
@@ -381,13 +403,27 @@ func (h *Handler) Transact(c *gin.Context) {
 
 			// Phase 2: Confirm hold (pending → total_out)
 			if h.balance != nil {
-				_ = h.balance.ConfirmHold(c.Request.Context(), address, req.Amount, keyID)
+				if confirmErr := h.balance.ConfirmHold(c.Request.Context(), address, req.Amount, keyID); confirmErr != nil {
+					h.logger.Error("ConfirmHold failed after on-chain transfer: funds in pending but transfer succeeded",
+						"agent", address, "amount", req.Amount, "keyId", keyID, "txHash", result.TxHash, "error", confirmErr)
+					c.JSON(http.StatusInternalServerError, gin.H{
+						"status":  "partial_failure",
+						"error":   "ledger_sync_failed",
+						"message": "On-chain transfer succeeded but ledger update failed - contact support",
+						"txHash":  result.TxHash,
+						"amount":  req.Amount,
+					})
+					return
+				}
 			}
 		}
 
 		// Record in registry if available
 		if h.recorder != nil {
-			_ = h.recorder.RecordTransaction(c.Request.Context(), txHash, address, req.To, req.Amount, req.ServiceID)
+			if recErr := h.recorder.RecordTransaction(c.Request.Context(), txHash, address, req.To, req.Amount, req.ServiceID); recErr != nil {
+				h.logger.Warn("RecordTransaction failed: transaction executed but not recorded in registry",
+					"txHash", txHash, "from", address, "to", req.To, "amount", req.Amount, "error", recErr)
+			}
 		}
 	}
 

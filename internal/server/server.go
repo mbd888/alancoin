@@ -545,10 +545,11 @@ func (s *Server) setupRoutes() {
 			&walletAdapter{s.wallet},
 			&registryAdapter{s.registry},
 			balanceAdapter,
+			s.logger,
 		)
 	} else {
 		// Dry-run mode (validation only, no execution)
-		sessionHandler = sessionkeys.NewHandler(s.sessionMgr)
+		sessionHandler = sessionkeys.NewHandler(s.sessionMgr, s.logger)
 	}
 
 	// In demo mode (no DB), skip on-chain transfers and use ledger-only accounting
@@ -582,9 +583,9 @@ func (s *Server) setupRoutes() {
 		var ledgerHandler *ledger.Handler
 		if s.wallet != nil {
 			// Enable real withdrawals
-			ledgerHandler = ledger.NewHandlerWithWithdrawals(s.ledger, &withdrawalAdapter{s.wallet})
+			ledgerHandler = ledger.NewHandlerWithWithdrawals(s.ledger, &withdrawalAdapter{s.wallet}, s.logger)
 		} else {
-			ledgerHandler = ledger.NewHandler(s.ledger)
+			ledgerHandler = ledger.NewHandler(s.ledger, s.logger)
 		}
 		v1.GET("/agents/:address/balance", ledgerHandler.GetBalance)
 		v1.GET("/agents/:address/ledger", ledgerHandler.GetHistory)
