@@ -361,7 +361,11 @@ func (s *Server) setupMiddleware() {
 	s.router.Use(validation.RequestSizeMiddleware(validation.MaxRequestSize))
 
 	// Rate limiting
-	s.rateLimiter = ratelimit.New(ratelimit.DefaultConfig())
+	s.rateLimiter = ratelimit.New(ratelimit.Config{
+		RequestsPerMinute: s.cfg.RateLimitRPS,
+		BurstSize:         10,
+		CleanupInterval:   time.Minute,
+	})
 	s.router.Use(s.rateLimiter.Middleware())
 
 	// Prometheus metrics
@@ -935,6 +939,15 @@ func (s *Server) readinessHandler(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready"})
 		return
 	}
+
+	// Verify database connectivity when DB is configured
+	if s.db != nil {
+		if err := s.db.PingContext(c.Request.Context()); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready", "reason": "database"})
+			return
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"status": "ready"})
 }
 
