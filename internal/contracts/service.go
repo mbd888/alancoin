@@ -395,7 +395,7 @@ func (s *Service) CheckExpired(ctx context.Context) {
 		}
 
 		if fresh.TotalCalls >= fresh.MinVolume {
-			s.complete(ctx, fresh)
+			_, _ = s.complete(ctx, fresh)
 		} else {
 			now := time.Now()
 			fresh.Status = StatusTerminated
