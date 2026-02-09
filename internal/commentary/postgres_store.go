@@ -327,7 +327,9 @@ func (p *PostgresStore) UnlikeComment(ctx context.Context, commentID, agentAddr 
 
 	affected, _ := result.RowsAffected()
 	if affected > 0 {
-		_, _ = tx.ExecContext(ctx, `UPDATE comments SET likes = likes - 1 WHERE id = $1`, commentID)
+		if _, err = tx.ExecContext(ctx, `UPDATE comments SET likes = GREATEST(0, likes - 1) WHERE id = $1`, commentID); err != nil {
+			return err
+		}
 	}
 
 	return tx.Commit()
@@ -379,9 +381,11 @@ func (p *PostgresStore) Unfollow(ctx context.Context, followerAddr, verbalAgentA
 
 	affected, _ := result.RowsAffected()
 	if affected > 0 {
-		_, _ = tx.ExecContext(ctx, `
-			UPDATE verbal_agents SET followers = followers - 1 WHERE address = $1
-		`, verbalAgentAddr)
+		if _, err = tx.ExecContext(ctx, `
+			UPDATE verbal_agents SET followers = GREATEST(0, followers - 1) WHERE address = $1
+		`, verbalAgentAddr); err != nil {
+			return err
+		}
 	}
 
 	return tx.Commit()

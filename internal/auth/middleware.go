@@ -95,7 +95,11 @@ func GetAPIKey(c *gin.Context) (*APIKey, bool) {
 	if !exists {
 		return nil, false
 	}
-	return key.(*APIKey), true
+	apiKey, ok := key.(*APIKey)
+	if !ok {
+		return nil, false
+	}
+	return apiKey, true
 }
 
 // GetAuthenticatedAgent returns the authenticated agent's address
@@ -104,7 +108,11 @@ func GetAuthenticatedAgent(c *gin.Context) string {
 	if !exists {
 		return ""
 	}
-	return addr.(string)
+	s, ok := addr.(string)
+	if !ok {
+		return ""
+	}
+	return s
 }
 
 // IsAuthenticated checks if the request is authenticated

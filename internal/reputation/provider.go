@@ -108,21 +108,17 @@ func (p *RegistryProvider) calculateMetrics(agent *registry.Agent, txns []*regis
 		capped := counterpartyCounts[counterparty] > maxTxPerCounterparty
 
 		if !capped {
-			m.TotalTransactions++
-
-			// Parse amount (stored as string like "1.50")
-			amount := parseAmount(tx.Amount)
-			m.TotalVolumeUSD += amount
-
-			// Track success/failure
+			// Only count finalized transactions (not pending/unknown)
 			switch tx.Status {
 			case "confirmed", "completed":
+				m.TotalTransactions++
 				m.SuccessfulTxns++
+				m.TotalVolumeUSD += parseAmount(tx.Amount)
 			case "failed", "reverted":
+				m.TotalTransactions++
 				m.FailedTxns++
 			default:
-				// Pending or unknown - do not count as successful or failed
-				m.TotalTransactions--
+				// Pending or unknown - skip entirely
 			}
 		}
 

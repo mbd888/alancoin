@@ -203,8 +203,14 @@ func (p *PlatformPaymaster) checkAndRecordSpending(gasCostETH string) error {
 	}
 
 	// Parse limit and cost
-	limit := parseETH(p.config.DailyGasLimit)
-	cost := parseETH(gasCostETH)
+	limit, err := parseETH(p.config.DailyGasLimit)
+	if err != nil {
+		return fmt.Errorf("invalid daily gas limit config: %w", err)
+	}
+	cost, err := parseETH(gasCostETH)
+	if err != nil {
+		return fmt.Errorf("invalid gas cost: %w", err)
+	}
 
 	// Check
 	newTotal := new(big.Int).Add(p.dailySpent, cost)
@@ -239,14 +245,14 @@ func weiToETH(wei *big.Int) float64 {
 	return f
 }
 
-func parseETH(s string) *big.Int {
-	f, _ := new(big.Float).SetString(s)
-	if f == nil {
-		return big.NewInt(0)
+func parseETH(s string) (*big.Int, error) {
+	f, ok := new(big.Float).SetString(s)
+	if !ok || f == nil {
+		return nil, fmt.Errorf("invalid ETH amount: %q", s)
 	}
 	f.Mul(f, big.NewFloat(1e18))
 	result, _ := f.Int(nil)
-	return result
+	return result, nil
 }
 
 func formatETH(wei *big.Int) string {
