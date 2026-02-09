@@ -11,18 +11,20 @@ import (
 
 // MemoryStore is an in-memory ledger store for demo/development mode.
 type MemoryStore struct {
-	balances map[string]*Balance
-	entries  []*Entry
-	deposits map[string]bool
-	mu       sync.RWMutex
+	balances        map[string]*Balance
+	entries         []*Entry
+	deposits        map[string]bool
+	holdCreditDraws map[string]string // "addr:ref" -> credit drawn amount during Hold
+	mu              sync.RWMutex
 }
 
 // NewMemoryStore creates a new in-memory ledger store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		balances: make(map[string]*Balance),
-		entries:  make([]*Entry, 0),
-		deposits: make(map[string]bool),
+		balances:        make(map[string]*Balance),
+		entries:         make([]*Entry, 0),
+		deposits:        make(map[string]bool),
+		holdCreditDraws: make(map[string]string),
 	}
 }
 
@@ -225,6 +227,11 @@ func (m *MemoryStore) Refund(ctx context.Context, agentAddr, amount, reference, 
 	totalOut, _ := usdc.Parse(bal.TotalOut)
 	add, _ := usdc.Parse(amount)
 
+	// Cap totalOut reduction to prevent negative values
+	if totalOut.Cmp(add) < 0 {
+		add.Set(totalOut)
+	}
+
 	avail.Add(avail, add)
 	totalOut.Sub(totalOut, add)
 
@@ -297,6 +304,9 @@ func (m *MemoryStore) Hold(ctx context.Context, agentAddr, amount, reference str
 		bal.Available = usdc.Format(avail)
 		bal.CreditUsed = usdc.Format(creditUsed)
 
+		// Track credit draw so ReleaseHold can reverse it
+		m.holdCreditDraws[agentAddr+":"+reference] = usdc.Format(gap)
+
 		m.entries = append(m.entries, &Entry{
 			ID:          "entry_credit_draw_" + reference,
 			AgentAddr:   agentAddr,
@@ -349,6 +359,9 @@ func (m *MemoryStore) ConfirmHold(ctx context.Context, agentAddr, amount, refere
 	bal.TotalOut = usdc.Format(totalOut)
 	bal.UpdatedAt = time.Now()
 
+	// Clean up credit draw tracking (credit stays drawn — this is a confirmed spend)
+	delete(m.holdCreditDraws, agentAddr+":"+reference)
+
 	m.entries = append(m.entries, &Entry{
 		ID:          "entry_confirm_" + reference,
 		AgentAddr:   agentAddr,
@@ -373,14 +386,39 @@ func (m *MemoryStore) ReleaseHold(ctx context.Context, agentAddr, amount, refere
 
 	avail, _ := usdc.Parse(bal.Available)
 	pend, _ := usdc.Parse(bal.Pending)
-	sub, _ := usdc.Parse(amount)
+	holdAmount, _ := usdc.Parse(amount)
 
-	if pend.Cmp(sub) < 0 {
+	if pend.Cmp(holdAmount) < 0 {
 		return ErrInsufficientBalance
 	}
 
-	avail.Add(avail, sub)
-	pend.Sub(pend, sub)
+	// Determine how much to return to available vs reverse from credit
+	returnToAvail := new(big.Int).Set(holdAmount)
+
+	key := agentAddr + ":" + reference
+	if creditDrawStr, found := m.holdCreditDraws[key]; found {
+		creditDraw, _ := usdc.Parse(creditDrawStr)
+		creditUsed, _ := usdc.Parse(bal.CreditUsed)
+		creditUsed.Sub(creditUsed, creditDraw)
+		bal.CreditUsed = usdc.Format(creditUsed)
+
+		// Only the non-credit portion returns to available
+		returnToAvail.Sub(returnToAvail, creditDraw)
+		delete(m.holdCreditDraws, key)
+
+		m.entries = append(m.entries, &Entry{
+			ID:          "entry_credit_reverse_" + reference,
+			AgentAddr:   agentAddr,
+			Type:        "credit_reverse",
+			Amount:      creditDrawStr,
+			Reference:   reference,
+			Description: "credit_draw_reversed_on_release",
+			CreatedAt:   time.Now(),
+		})
+	}
+
+	avail.Add(avail, returnToAvail)
+	pend.Sub(pend, holdAmount)
 
 	bal.Available = usdc.Format(avail)
 	bal.Pending = usdc.Format(pend)

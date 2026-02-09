@@ -193,7 +193,7 @@ func (p *PostgresStore) ListActive(ctx context.Context, limit int) ([]*CreditLin
 	if err != nil {
 		return nil, fmt.Errorf("list active: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanCreditLines(rows)
 }
 
@@ -213,7 +213,7 @@ func (p *PostgresStore) ListOverdue(ctx context.Context, overdueDays int, limit 
 	if err != nil {
 		return nil, fmt.Errorf("list overdue: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanCreditLines(rows)
 }
 

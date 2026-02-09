@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,15 +10,7 @@ import (
 // Test helper to set env vars and clean up after
 func setEnv(t *testing.T, key, value string) {
 	t.Helper()
-	old := os.Getenv(key)
-	os.Setenv(key, value)
-	t.Cleanup(func() {
-		if old == "" {
-			os.Unsetenv(key)
-		} else {
-			os.Setenv(key, old)
-		}
-	})
+	t.Setenv(key, value)
 }
 
 func TestLoad_WithValidConfig(t *testing.T) {

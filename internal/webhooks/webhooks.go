@@ -216,7 +216,7 @@ func (d *Dispatcher) send(ctx context.Context, sub *Subscription, event *Event) 
 			lastErr = fmt.Sprintf("request failed: %v", err)
 			continue
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			d.updateSuccess(ctx, sub)

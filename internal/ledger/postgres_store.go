@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/mbd888/alancoin/internal/idgen"
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 // PostgresStore implements Store with PostgreSQL
@@ -190,8 +192,8 @@ func (p *PostgresStore) Refund(ctx context.Context, agentAddr, amount, reference
 
 	result, err := tx.ExecContext(ctx, `
 		UPDATE agent_balances SET
-			available  = available + $2::NUMERIC(20,6),
-			total_out  = total_out - $2::NUMERIC(20,6),
+			available  = available + LEAST($2::NUMERIC(20,6), total_out),
+			total_out  = GREATEST(0, total_out - $2::NUMERIC(20,6)),
 			updated_at = NOW()
 		WHERE agent_address = $1
 	`, agentAddr, amount)
@@ -267,6 +269,7 @@ func (p *PostgresStore) Withdraw(ctx context.Context, agentAddr, amount, txHash 
 
 // Hold places a hold on funds (moves from available to pending) with credit support.
 // If available < amount, draws the shortfall from credit line.
+// Records a credit_draw_hold entry so ReleaseHold can reverse the credit draw.
 func (p *PostgresStore) Hold(ctx context.Context, agentAddr, amount, reference string) error {
 	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
@@ -274,32 +277,52 @@ func (p *PostgresStore) Hold(ctx context.Context, agentAddr, amount, reference s
 	}
 	defer tx.Rollback()
 
-	// Credit-aware hold: use available first, draw gap from credit, all goes to pending.
-	result, err := tx.ExecContext(ctx, `
-		UPDATE agent_balances SET
-			credit_used = COALESCE(credit_used, 0)
-			            + GREATEST(0, $2::NUMERIC(20,6) - available),
-			available   = GREATEST(0, available - $2::NUMERIC(20,6)),
-			pending     = pending + $2::NUMERIC(20,6),
-			updated_at  = NOW()
+	// Read current balance under row lock to compute credit draw
+	var currentAvailable, currentCreditLimit, currentCreditUsed string
+	err = tx.QueryRowContext(ctx, `
+		SELECT available, COALESCE(credit_limit, 0), COALESCE(credit_used, 0)
+		FROM agent_balances
 		WHERE agent_address = $1
-		  AND available + (COALESCE(credit_limit, 0) - COALESCE(credit_used, 0)) >= $2::NUMERIC(20,6)
-	`, agentAddr, amount)
+		FOR UPDATE
+	`, agentAddr).Scan(&currentAvailable, &currentCreditLimit, &currentCreditUsed)
+	if err == sql.ErrNoRows {
+		return ErrAgentNotFound
+	}
 	if err != nil {
-		return fmt.Errorf("failed to place hold: %w", err)
+		return fmt.Errorf("failed to read balance: %w", err)
 	}
 
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-	if rows == 0 {
-		var exists bool
-		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists)
-		if !exists {
-			return ErrAgentNotFound
-		}
+	avail, _ := usdc.Parse(currentAvailable)
+	creditLimit, _ := usdc.Parse(currentCreditLimit)
+	creditUsed, _ := usdc.Parse(currentCreditUsed)
+	holdAmount, _ := usdc.Parse(amount)
+
+	creditAvailable := new(big.Int).Sub(creditLimit, creditUsed)
+	totalSpendable := new(big.Int).Add(new(big.Int).Set(avail), creditAvailable)
+
+	if totalSpendable.Cmp(holdAmount) < 0 {
 		return ErrInsufficientBalance
+	}
+
+	// Compute credit draw: gap = max(0, holdAmount - available)
+	var gap *big.Int
+	if avail.Cmp(holdAmount) >= 0 {
+		gap = big.NewInt(0)
+	} else {
+		gap = new(big.Int).Sub(holdAmount, avail)
+	}
+
+	// Update balance: draw from available + credit, move to pending
+	_, err = tx.ExecContext(ctx, `
+		UPDATE agent_balances SET
+			credit_used = credit_used + $2::NUMERIC(20,6),
+			available   = GREATEST(0, available - $3::NUMERIC(20,6)),
+			pending     = pending + $3::NUMERIC(20,6),
+			updated_at  = NOW()
+		WHERE agent_address = $1
+	`, agentAddr, usdc.Format(gap), amount)
+	if err != nil {
+		return fmt.Errorf("failed to place hold: %w", err)
 	}
 
 	// Record hold entry
@@ -309,6 +332,17 @@ func (p *PostgresStore) Hold(ctx context.Context, agentAddr, amount, reference s
 	`, idgen.New(), agentAddr, amount, reference)
 	if err != nil {
 		return fmt.Errorf("failed to record hold entry: %w", err)
+	}
+
+	// Record credit draw entry so ReleaseHold can reverse it
+	if gap.Sign() > 0 {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
+			VALUES ($1, $2, 'credit_draw_hold', $3::NUMERIC(20,6), $4, 'credit_draw_for_hold', NOW())
+		`, idgen.New(), agentAddr, usdc.Format(gap), reference)
+		if err != nil {
+			return fmt.Errorf("failed to record credit draw entry: %w", err)
+		}
 	}
 
 	return tx.Commit()
@@ -357,10 +391,17 @@ func (p *PostgresStore) ConfirmHold(ctx context.Context, agentAddr, amount, refe
 		return fmt.Errorf("failed to record confirmation entry: %w", err)
 	}
 
+	// Clean up credit_draw_hold tracking entry (credit stays drawn — confirmed spend)
+	_, _ = tx.ExecContext(ctx, `
+		DELETE FROM ledger_entries
+		WHERE agent_address = $1 AND type = 'credit_draw_hold' AND reference = $2
+	`, agentAddr, reference)
+
 	return tx.Commit()
 }
 
 // ReleaseHold returns held funds to available (transfer failed/timed out).
+// Reverses any credit draw that was made during the original Hold.
 func (p *PostgresStore) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
 	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
@@ -368,14 +409,28 @@ func (p *PostgresStore) ReleaseHold(ctx context.Context, agentAddr, amount, refe
 	}
 	defer tx.Rollback()
 
+	// Look up any credit draw associated with this hold
+	var creditDrawAmount sql.NullString
+	_ = tx.QueryRowContext(ctx, `
+		SELECT amount FROM ledger_entries
+		WHERE agent_address = $1 AND type = 'credit_draw_hold' AND reference = $2
+	`, agentAddr, reference).Scan(&creditDrawAmount)
+
+	creditDraw := "0"
+	if creditDrawAmount.Valid && creditDrawAmount.String != "" {
+		creditDraw = creditDrawAmount.String
+	}
+
+	// Release hold: return non-credit portion to available, reverse credit draw
 	result, err := tx.ExecContext(ctx, `
 		UPDATE agent_balances SET
-			available  = available + $2::NUMERIC(20,6),
-			pending    = pending   - $2::NUMERIC(20,6),
-			updated_at = NOW()
+			available   = available + ($2::NUMERIC(20,6) - $3::NUMERIC(20,6)),
+			pending     = pending   - $2::NUMERIC(20,6),
+			credit_used = credit_used - $3::NUMERIC(20,6),
+			updated_at  = NOW()
 		WHERE agent_address = $1
 		  AND pending >= $2::NUMERIC(20,6)
-	`, agentAddr, amount)
+	`, agentAddr, amount, creditDraw)
 	if err != nil {
 		return fmt.Errorf("failed to release hold: %w", err)
 	}
@@ -553,7 +608,7 @@ func (p *PostgresStore) GetHistory(ctx context.Context, agentAddr string, limit 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var entries []*Entry
 	for rows.Next() {

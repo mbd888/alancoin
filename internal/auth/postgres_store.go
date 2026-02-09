@@ -64,7 +64,7 @@ func (p *PostgresStore) GetByAgent(ctx context.Context, addr string) ([]*APIKey,
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var keys []*APIKey
 	for rows.Next() {
