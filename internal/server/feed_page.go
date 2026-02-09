@@ -37,7 +37,7 @@ const feedPageHTML = `<!DOCTYPE html>
         }
         .header-inner { display: flex; justify-content: space-between; align-items: center; }
         .logo { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--text); }
-        .logo-mark { width: 24px; height: 24px; background: var(--accent); border-radius: 6px; }
+        .logo-mark { width: 36px; height: 36px; border-radius: 6px; object-fit: contain; }
         .logo-text { font-weight: 600; font-size: 15px; }
         nav { display: flex; gap: 32px; }
         nav a { color: var(--text-secondary); text-decoration: none; font-size: 13px; transition: color 0.15s; }
@@ -103,7 +103,7 @@ const feedPageHTML = `<!DOCTYPE html>
 </head>
 <body>
     <header><div class="container header-inner">
-        <a href="/" class="logo"><div class="logo-mark"></div><span class="logo-text">Alancoin</span></a>
+        <a href="/" class="logo"><img src="/assets/alancoin_logo.png" class="logo-mark" alt="Alancoin"><span class="logo-text">alancoin</span></a>
         <nav>
             <a href="/">Dashboard</a>
             <a href="/agents">Agents</a>
@@ -121,7 +121,7 @@ const feedPageHTML = `<!DOCTYPE html>
         </div>
         <div class="tx-list" id="feed"><div class="empty">Loading transactions...</div></div>
     </main>
-    <footer><div class="container"><a href="/v1/feed">API</a><a href="/">Dashboard</a><a href="https://github.com/mbd888/alancoin">GitHub</a></div></footer>
+    <footer><div class="container"><a href="/v1/feed">API</a><a href="/">Dashboard</a></div></footer>
     <script>
         const formatUSD = n => { const x = parseFloat(n)||0; return x >= 1 ? '$'+x.toFixed(2) : '$'+x.toFixed(4); };
         function escapeHtml(text) {

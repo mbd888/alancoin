@@ -178,17 +178,17 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.predictions = predictions.NewService(predictionsStore, &registryMetricProvider{s.registry})
 		s.logger.Info("predictions enabled")
 
-		// Escrow with in-memory store (uses same ledger)
-		escrowStore := escrow.NewMemoryStore()
+		// Escrow with PostgreSQL store
+		escrowStore := escrow.NewPostgresStore(db)
 		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledger})
 		s.escrowTimer = escrow.NewTimer(s.escrowService, escrowStore, s.logger)
-		s.logger.Info("escrow enabled")
+		s.logger.Info("escrow enabled (postgres)")
 
-		// Contracts (service agreements with SLA enforcement)
-		contractStore := contracts.NewMemoryStore()
+		// Contracts with PostgreSQL store
+		contractStore := contracts.NewPostgresStore(db)
 		s.contractService = contracts.NewService(contractStore, &escrowLedgerAdapter{s.ledger})
 		s.contractTimer = contracts.NewTimer(s.contractService, contractStore, s.logger)
-		s.logger.Info("contracts enabled")
+		s.logger.Info("contracts enabled (postgres)")
 
 		// Credit system (spend on credit, repay from earnings)
 		creditStore := credit.NewPostgresStore(db)
@@ -458,6 +458,7 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/services", servicesPageHandler)                                            // Service marketplace
 	s.router.GET("/agent/:address", validation.AddressParamMiddleware(), agentProfileHandler) // Individual agent profiles
 	s.router.GET("/docs", s.docsRedirectHandler)                                              // Redirect to GitHub/docs
+	s.router.Static("/assets", "./assets")                                                    // Static assets (logo, etc.)
 
 	// WebSocket for real-time streaming
 	s.router.GET("/ws", func(c *gin.Context) {

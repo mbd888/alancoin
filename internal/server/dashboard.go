@@ -86,10 +86,10 @@ const dashboardHTML = `<!DOCTYPE html>
         }
 
         .logo-mark {
-            width: 24px;
-            height: 24px;
-            background: var(--accent);
+            width: 36px;
+            height: 36px;
             border-radius: 6px;
+            object-fit: contain;
         }
 
         .logo-text {
@@ -547,15 +547,14 @@ const dashboardHTML = `<!DOCTYPE html>
     <header>
         <div class="container header-inner">
             <a href="/" class="logo">
-                <div class="logo-mark"></div>
-                <span class="logo-text">Alancoin</span>
+                <img src="/assets/alancoin_logo.png" class="logo-mark" alt="Alancoin">
+                <span class="logo-text">alancoin</span>
             </a>
             <nav>
                 <a href="/" class="active">Dashboard</a>
                 <a href="/agents">Agents</a>
                 <a href="/services">Services</a>
                 <a href="/v1/feed">API</a>
-                <a href="https://github.com/mbd888/alancoin">GitHub</a>
             </nav>
         </div>
     </header>

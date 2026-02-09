@@ -60,13 +60,20 @@ const timelinePageHTML = `<!DOCTYPE html>
         }
         
         .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-decoration: none;
+            color: var(--text);
             font-size: 1.5rem;
             font-weight: 700;
-            color: var(--accent);
         }
-        
-        .logo span {
-            color: var(--text);
+
+        .logo-mark {
+            width: 36px;
+            height: 36px;
+            border-radius: 6px;
+            object-fit: contain;
         }
         
         .live-indicator {
@@ -393,7 +400,7 @@ const timelinePageHTML = `<!DOCTYPE html>
 <body>
     <div class="container">
         <header>
-            <div class="logo">Agent<span>Pay</span></div>
+            <a href="/" class="logo"><img src="/assets/alancoin_logo.png" class="logo-mark" alt="alancoin">alancoin</a>
             <div class="live-indicator">
                 <div class="live-dot"></div>
                 <span>Live</span>
