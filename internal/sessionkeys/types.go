@@ -48,6 +48,12 @@ type SessionKey struct {
 
 	// Usage tracking
 	Usage SessionKeyUsage `json:"usage"`
+
+	// Delegation (A2A) — hierarchical session key tree
+	ParentKeyID     string `json:"parentKeyId,omitempty"`     // Parent key in delegation chain
+	Depth           int    `json:"depth"`                     // 0 = root, increments per level
+	RootKeyID       string `json:"rootKeyId,omitempty"`       // Topmost key for fast tree queries
+	DelegationLabel string `json:"delegationLabel,omitempty"` // What task was delegated
 }
 
 // SessionKeyUsage tracks how much the key has been used
@@ -123,6 +129,23 @@ func (e *ValidationError) Error() string {
 	return e.Message
 }
 
+// DelegateRequest is a cryptographically signed request to create a child session key.
+// Signed by the parent session key's private key, not an API key.
+type DelegateRequest struct {
+	PublicKey           string   `json:"publicKey" binding:"required"`
+	MaxTotal            string   `json:"maxTotal" binding:"required"`
+	MaxPerTransaction   string   `json:"maxPerTransaction,omitempty"`
+	MaxPerDay           string   `json:"maxPerDay,omitempty"`
+	ExpiresIn           string   `json:"expiresIn,omitempty"`
+	AllowedRecipients   []string `json:"allowedRecipients,omitempty"`
+	AllowedServiceTypes []string `json:"allowedServiceTypes,omitempty"`
+	AllowAny            bool     `json:"allowAny,omitempty"`
+	DelegationLabel     string   `json:"delegationLabel,omitempty"`
+	Nonce               uint64   `json:"nonce" binding:"required"`
+	Timestamp           int64    `json:"timestamp" binding:"required"`
+	Signature           string   `json:"signature" binding:"required"`
+}
+
 // Common validation errors
 var (
 	ErrKeyNotFound           = &ValidationError{Code: "key_not_found", Message: "Session key not found"}
@@ -139,6 +162,13 @@ var (
 	ErrNonceReused           = &ValidationError{Code: "nonce_reused", Message: "Nonce has already been used"}
 	ErrSignatureExpired      = &ValidationError{Code: "signature_expired", Message: "Signature timestamp is too old"}
 	ErrInvalidPublicKey      = &ValidationError{Code: "invalid_public_key", Message: "Invalid public key format"}
+
+	// Delegation errors
+	ErrMaxDepthExceeded       = &ValidationError{Code: "max_depth_exceeded", Message: "Maximum delegation depth (5) exceeded"}
+	ErrChildExceedsParent     = &ValidationError{Code: "child_exceeds_parent", Message: "Child key limits exceed parent's remaining budget"}
+	ErrParentNotActive        = &ValidationError{Code: "parent_not_active", Message: "Parent session key is not active"}
+	ErrChildServiceNotAllowed = &ValidationError{Code: "child_service_not_allowed", Message: "Child service types must be subset of parent's"}
+	ErrAncestorInvalid        = &ValidationError{Code: "ancestor_invalid", Message: "An ancestor key is no longer active"}
 )
 
 // IsActive returns true if the session key is currently valid

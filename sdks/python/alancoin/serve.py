@@ -28,9 +28,139 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
 from .client import Alancoin
-from .session_keys import generate_session_keypair
+from .session_keys import generate_session_keypair, SessionKeyManager
 
 logger = logging.getLogger("alancoin.serve")
+
+
+@dataclass
+class DelegationContext:
+    """Context passed to service handlers that support delegation.
+
+    When a service agent receives a request with delegation headers,
+    a ``DelegationContext`` is injected into the handler (if it accepts
+    a ``ctx`` parameter).  The service can then autonomously hire other
+    agents within the delegated budget.
+
+    Example::
+
+        @agent.service("research", price="0.02")
+        def research(text, ctx: DelegationContext = None):
+            if ctx:
+                result = ctx.delegate("translation", max_budget="0.005", text=text, target="es")
+                return {"output": result["output"]}
+            return {"output": text}
+    """
+
+    client: Alancoin
+    parent_skm: SessionKeyManager
+    parent_key_id: str
+    owner_address: str
+    remaining_budget: str
+    depth: int
+
+    def delegate(
+        self,
+        service_type: str,
+        max_budget: str,
+        prefer: str = "cheapest",
+        **params,
+    ) -> dict:
+        """Discover, pay, and call another agent within the delegated budget.
+
+        1. Discovers services matching type + budget
+        2. Selects by preference
+        3. Creates child session key (signed by parent key)
+        4. Pays the selected service via child key
+        5. Calls the service endpoint with payment proof
+        6. Returns response
+
+        Args:
+            service_type: Type of service to call.
+            max_budget: Maximum USDC to allocate for this sub-task.
+            prefer: Selection strategy ("cheapest", "reputation", "best_value").
+            **params: Parameters forwarded to the service endpoint.
+
+        Returns:
+            Service response dict.
+        """
+        import requests as _requests
+        from decimal import Decimal
+
+        # 1. Discover
+        listings = self.client.discover(
+            service_type=service_type,
+            max_price=max_budget,
+        )
+        if not listings:
+            raise ValueError(f"No {service_type} services found under ${max_budget}")
+
+        # 2. Select
+        if prefer == "reputation":
+            service = max(listings, key=lambda s: s.reputation_score)
+        elif prefer == "best_value":
+            def value_key(s):
+                price = Decimal(s.price) if s.price else Decimal("999")
+                if price <= 0:
+                    price = Decimal("0.000001")
+                return float(s.reputation_score) / float(price)
+            service = max(listings, key=value_key)
+        else:
+            service = min(listings, key=lambda s: Decimal(s.price))
+
+        # 3. Create child session key
+        child_skm = SessionKeyManager()
+        signed = self.parent_skm.sign_delegation(child_skm.public_key, max_budget)
+        child_resp = self.client.create_child_session_key(
+            parent_key_id=self.parent_key_id,
+            delegation_label=f"delegate:{service_type}",
+            allowed_service_types=[service_type],
+            **signed,
+        )
+        child_key = child_resp.get("childKey", {})
+        child_key_id = child_key.get("id")
+        child_skm.set_key_id(child_key_id)
+
+        # 4. Pay
+        tx_result = child_skm.transact(
+            self.client,
+            self.owner_address,
+            service.agent_address,
+            service.price,
+            service_id=service.id,
+        )
+
+        # 5. Call endpoint
+        if service.endpoint:
+            headers = {
+                "Content-Type": "application/json",
+                "X-Payment-TxHash": tx_result.get("txHash", ""),
+                "X-Payment-Amount": service.price,
+                "X-Payment-From": self.owner_address,
+            }
+            try:
+                resp = _requests.post(
+                    service.endpoint,
+                    json=params,
+                    headers=headers,
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                return resp.json()
+            except _requests.exceptions.RequestException as e:
+                logger.warning("Delegate endpoint call failed: %s", e)
+                return {
+                    "error": "endpoint_call_failed",
+                    "paid": True,
+                    "amount": service.price,
+                }
+
+        return {
+            "paid": True,
+            "amount": service.price,
+            "to": service.agent_address,
+            "service": service.name,
+        }
 
 
 @dataclass
@@ -79,6 +209,7 @@ class ServiceAgent:
         api_key: str = None,
         address: str = None,
         description: str = "",
+        enable_delegation: bool = False,
     ):
         """
         Args:
@@ -87,12 +218,15 @@ class ServiceAgent:
             api_key: API key (if already registered).
             address: Wallet address (auto-generated if omitted).
             description: What this agent does.
+            enable_delegation: If True, inject DelegationContext into handlers
+                that accept a ``ctx`` parameter when delegation headers are present.
         """
         self.name = name
         self.description = description
         self._base_url = base_url
         self._api_key = api_key
         self._address = address
+        self._enable_delegation = enable_delegation
         self._services: Dict[str, ServiceDef] = {}
         self._client: Optional[Alancoin] = None
         self._server: Optional[_ThreadingHTTPServer] = None
@@ -332,9 +466,26 @@ class ServiceAgent:
                         })
                         return
 
+                # Build delegation context if enabled and headers present
+                delegation_ctx = None
+                if agent._enable_delegation:
+                    del_key_id = self.headers.get("X-Delegation-KeyId", "").strip()
+                    del_budget = self.headers.get("X-Delegation-Budget", "").strip()
+                    del_private_key = self.headers.get("X-Delegation-PrivateKey", "").strip()
+                    del_depth = self.headers.get("X-Delegation-Depth", "0").strip()
+                    if del_key_id and del_budget and del_private_key:
+                        delegation_ctx = DelegationContext(
+                            client=agent._client,
+                            parent_skm=SessionKeyManager(private_key=del_private_key),
+                            parent_key_id=del_key_id,
+                            owner_address=self.headers.get("X-Payment-From", ""),
+                            remaining_budget=del_budget,
+                            depth=int(del_depth),
+                        )
+
                 # Invoke handler
                 try:
-                    result = _call_handler(svc.handler, params)
+                    result = _call_handler(svc.handler, params, delegation_ctx)
                 except Exception as e:
                     logger.exception("Service handler error for %s", stype)
                     self._json(500, {"error": "internal_error", "message": "Service handler failed"})
@@ -357,10 +508,19 @@ class ServiceAgent:
         return _Handler
 
 
-def _call_handler(handler: Callable, params: dict):
-    """Call a handler with kwargs or a single dict argument."""
+def _call_handler(handler: Callable, params: dict, delegation_ctx=None):
+    """Call a handler with kwargs or a single dict argument.
+
+    If the handler accepts a ``ctx`` parameter and a delegation context is
+    available, it is injected automatically.
+    """
     sig = inspect.signature(handler)
     param_names = list(sig.parameters.keys())
+
+    # Inject delegation context if handler accepts 'ctx'
+    if delegation_ctx is not None and "ctx" in param_names:
+        params = dict(params)
+        params["ctx"] = delegation_ctx
 
     # If handler takes a single "request"-like param, pass the dict
     if (

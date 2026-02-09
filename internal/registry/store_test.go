@@ -218,6 +218,59 @@ func TestMemoryStore_AddressNormalization(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestMemoryStore_DuplicateTxHash(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	// Create agents
+	agent1 := &Agent{Address: "0x1111111111111111111111111111111111111111", Name: "Agent1"}
+	agent2 := &Agent{Address: "0x2222222222222222222222222222222222222222", Name: "Agent2"}
+	require.NoError(t, store.CreateAgent(ctx, agent1))
+	require.NoError(t, store.CreateAgent(ctx, agent2))
+
+	// Record first transaction
+	tx1 := &Transaction{
+		TxHash: "0xdeadbeef",
+		From:   agent1.Address,
+		To:     agent2.Address,
+		Amount: "1.00",
+		Status: "confirmed",
+	}
+	err := store.RecordTransaction(ctx, tx1)
+	require.NoError(t, err)
+
+	// Record second transaction with same txHash — should fail
+	tx2 := &Transaction{
+		TxHash: "0xdeadbeef",
+		From:   agent1.Address,
+		To:     agent2.Address,
+		Amount: "2.00",
+		Status: "confirmed",
+	}
+	err = store.RecordTransaction(ctx, tx2)
+	assert.Error(t, err, "duplicate txHash should be rejected")
+	assert.Contains(t, err.Error(), "duplicate")
+
+	// Empty txHash should be allowed multiple times (off-chain transactions)
+	tx3 := &Transaction{
+		From:   agent1.Address,
+		To:     agent2.Address,
+		Amount: "0.50",
+		Status: "confirmed",
+	}
+	err = store.RecordTransaction(ctx, tx3)
+	require.NoError(t, err)
+
+	tx4 := &Transaction{
+		From:   agent1.Address,
+		To:     agent2.Address,
+		Amount: "0.50",
+		Status: "confirmed",
+	}
+	err = store.RecordTransaction(ctx, tx4)
+	require.NoError(t, err)
+}
+
 func TestIsKnownServiceType(t *testing.T) {
 	assert.True(t, IsKnownServiceType("inference"))
 	assert.True(t, IsKnownServiceType("translation"))

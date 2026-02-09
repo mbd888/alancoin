@@ -57,6 +57,49 @@ def generate_session_keypair() -> Tuple[str, str]:
     return private_key, public_address
 
 
+def create_delegation_message(child_public_key: str, max_total: str, nonce: int, timestamp: int) -> str:
+    """
+    Create the message that must be signed for delegation.
+
+    Format: "AlancoinDelegate|{childPubKey}|{maxTotal}|{nonce}|{timestamp}"
+
+    This must match the server's expected format exactly.
+    """
+    return f"AlancoinDelegate|{child_public_key.lower()}|{max_total}|{nonce}|{timestamp}"
+
+
+def sign_delegation(
+    child_public_key: str,
+    max_total: str,
+    nonce: int,
+    timestamp: int,
+    private_key: str,
+) -> str:
+    """
+    Sign a delegation request with a parent session key's private key.
+
+    Args:
+        child_public_key: The child session key's Ethereum address
+        max_total: Maximum total budget for the child key
+        nonce: Unique number (must be > parent's last nonce)
+        timestamp: Unix timestamp (must be within 5 min of server time)
+        private_key: The parent session key's private key
+
+    Returns:
+        Signature as hex string (with 0x prefix)
+    """
+    if not HAS_ETH_ACCOUNT:
+        raise ImportError(
+            "eth_account is required for signing. "
+            "Install with: pip install eth-account"
+        )
+
+    message = create_delegation_message(child_public_key, max_total, nonce, timestamp)
+    message_encoded = encode_defunct(text=message)
+    signed = Account.sign_message(message_encoded, private_key=private_key)
+    return signed.signature.hex()
+
+
 def create_transaction_message(to: str, amount: str, nonce: int, timestamp: int) -> str:
     """
     Create the message that must be signed for a transaction.
@@ -200,22 +243,22 @@ class SessionKeyManager:
     def transact(self, client, agent_address: str, to: str, amount: str, service_id: str = None) -> dict:
         """
         Sign and submit a transaction using this session key.
-        
+
         Args:
             client: Alancoin client instance
             agent_address: The agent's address
             to: Recipient address
             amount: USDC amount
             service_id: Optional service ID
-            
+
         Returns:
             Transaction result from server
         """
         if not self.key_id:
             raise ValueError("key_id not set - register the session key first")
-        
+
         signed = self.sign(to, amount)
-        
+
         return client.transact_with_session_key(
             agent_address=agent_address,
             key_id=self.key_id,
@@ -226,3 +269,28 @@ class SessionKeyManager:
             signature=signed["signature"],
             service_id=service_id,
         )
+
+    def sign_delegation(self, child_public_key: str, max_total: str) -> dict:
+        """
+        Sign a delegation request to create a child session key.
+
+        Args:
+            child_public_key: The child key's Ethereum address
+            max_total: Maximum budget for the child key
+
+        Returns:
+            Dict with publicKey, maxTotal, nonce, timestamp, signature
+        """
+        nonce = self.next_nonce
+        timestamp = get_current_timestamp()
+        signature = sign_delegation(
+            child_public_key, max_total, nonce, timestamp, self.private_key
+        )
+
+        return {
+            "public_key": child_public_key,
+            "max_total": max_total,
+            "nonce": nonce,
+            "timestamp": timestamp,
+            "signature": signature,
+        }

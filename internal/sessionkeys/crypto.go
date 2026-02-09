@@ -19,6 +19,17 @@ func CreateTransactionMessage(to string, amount string, nonce uint64, timestamp 
 	)
 }
 
+// CreateDelegationMessage creates the message that must be signed for delegation
+// Format: "AlancoinDelegate|{childPubKey}|{maxTotal}|{nonce}|{timestamp}"
+func CreateDelegationMessage(childPubKey string, maxTotal string, nonce uint64, timestamp int64) string {
+	return fmt.Sprintf("AlancoinDelegate|%s|%s|%d|%d",
+		strings.ToLower(childPubKey),
+		maxTotal,
+		nonce,
+		timestamp,
+	)
+}
+
 // HashMessage creates an Ethereum signed message hash
 // This prefixes the message with "\x19Ethereum Signed Message:\n{len}" as per EIP-191
 func HashMessage(message string) []byte {

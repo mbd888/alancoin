@@ -531,6 +531,11 @@ func (s *Server) setupRoutes() {
 		sessionHandler = sessionkeys.NewHandler(s.sessionMgr)
 	}
 
+	// In demo mode (no DB), skip on-chain transfers and use ledger-only accounting
+	if s.db == nil {
+		sessionHandler = sessionHandler.WithDemoMode()
+	}
+
 	// Add real-time event emitter
 	if s.realtimeHub != nil {
 		sessionHandler = sessionHandler.WithEvents(&realtimeEventEmitter{s.realtimeHub})
@@ -547,6 +552,10 @@ func (s *Server) setupRoutes() {
 	}
 	// Using a session key to transact doesn't require API key (the session key IS the auth)
 	v1.POST("/agents/:address/sessions/:keyId/transact", sessionHandler.Transact)
+
+	// Delegation routes (A2A) — authenticated by session key signature, no API key needed
+	v1.POST("/sessions/:keyId/delegate", sessionHandler.CreateDelegation)
+	v1.GET("/sessions/:keyId/tree", sessionHandler.GetDelegationTree)
 
 	// Ledger routes (agent balances)
 	if s.ledger != nil {
@@ -1285,6 +1294,10 @@ func (a *ledgerAdapter) Spend(ctx context.Context, agentAddr, amount, reference 
 
 func (a *ledgerAdapter) Refund(ctx context.Context, agentAddr, amount, reference string) error {
 	return a.l.Refund(ctx, agentAddr, amount, reference)
+}
+
+func (a *ledgerAdapter) Deposit(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.Deposit(ctx, agentAddr, amount, reference)
 }
 
 func (a *ledgerAdapter) Hold(ctx context.Context, agentAddr, amount, reference string) error {

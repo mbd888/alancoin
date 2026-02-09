@@ -3,6 +3,8 @@ package reputation
 import (
 	"testing"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/registry"
 )
 
 func TestCalculatorBasic(t *testing.T) {
@@ -233,6 +235,104 @@ func TestCalculatedAtSet(t *testing.T) {
 
 	if score.CalculatedAt.Before(before) || score.CalculatedAt.After(after) {
 		t.Error("CalculatedAt should be set to current time")
+	}
+}
+
+func TestCalculateMetrics_PendingExcluded(t *testing.T) {
+	// Pending transactions should NOT count toward reputation metrics.
+	provider := NewRegistryProvider(nil)
+
+	agent := &registry.Agent{
+		Address:   "0x1234",
+		CreatedAt: time.Now().Add(-48 * time.Hour),
+	}
+
+	txns := []*registry.Transaction{
+		{From: "0x1234", To: "0xaaaa", Amount: "1.00", Status: "confirmed", CreatedAt: time.Now()},
+		{From: "0x1234", To: "0xbbbb", Amount: "2.00", Status: "pending", CreatedAt: time.Now()},
+		{From: "0x1234", To: "0xcccc", Amount: "3.00", Status: "confirmed", CreatedAt: time.Now()},
+		{From: "0x1234", To: "0xdddd", Amount: "4.00", Status: "pending", CreatedAt: time.Now()},
+	}
+
+	metrics := provider.calculateMetrics(agent, txns)
+
+	// Only 2 confirmed transactions should be counted
+	if metrics.TotalTransactions != 2 {
+		t.Errorf("Expected 2 total transactions (excluding pending), got %d", metrics.TotalTransactions)
+	}
+	if metrics.SuccessfulTxns != 2 {
+		t.Errorf("Expected 2 successful transactions, got %d", metrics.SuccessfulTxns)
+	}
+	// Volume should only include confirmed: 1.00 + 3.00 = 4.00
+	if metrics.TotalVolumeUSD < 3.99 || metrics.TotalVolumeUSD > 4.01 {
+		t.Errorf("Expected volume ~4.00 (excluding pending), got %f", metrics.TotalVolumeUSD)
+	}
+}
+
+func TestCalculateMetrics_WashTradingCap(t *testing.T) {
+	// maxTxPerCounterparty=5 should cap reputation from repeated counterparties.
+	provider := NewRegistryProvider(nil)
+
+	agent := &registry.Agent{
+		Address:   "0x1234",
+		CreatedAt: time.Now().Add(-48 * time.Hour),
+	}
+
+	// 10 transactions all with the same counterparty
+	var txns []*registry.Transaction
+	for i := 0; i < 10; i++ {
+		txns = append(txns, &registry.Transaction{
+			From:      "0x1234",
+			To:        "0xsame",
+			Amount:    "1.00",
+			Status:    "confirmed",
+			CreatedAt: time.Now(),
+		})
+	}
+
+	metrics := provider.calculateMetrics(agent, txns)
+
+	// Only first 5 should count (maxTxPerCounterparty = 5)
+	if metrics.TotalTransactions != 5 {
+		t.Errorf("Expected 5 transactions (capped), got %d", metrics.TotalTransactions)
+	}
+	if metrics.TotalVolumeUSD < 4.99 || metrics.TotalVolumeUSD > 5.01 {
+		t.Errorf("Expected volume ~5.00 (capped), got %f", metrics.TotalVolumeUSD)
+	}
+	// But unique counterparties should still count the one
+	if metrics.UniqueCounterparties != 1 {
+		t.Errorf("Expected 1 unique counterparty, got %d", metrics.UniqueCounterparties)
+	}
+}
+
+func TestCalculateMetrics_FailedTransactions(t *testing.T) {
+	provider := NewRegistryProvider(nil)
+
+	agent := &registry.Agent{
+		Address:   "0x1234",
+		CreatedAt: time.Now().Add(-48 * time.Hour),
+	}
+
+	txns := []*registry.Transaction{
+		{From: "0x1234", To: "0xaaaa", Amount: "1.00", Status: "confirmed", CreatedAt: time.Now()},
+		{From: "0x1234", To: "0xbbbb", Amount: "2.00", Status: "failed", CreatedAt: time.Now()},
+		{From: "0x1234", To: "0xcccc", Amount: "3.00", Status: "reverted", CreatedAt: time.Now()},
+	}
+
+	metrics := provider.calculateMetrics(agent, txns)
+
+	if metrics.TotalTransactions != 3 {
+		t.Errorf("Expected 3 total (confirmed+failed+reverted), got %d", metrics.TotalTransactions)
+	}
+	if metrics.SuccessfulTxns != 1 {
+		t.Errorf("Expected 1 successful, got %d", metrics.SuccessfulTxns)
+	}
+	if metrics.FailedTxns != 2 {
+		t.Errorf("Expected 2 failed, got %d", metrics.FailedTxns)
+	}
+	// Volume should only include confirmed
+	if metrics.TotalVolumeUSD < 0.99 || metrics.TotalVolumeUSD > 1.01 {
+		t.Errorf("Expected volume ~1.00 (only confirmed), got %f", metrics.TotalVolumeUSD)
 	}
 }
 

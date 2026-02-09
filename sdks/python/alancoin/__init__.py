@@ -61,12 +61,14 @@ Real-time streaming:
 from .client import Alancoin
 from .models import Agent, Service, ServiceListing, Transaction, NetworkStats, ServiceType
 from .session import Budget, BudgetSession, ServiceResult
-from .serve import ServiceAgent
+from .serve import ServiceAgent, DelegationContext
 from .session_keys import (
     SessionKeyManager,
     generate_session_keypair,
     sign_transaction,
+    sign_delegation,
     create_transaction_message,
+    create_delegation_message,
     get_current_timestamp,
 )
 from .exceptions import (
@@ -104,11 +106,14 @@ __all__ = [
     "ServiceResult",
     # Service Agent Framework
     "ServiceAgent",
+    "DelegationContext",
     # Session Keys (Low-Level)
     "SessionKeyManager",
     "generate_session_keypair",
     "sign_transaction",
+    "sign_delegation",
     "create_transaction_message",
+    "create_delegation_message",
     "get_current_timestamp",
     # Models
     "Agent",

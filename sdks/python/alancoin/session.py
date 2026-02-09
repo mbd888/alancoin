@@ -499,6 +499,131 @@ class BudgetSession:
                 resolved[key] = val
         return resolved
 
+    # -- Delegation -----------------------------------------------------------
+
+    def call_service_with_delegation(
+        self,
+        service_type: str,
+        delegation_budget: str,
+        max_price: str = None,
+        prefer: str = "cheapest",
+        **params,
+    ) -> ServiceResult:
+        """Call a service and pass delegation credentials for sub-hiring.
+
+        Like ``call_service()`` but creates a child session key and passes
+        it to the service agent via headers so the agent can further delegate
+        work to other agents.
+
+        Args:
+            service_type: Type of service ("research", "analysis", etc.).
+            delegation_budget: Max budget the service agent can spend on
+                sub-tasks (must be within this session's remaining budget).
+            max_price: Max price for this service (defaults to budget max_per_tx).
+            prefer: Selection strategy.
+            **params: Parameters forwarded to the service endpoint.
+
+        Returns:
+            ServiceResult with response data.
+        """
+        if not self._active:
+            raise AlancoinError("Session is not active", code="session_inactive")
+
+        # 1. Discover
+        price_limit = max_price or self._budget.max_per_tx
+        listings = self._client.discover(
+            service_type=service_type,
+            max_price=price_limit,
+        )
+        if not listings:
+            raise AlancoinError(
+                f"No {service_type} services found under ${price_limit}",
+                code="no_services",
+            )
+
+        # 2. Select
+        service = self._select_service(listings, prefer)
+
+        # 3. Budget check (service price + delegation budget)
+        price_dec = Decimal(service.price)
+        del_dec = Decimal(delegation_budget)
+        total_needed = price_dec + del_dec
+        if self._total_spent + total_needed > Decimal(self._budget.max_total):
+            raise AlancoinError(
+                f"Service (${service.price}) + delegation (${delegation_budget}) "
+                f"exceeds remaining budget (${self.remaining})",
+                code="budget_exceeded",
+            )
+
+        # 4. Pay for the service
+        tx_result = self.pay(
+            to=service.agent_address,
+            amount=service.price,
+            service_id=service.id,
+        )
+
+        # 5. Create child session key for delegation
+        child_skm = SessionKeyManager()
+        signed = self._skm.sign_delegation(child_skm.public_key, delegation_budget)
+        child_resp = self._client.create_child_session_key(
+            parent_key_id=self._key_id,
+            delegation_label=f"delegate:{service_type}",
+            allowed_service_types=self._budget.allowed_services,
+            allow_any=self._budget.allowed_services is None,
+            **signed,
+        )
+        child_key = child_resp.get("childKey", {})
+        child_key_id = child_key.get("id")
+
+        # 6. Call endpoint with delegation headers
+        if service.endpoint:
+            import requests
+            headers = {
+                "Content-Type": "application/json",
+                "X-Payment-TxHash": tx_result.get("txHash", ""),
+                "X-Payment-Amount": service.price,
+                "X-Payment-From": self._client.address,
+                "X-Delegation-KeyId": child_key_id,
+                "X-Delegation-Budget": delegation_budget,
+                "X-Delegation-PrivateKey": child_skm.private_key,
+                "X-Delegation-Depth": str(child_key.get("depth", 1)),
+            }
+            try:
+                resp = requests.post(
+                    service.endpoint,
+                    json=params,
+                    headers=headers,
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                return ServiceResult(
+                    data=resp.json(),
+                    tx_hash=tx_result.get("txHash"),
+                    service=service,
+                )
+            except Exception as e:
+                logger.warning("Delegation endpoint call failed: %s", e)
+                return ServiceResult(
+                    data={
+                        "error": "endpoint_call_failed",
+                        "paid": True,
+                        "amount": service.price,
+                    },
+                    tx_hash=tx_result.get("txHash"),
+                    service=service,
+                )
+
+        return ServiceResult(
+            data={
+                "paid": True,
+                "amount": service.price,
+                "to": service.agent_address,
+                "delegation_key": child_key_id,
+            },
+            tx_hash=tx_result.get("txHash"),
+            service=service,
+        )
+
     # -- Dispute --------------------------------------------------------------
 
     def dispute(self, escrow_id: str, reason: str) -> dict:

@@ -17,6 +17,7 @@ type Store interface {
 	Create(ctx context.Context, key *SessionKey) error
 	Get(ctx context.Context, id string) (*SessionKey, error)
 	GetByOwner(ctx context.Context, ownerAddr string) ([]*SessionKey, error)
+	GetByParent(ctx context.Context, parentKeyID string) ([]*SessionKey, error)
 	Update(ctx context.Context, key *SessionKey) error
 	Delete(ctx context.Context, id string) error
 	CountActive(ctx context.Context) (int64, error) // Count non-revoked, non-expired keys
@@ -46,6 +47,44 @@ func (m *Manager) LockKey(keyID string) func() {
 	mu := v.(*sync.Mutex)
 	mu.Lock()
 	return mu.Unlock
+}
+
+// LockKeyChain acquires locks for the key and all its ancestors (leaf-to-root order).
+// Returns an unlock function that releases all locks in reverse order.
+// This prevents concurrent transactions on sibling keys from exceeding the parent budget.
+func (m *Manager) LockKeyChain(ctx context.Context, keyID string) func() {
+	var unlocks []func()
+
+	// Lock the leaf key first
+	unlocks = append(unlocks, m.LockKey(keyID))
+
+	// Walk up and lock each ancestor
+	key, err := m.store.Get(ctx, keyID)
+	if err != nil {
+		return func() {
+			for i := len(unlocks) - 1; i >= 0; i-- {
+				unlocks[i]()
+			}
+		}
+	}
+
+	parentID := key.ParentKeyID
+	depth := 0
+	for parentID != "" && depth < MaxDelegationDepth+1 {
+		unlocks = append(unlocks, m.LockKey(parentID))
+		ancestor, err := m.store.Get(ctx, parentID)
+		if err != nil {
+			break
+		}
+		parentID = ancestor.ParentKeyID
+		depth++
+	}
+
+	return func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
+	}
 }
 
 // NewManager creates a new session key manager
@@ -153,7 +192,7 @@ func (m *Manager) CountActive(ctx context.Context) (int64, error) {
 	return m.store.CountActive(ctx)
 }
 
-// Revoke revokes a session key
+// Revoke revokes a session key and all descendant keys (cascading revocation)
 func (m *Manager) Revoke(ctx context.Context, id string) error {
 	key, err := m.store.Get(ctx, id)
 	if err != nil {
@@ -162,7 +201,333 @@ func (m *Manager) Revoke(ctx context.Context, id string) error {
 
 	now := time.Now()
 	key.RevokedAt = &now
-	return m.store.Update(ctx, key)
+	if err := m.store.Update(ctx, key); err != nil {
+		return err
+	}
+
+	// Cascade: revoke all children
+	children, err := m.store.GetByParent(ctx, id)
+	if err != nil {
+		return nil // parent revoked successfully, children lookup failure is non-fatal
+	}
+	for _, child := range children {
+		if child.RevokedAt == nil {
+			_ = m.Revoke(ctx, child.ID) // best-effort recursive revocation
+		}
+	}
+
+	return nil
+}
+
+// MaxDelegationDepth is the maximum allowed depth in a delegation chain
+const MaxDelegationDepth = 5
+
+// CreateDelegated creates a child session key delegated from a parent key.
+// The request must be signed by the parent key's private key.
+func (m *Manager) CreateDelegated(ctx context.Context, parentKeyID string, req *DelegateRequest) (*SessionKey, error) {
+	// 1. Get parent key, verify it's active
+	parent, err := m.store.Get(ctx, parentKeyID)
+	if err != nil {
+		return nil, ErrKeyNotFound
+	}
+	if !parent.IsActive() {
+		return nil, ErrParentNotActive
+	}
+
+	// 2. Validate ancestor chain is still active
+	if parent.ParentKeyID != "" {
+		if err := m.ValidateAncestorChain(ctx, parent); err != nil {
+			return nil, err
+		}
+	}
+
+	// 3. Verify ECDSA signature
+	message := CreateDelegationMessage(req.PublicKey, req.MaxTotal, req.Nonce, req.Timestamp)
+	recoveredAddr, err := RecoverAddress(message, req.Signature)
+	if err != nil {
+		return nil, ErrInvalidSignature
+	}
+	if !strings.EqualFold(recoveredAddr, parent.PublicKey) {
+		return nil, ErrSignatureMismatch
+	}
+
+	// 4. Check nonce freshness
+	if req.Nonce <= parent.Usage.LastNonce {
+		return nil, ErrNonceReused
+	}
+
+	// 5. Check timestamp freshness (within 5 minutes)
+	now := time.Now().Unix()
+	if now-req.Timestamp > 5*60 {
+		return nil, ErrSignatureExpired
+	}
+	if req.Timestamp > now+60 {
+		return nil, &ValidationError{Code: "invalid_timestamp", Message: "Signature timestamp is in the future"}
+	}
+
+	// 6. Check depth limit
+	childDepth := parent.Depth + 1
+	if childDepth > MaxDelegationDepth {
+		return nil, ErrMaxDepthExceeded
+	}
+
+	// 7. Validate child limits are subset of parent's remaining budget,
+	// accounting for budgets already allocated to existing children
+	childMaxTotal, ok := usdc.Parse(req.MaxTotal)
+	if !ok || childMaxTotal.Sign() <= 0 {
+		return nil, &ValidationError{Code: "invalid_max_total", Message: "maxTotal must be a positive decimal number"}
+	}
+
+	if parent.Permission.MaxTotal != "" {
+		parentMax, _ := usdc.Parse(parent.Permission.MaxTotal)
+		parentSpent, _ := usdc.Parse(parent.Usage.TotalSpent)
+		parentRemaining := new(big.Int).Sub(parentMax, parentSpent)
+
+		// Sum up budget already committed to existing active children
+		existingChildren, _ := m.store.GetByParent(ctx, parentKeyID)
+		committedBudget := new(big.Int)
+		for _, child := range existingChildren {
+			if child.IsActive() && child.Permission.MaxTotal != "" {
+				childMax, _ := usdc.Parse(child.Permission.MaxTotal)
+				childSpent, _ := usdc.Parse(child.Usage.TotalSpent)
+				// Uncommitted = allocated minus already spent (spent is already in parentSpent)
+				uncommitted := new(big.Int).Sub(childMax, childSpent)
+				if uncommitted.Sign() > 0 {
+					committedBudget.Add(committedBudget, uncommitted)
+				}
+			}
+		}
+
+		available := new(big.Int).Sub(parentRemaining, committedBudget)
+		if childMaxTotal.Cmp(available) > 0 {
+			return nil, ErrChildExceedsParent
+		}
+	}
+
+	if req.MaxPerTransaction != "" {
+		childPerTx, ok := usdc.Parse(req.MaxPerTransaction)
+		if !ok || childPerTx.Sign() <= 0 {
+			return nil, &ValidationError{Code: "invalid_limit", Message: "maxPerTransaction must be a positive decimal number"}
+		}
+		if parent.Permission.MaxPerTransaction != "" {
+			parentPerTx, _ := usdc.Parse(parent.Permission.MaxPerTransaction)
+			if childPerTx.Cmp(parentPerTx) > 0 {
+				return nil, ErrChildExceedsParent
+			}
+		}
+	}
+
+	if req.MaxPerDay != "" {
+		childPerDay, ok := usdc.Parse(req.MaxPerDay)
+		if !ok || childPerDay.Sign() <= 0 {
+			return nil, &ValidationError{Code: "invalid_limit", Message: "maxPerDay must be a positive decimal number"}
+		}
+		if parent.Permission.MaxPerDay != "" {
+			parentPerDay, _ := usdc.Parse(parent.Permission.MaxPerDay)
+			if childPerDay.Cmp(parentPerDay) > 0 {
+				return nil, ErrChildExceedsParent
+			}
+		}
+	}
+
+	// 8. Intersect AllowedServiceTypes (child can only narrow)
+	childServiceTypes := toLower(req.AllowedServiceTypes)
+	if !parent.Permission.AllowAny && len(parent.Permission.AllowedServiceTypes) > 0 {
+		if len(childServiceTypes) == 0 {
+			// Child inherits parent's restrictions
+			childServiceTypes = parent.Permission.AllowedServiceTypes
+		} else {
+			// Intersect
+			filtered := intersectStrings(childServiceTypes, parent.Permission.AllowedServiceTypes)
+			if len(filtered) == 0 {
+				return nil, ErrChildServiceNotAllowed
+			}
+			childServiceTypes = filtered
+		}
+	}
+
+	// 9. Intersect AllowedRecipients
+	childRecipients := toLower(req.AllowedRecipients)
+	if !parent.Permission.AllowAny && len(parent.Permission.AllowedRecipients) > 0 {
+		if len(childRecipients) == 0 {
+			childRecipients = parent.Permission.AllowedRecipients
+		} else {
+			filtered := intersectStrings(childRecipients, parent.Permission.AllowedRecipients)
+			if len(filtered) == 0 {
+				return nil, ErrRecipientNotAllowed
+			}
+			childRecipients = filtered
+		}
+	}
+
+	// 10. AllowAny: child can only be AllowAny if parent is AllowAny
+	childAllowAny := req.AllowAny
+	if childAllowAny && !parent.Permission.AllowAny {
+		childAllowAny = false
+		// If parent restricts and child has no explicit restrictions, inherit
+		if len(childServiceTypes) == 0 && len(childRecipients) == 0 {
+			childServiceTypes = parent.Permission.AllowedServiceTypes
+			childRecipients = parent.Permission.AllowedRecipients
+		}
+	}
+	// If parent is AllowAny and child has no explicit recipient restrictions,
+	// the child inherits AllowAny for recipients (child can only narrow, never widen)
+	if parent.Permission.AllowAny && !childAllowAny && len(childRecipients) == 0 {
+		childAllowAny = true
+	}
+
+	// 11. Ensure child doesn't outlive parent
+	var expiresAt time.Time
+	if req.ExpiresIn != "" {
+		duration, err := parseDuration(req.ExpiresIn)
+		if err != nil {
+			return nil, fmt.Errorf("invalid expiresIn format: %w", err)
+		}
+		expiresAt = time.Now().Add(duration)
+	} else {
+		expiresAt = parent.Permission.ExpiresAt // default: same as parent
+	}
+	if expiresAt.After(parent.Permission.ExpiresAt) {
+		expiresAt = parent.Permission.ExpiresAt
+	}
+
+	// 12. Determine root key ID
+	rootKeyID := parent.RootKeyID
+	if rootKeyID == "" {
+		rootKeyID = parent.ID // parent is root
+	}
+
+	// 13. Validate public key format
+	publicKey := strings.ToLower(req.PublicKey)
+	if !strings.HasPrefix(publicKey, "0x") || len(publicKey) != 42 {
+		return nil, ErrInvalidPublicKey
+	}
+
+	// 14. Create child key
+	childKey := &SessionKey{
+		ID:        idgen.WithPrefix("sk_"),
+		OwnerAddr: parent.OwnerAddr, // funds always come from root owner
+		PublicKey: publicKey,
+		CreatedAt: time.Now(),
+		Permission: Permission{
+			MaxPerTransaction:   req.MaxPerTransaction,
+			MaxPerDay:           req.MaxPerDay,
+			MaxTotal:            req.MaxTotal,
+			ExpiresAt:           expiresAt,
+			AllowedRecipients:   childRecipients,
+			AllowedServiceTypes: childServiceTypes,
+			AllowAny:            childAllowAny,
+			Label:               req.DelegationLabel,
+		},
+		Usage: SessionKeyUsage{
+			TotalSpent:   "0",
+			SpentToday:   "0",
+			LastResetDay: time.Now().Format("2006-01-02"),
+			LastNonce:    0,
+		},
+		ParentKeyID:     parentKeyID,
+		Depth:           childDepth,
+		RootKeyID:       rootKeyID,
+		DelegationLabel: req.DelegationLabel,
+	}
+
+	if err := m.store.Create(ctx, childKey); err != nil {
+		return nil, fmt.Errorf("failed to create delegated key: %w", err)
+	}
+
+	// 15. Update parent nonce
+	parent.Usage.LastNonce = req.Nonce
+	if err := m.store.Update(ctx, parent); err != nil {
+		// Non-fatal: child was created, nonce update failed
+		// Next delegation will still work with a higher nonce
+	}
+
+	return childKey, nil
+}
+
+// RecordUsageWithCascade records usage on the key and cascades the spend to all ancestors.
+// It validates ancestor budgets before incrementing to prevent overspend.
+func (m *Manager) RecordUsageWithCascade(ctx context.Context, keyID string, amount string, nonce uint64) error {
+	// Record on the child key itself
+	if err := m.RecordUsage(ctx, keyID, amount, nonce); err != nil {
+		return err
+	}
+
+	// Walk up the delegation chain, incrementing each ancestor's TotalSpent
+	key, err := m.store.Get(ctx, keyID)
+	if err != nil {
+		return nil // child usage recorded, ancestor lookup failure is non-fatal
+	}
+
+	parentID := key.ParentKeyID
+	amountBig, _ := usdc.Parse(amount)
+
+	// NOTE: Caller (Transact handler) must hold locks on the entire ancestor
+	// chain via LockKeyChain() to prevent concurrent sibling overspend.
+	for parentID != "" {
+		ancestor, err := m.store.Get(ctx, parentID)
+		if err != nil {
+			break
+		}
+
+		totalSpent, _ := usdc.Parse(ancestor.Usage.TotalSpent)
+		newTotal := new(big.Int).Add(totalSpent, amountBig)
+
+		// Validate ancestor budget before incrementing
+		if ancestor.Permission.MaxTotal != "" {
+			maxTotal, ok := usdc.Parse(ancestor.Permission.MaxTotal)
+			if ok && newTotal.Cmp(maxTotal) > 0 {
+				return ErrExceedsTotal
+			}
+		}
+
+		ancestor.Usage.TotalSpent = usdc.Format(newTotal)
+		ancestor.Usage.TransactionCount++
+
+		if err := m.store.Update(ctx, ancestor); err != nil {
+			break
+		}
+
+		parentID = ancestor.ParentKeyID
+	}
+
+	return nil
+}
+
+// ValidateAncestorChain verifies that all ancestor keys in the delegation chain
+// are still active and have sufficient budget for the given amount.
+// If amount is empty, only activity is checked (used during delegation creation).
+func (m *Manager) ValidateAncestorChain(ctx context.Context, key *SessionKey, amount ...string) error {
+	var amountBig *big.Int
+	if len(amount) > 0 && amount[0] != "" {
+		amountBig, _ = usdc.Parse(amount[0])
+	}
+
+	parentID := key.ParentKeyID
+	for parentID != "" {
+		ancestor, err := m.store.Get(ctx, parentID)
+		if err != nil {
+			return ErrAncestorInvalid
+		}
+		if !ancestor.IsActive() {
+			return ErrAncestorInvalid
+		}
+
+		// Check ancestor budget if amount provided
+		if amountBig != nil && ancestor.Permission.MaxTotal != "" {
+			maxTotal, ok := usdc.Parse(ancestor.Permission.MaxTotal)
+			if ok {
+				spent, _ := usdc.Parse(ancestor.Usage.TotalSpent)
+				newTotal := new(big.Int).Add(spent, amountBig)
+				if newTotal.Cmp(maxTotal) > 0 {
+					return ErrExceedsTotal
+				}
+			}
+		}
+
+		parentID = ancestor.ParentKeyID
+	}
+	return nil
 }
 
 // Validate checks if a transaction is allowed under a session key
@@ -231,7 +596,14 @@ func (m *Manager) ValidateSigned(ctx context.Context, keyID string, req *SignedT
 		}
 	}
 
-	// 4. Validate permissions
+	// 4. Validate ancestor chain for delegated keys (including ancestor budgets)
+	if key.ParentKeyID != "" {
+		if err := m.ValidateAncestorChain(ctx, key, req.Amount); err != nil {
+			return err
+		}
+	}
+
+	// 5. Validate permissions
 	return m.validateTransaction(ctx, key, req.To, req.Amount, req.ServiceID)
 }
 
@@ -397,6 +769,21 @@ func toLower(ss []string) []string {
 	result := make([]string, len(ss))
 	for i, s := range ss {
 		result[i] = strings.ToLower(s)
+	}
+	return result
+}
+
+// intersectStrings returns elements present in both slices (case-insensitive)
+func intersectStrings(a, b []string) []string {
+	set := make(map[string]bool, len(b))
+	for _, s := range b {
+		set[strings.ToLower(s)] = true
+	}
+	var result []string
+	for _, s := range a {
+		if set[strings.ToLower(s)] {
+			result = append(result, strings.ToLower(s))
+		}
 	}
 	return result
 }

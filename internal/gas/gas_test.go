@@ -79,6 +79,84 @@ func TestParseETH(t *testing.T) {
 	}
 }
 
+func TestParseETH_InvalidInputs(t *testing.T) {
+	tests := []string{
+		"",
+		"abc",
+		"1.2.3",
+		"hello world",
+		"--1",
+	}
+
+	for _, input := range tests {
+		result, err := parseETH(input)
+		if err == nil {
+			t.Errorf("parseETH(%q) should return error, got result %s", input, result.String())
+		}
+	}
+}
+
+func TestCheckAndRecordSpending(t *testing.T) {
+	cfg := PaymasterConfig{
+		DailyGasLimit: "0.01", // 0.01 ETH per day
+	}
+
+	p := &PlatformPaymaster{
+		config:     cfg,
+		dailySpent: big.NewInt(0),
+	}
+
+	// First call within limit should succeed
+	err := p.checkAndRecordSpending("0.003")
+	if err != nil {
+		t.Fatalf("First spending should succeed: %v", err)
+	}
+
+	// Second call still within limit
+	err = p.checkAndRecordSpending("0.003")
+	if err != nil {
+		t.Fatalf("Second spending should succeed: %v", err)
+	}
+
+	// Third call that exceeds limit should fail
+	err = p.checkAndRecordSpending("0.005")
+	if err != ErrDailyLimitExceeded {
+		t.Errorf("Expected ErrDailyLimitExceeded, got: %v", err)
+	}
+}
+
+func TestCheckAndRecordSpending_InvalidCost(t *testing.T) {
+	cfg := PaymasterConfig{
+		DailyGasLimit: "0.1",
+	}
+
+	p := &PlatformPaymaster{
+		config:     cfg,
+		dailySpent: big.NewInt(0),
+	}
+
+	err := p.checkAndRecordSpending("not_a_number")
+	if err == nil {
+		t.Error("Expected error for invalid gas cost")
+	}
+}
+
+func TestCheckAndRecordSpending_InvalidConfig(t *testing.T) {
+	cfg := PaymasterConfig{
+		DailyGasLimit: "garbage",
+	}
+
+	p := &PlatformPaymaster{
+		config:     cfg,
+		dailySpent: big.NewInt(0),
+	}
+
+	err := p.checkAndRecordSpending("0.001")
+	if err == nil {
+		t.Error("Expected error for invalid daily gas limit config")
+	}
+}
+
 func TestFormatETH(t *testing.T) {
 	tests := []struct {
 		wei      string

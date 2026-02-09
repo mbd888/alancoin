@@ -68,6 +68,21 @@ func (s *MemoryStore) GetByOwner(ctx context.Context, ownerAddr string) ([]*Sess
 	return result, nil
 }
 
+// GetByParent returns all session keys with the given parent key ID
+func (s *MemoryStore) GetByParent(ctx context.Context, parentKeyID string) ([]*SessionKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []*SessionKey
+	for _, key := range s.keys {
+		if key.ParentKeyID == parentKeyID {
+			keyCopy := *key
+			result = append(result, &keyCopy)
+		}
+	}
+	return result, nil
+}
+
 // Update updates an existing session key
 func (s *MemoryStore) Update(ctx context.Context, key *SessionKey) error {
 	s.mu.Lock()

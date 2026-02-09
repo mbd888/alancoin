@@ -28,8 +28,9 @@ func (p *PostgresStore) Create(ctx context.Context, key *SessionKey) error {
 			valid_after, expires_at,
 			allowed_recipients, allowed_service_types, allow_any, label,
 			transaction_count, total_spent, spent_today, last_used, last_reset_day, last_nonce,
-			revoked_at, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+			revoked_at, created_at,
+			parent_key_id, depth, root_key_id, delegation_label
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
 	`,
 		key.ID,
 		strings.ToLower(key.OwnerAddr),
@@ -51,6 +52,10 @@ func (p *PostgresStore) Create(ctx context.Context, key *SessionKey) error {
 		key.Usage.LastNonce,
 		nullTime(timePtr(key.RevokedAt)),
 		key.CreatedAt,
+		nullString(key.ParentKeyID),
+		key.Depth,
+		nullString(key.RootKeyID),
+		nullString(key.DelegationLabel),
 	)
 
 	if err != nil {
@@ -64,6 +69,7 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error)
 	var validAfter, lastUsed, revokedAt sql.NullTime
 	var maxPerTx, maxPerDay, maxTotal, label sql.NullString
 	var lastResetDay sql.NullString
+	var parentKeyID, rootKeyID, delegationLabel sql.NullString
 
 	err := p.db.QueryRowContext(ctx, `
 		SELECT
@@ -72,7 +78,8 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error)
 			valid_after, expires_at,
 			allowed_recipients, allowed_service_types, allow_any, label,
 			transaction_count, total_spent, spent_today, last_used, last_reset_day, COALESCE(last_nonce, 0),
-			revoked_at, created_at
+			revoked_at, created_at,
+			parent_key_id, COALESCE(depth, 0), root_key_id, delegation_label
 		FROM session_keys WHERE id = $1
 		AND revoked_at IS NULL AND expires_at > NOW()
 	`, id).Scan(
@@ -96,6 +103,10 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error)
 		&key.Usage.LastNonce,
 		&revokedAt,
 		&key.CreatedAt,
+		&parentKeyID,
+		&key.Depth,
+		&rootKeyID,
+		&delegationLabel,
 	)
 
 	if err == sql.ErrNoRows {
@@ -110,6 +121,9 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error)
 	key.Permission.MaxPerDay = maxPerDay.String
 	key.Permission.MaxTotal = maxTotal.String
 	key.Permission.Label = label.String
+	key.ParentKeyID = parentKeyID.String
+	key.RootKeyID = rootKeyID.String
+	key.DelegationLabel = delegationLabel.String
 	if validAfter.Valid {
 		key.Permission.ValidAfter = validAfter.Time
 	}
@@ -132,6 +146,30 @@ func (p *PostgresStore) GetByOwner(ctx context.Context, ownerAddr string) ([]*Se
 	`, strings.ToLower(ownerAddr))
 	if err != nil {
 		return nil, fmt.Errorf("failed to list session keys: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var keys []*SessionKey
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		key, err := p.Get(ctx, id)
+		if err == nil {
+			keys = append(keys, key)
+		}
+	}
+
+	return keys, nil
+}
+
+func (p *PostgresStore) GetByParent(ctx context.Context, parentKeyID string) ([]*SessionKey, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT id FROM session_keys WHERE parent_key_id = $1 ORDER BY created_at DESC
+	`, parentKeyID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list child keys: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 

@@ -198,6 +198,149 @@ func TestSessionKeyUsageTracking(t *testing.T) {
 	}
 }
 
+func TestSessionKeyNonceReplay(t *testing.T) {
+	store := NewMemoryStore()
+	mgr := NewManager(store, nil)
+	ctx := context.Background()
+
+	req := &SessionKeyRequest{
+		PublicKey: "0x1234567890123456789012345678901234567890",
+		ExpiresIn: "1h",
+		AllowAny:  true,
+	}
+	key, _ := mgr.Create(ctx, "0x1234", req)
+
+	// Record usage with nonce 5
+	err := mgr.RecordUsage(ctx, key.ID, "1.00", 5)
+	if err != nil {
+		t.Fatalf("RecordUsage failed: %v", err)
+	}
+
+	// Verify nonce stored
+	key, _ = mgr.Get(ctx, key.ID)
+	if key.Usage.LastNonce != 5 {
+		t.Errorf("Expected LastNonce 5, got %d", key.Usage.LastNonce)
+	}
+
+	// ValidateSigned with nonce <= LastNonce should be rejected
+	// (We test the nonce check in validateSigned logic — nonce 3 < 5)
+	signedReq := &SignedTransactRequest{
+		To:        "0xaaaa000000000000000000000000000000000000",
+		Amount:    "0.50",
+		Nonce:     3, // Replay — less than LastNonce of 5
+		Timestamp: time.Now().Unix(),
+		Signature: "dummy", // Will fail sig check, but nonce is checked after sig
+	}
+
+	err = mgr.ValidateSigned(ctx, key.ID, signedReq)
+	if err == nil {
+		t.Error("Expected error for replayed nonce")
+	}
+	// Should get signature error first (since we used a dummy sig),
+	// but nonce 5 (same as last) should also be rejected
+	signedReq.Nonce = 5
+	err = mgr.ValidateSigned(ctx, key.ID, signedReq)
+	if err == nil {
+		t.Error("Expected error for nonce == LastNonce")
+	}
+}
+
+func TestSessionKeySpendingLimitValidation(t *testing.T) {
+	store := NewMemoryStore()
+	mgr := NewManager(store, nil)
+	ctx := context.Background()
+
+	// Malformed maxPerTransaction should be rejected at creation time
+	badReqs := []struct {
+		name string
+		req  SessionKeyRequest
+	}{
+		{
+			name: "non-numeric maxPerTransaction",
+			req: SessionKeyRequest{
+				PublicKey:         "0x1234567890123456789012345678901234567890",
+				MaxPerTransaction: "abc",
+				ExpiresIn:         "1h",
+				AllowAny:          true,
+			},
+		},
+		{
+			name: "zero maxPerDay",
+			req: SessionKeyRequest{
+				PublicKey: "0x1234567890123456789012345678901234567890",
+				MaxPerDay: "0",
+				ExpiresIn: "1h",
+				AllowAny:  true,
+			},
+		},
+		{
+			name: "negative maxTotal",
+			req: SessionKeyRequest{
+				PublicKey: "0x1234567890123456789012345678901234567890",
+				MaxTotal:  "-5.00",
+				ExpiresIn: "1h",
+				AllowAny:  true,
+			},
+		},
+	}
+
+	for _, tc := range badReqs {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := mgr.Create(ctx, "0x1234", &tc.req)
+			if err == nil {
+				t.Errorf("Expected error for %s, got nil", tc.name)
+			}
+		})
+	}
+
+	// Valid limits should work
+	goodReq := &SessionKeyRequest{
+		PublicKey:         "0x1234567890123456789012345678901234567890",
+		MaxPerTransaction: "1.50",
+		MaxPerDay:         "10.00",
+		MaxTotal:          "100.00",
+		ExpiresIn:         "1h",
+		AllowAny:          true,
+	}
+	key, err := mgr.Create(ctx, "0x1234", goodReq)
+	if err != nil {
+		t.Fatalf("Valid spending limits should be accepted: %v", err)
+	}
+	if key.Permission.MaxPerTransaction != "1.50" {
+		t.Errorf("Expected MaxPerTransaction 1.50, got %s", key.Permission.MaxPerTransaction)
+	}
+}
+
+func TestSessionKeyTotalSpendLimit(t *testing.T) {
+	store := NewMemoryStore()
+	mgr := NewManager(store, nil)
+	ctx := context.Background()
+
+	req := &SessionKeyRequest{
+		PublicKey: "0x1234567890123456789012345678901234567890",
+		MaxTotal:  "5.00",
+		ExpiresIn: "1h",
+		AllowAny:  true,
+	}
+	key, _ := mgr.Create(ctx, "0x1234", req)
+
+	// Spend up to limit
+	mgr.RecordUsage(ctx, key.ID, "3.00", 1)
+	mgr.RecordUsage(ctx, key.ID, "1.50", 2)
+
+	// Spending $1.00 more would exceed $5 total
+	err := mgr.Validate(ctx, key.ID, "0xaaaa", "1.00", "")
+	if err != ErrExceedsTotal {
+		t.Errorf("Expected ErrExceedsTotal, got: %v", err)
+	}
+
+	// But $0.50 should still fit
+	err = mgr.Validate(ctx, key.ID, "0xaaaa", "0.50", "")
+	if err != nil {
+		t.Errorf("$0.50 should fit within remaining total, got: %v", err)
+	}
+}
+
 func TestParseUSDC(t *testing.T) {
 	tests := []struct {
 		input    string

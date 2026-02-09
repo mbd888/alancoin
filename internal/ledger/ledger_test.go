@@ -930,6 +930,153 @@ func TestLedger_EscrowAndSpendCombined(t *testing.T) {
 	assertFundConservation(t, bal, "after combined operations")
 }
 
+// ---------------------------------------------------------------------------
+// Hold + Credit draw tracking
+// ---------------------------------------------------------------------------
+
+func TestLedger_HoldWithCreditDraw(t *testing.T) {
+	// When available < hold amount, the gap is drawn from credit.
+	// ReleaseHold must reverse the credit draw, not return the full amount to available.
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	agent := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	// Setup: $3 available + $10 credit line
+	l.Deposit(ctx, agent, "3.00", "0xtx1")
+	store.SetCreditLimit(ctx, agent, "10.00")
+
+	// Hold $5 — should take $3 from available, $2 from credit
+	err := l.Hold(ctx, agent, "5.00", "hold_credit")
+	if err != nil {
+		t.Fatalf("Hold with credit failed: %v", err)
+	}
+
+	bal, _ := l.GetBalance(ctx, agent)
+	if bal.Available != "0.000000" {
+		t.Errorf("Expected available 0.000000, got %s", bal.Available)
+	}
+	if bal.Pending != "5.000000" {
+		t.Errorf("Expected pending 5.000000, got %s", bal.Pending)
+	}
+	if bal.CreditUsed != "2.000000" {
+		t.Errorf("Expected creditUsed 2.000000, got %s", bal.CreditUsed)
+	}
+
+	// Release the hold — credit draw of $2 must be reversed
+	err = l.ReleaseHold(ctx, agent, "5.00", "hold_credit")
+	if err != nil {
+		t.Fatalf("ReleaseHold failed: %v", err)
+	}
+
+	bal, _ = l.GetBalance(ctx, agent)
+	if bal.Available != "3.000000" {
+		t.Errorf("After release: expected available 3.000000, got %s", bal.Available)
+	}
+	if bal.Pending != "0.000000" {
+		t.Errorf("After release: expected pending 0.000000, got %s", bal.Pending)
+	}
+	if bal.CreditUsed != "0.000000" {
+		t.Errorf("After release: expected creditUsed 0.000000, got %s", bal.CreditUsed)
+	}
+	assertFundConservation(t, bal, "after release with credit reversal")
+}
+
+func TestLedger_ConfirmHoldCleansUpCreditTracking(t *testing.T) {
+	// ConfirmHold should clean up the credit draw tracking entry.
+	// A subsequent ReleaseHold with the same ref should not crash.
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	agent := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	l.Deposit(ctx, agent, "2.00", "0xtx1")
+	store.SetCreditLimit(ctx, agent, "10.00")
+
+	// Hold $5 ($2 avail, $3 credit)
+	l.Hold(ctx, agent, "5.00", "hold_confirm")
+	bal, _ := l.GetBalance(ctx, agent)
+	if bal.CreditUsed != "3.000000" {
+		t.Fatalf("Expected creditUsed 3.000000, got %s", bal.CreditUsed)
+	}
+
+	// Confirm — credit stays used, tracking cleaned up
+	err := l.ConfirmHold(ctx, agent, "5.00", "hold_confirm")
+	if err != nil {
+		t.Fatalf("ConfirmHold failed: %v", err)
+	}
+
+	bal, _ = l.GetBalance(ctx, agent)
+	if bal.CreditUsed != "3.000000" {
+		t.Errorf("CreditUsed should remain 3.000000 after confirm, got %s", bal.CreditUsed)
+	}
+	if bal.TotalOut != "5.000000" {
+		t.Errorf("TotalOut should be 5.000000, got %s", bal.TotalOut)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Refund edge cases
+// ---------------------------------------------------------------------------
+
+func TestLedger_RefundTotalOutUnderflow(t *testing.T) {
+	// Refund should not make TotalOut negative.
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	agent := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	// Deposit $10, spend $2, then refund $5 (more than totalOut)
+	l.Deposit(ctx, agent, "10.00", "0xtx1")
+	l.Spend(ctx, agent, "2.00", "sk_1")
+
+	// TotalOut is now 2.00
+	bal, _ := l.GetBalance(ctx, agent)
+	if bal.TotalOut != "2.000000" {
+		t.Fatalf("Expected TotalOut 2.000000, got %s", bal.TotalOut)
+	}
+
+	// Refund $5 — should cap totalOut reduction at 2, not go negative
+	err := l.Refund(ctx, agent, "5.00", "ref_overflow")
+	if err != nil {
+		t.Fatalf("Refund failed: %v", err)
+	}
+
+	bal, _ = l.GetBalance(ctx, agent)
+	totalOut, _ := usdc.Parse(bal.TotalOut)
+	if totalOut.Sign() < 0 {
+		t.Errorf("TotalOut should not be negative, got %s", bal.TotalOut)
+	}
+}
+
+func TestLedger_RefundIdempotent(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+	agent := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	l.Deposit(ctx, agent, "10.00", "0xtx1")
+	l.Spend(ctx, agent, "3.00", "sk_1")
+
+	// First refund should succeed
+	err := l.Refund(ctx, agent, "3.00", "ref_dup")
+	if err != nil {
+		t.Fatalf("First refund failed: %v", err)
+	}
+
+	// Second refund with same reference should fail
+	err = l.Refund(ctx, agent, "3.00", "ref_dup")
+	if err != ErrDuplicateRefund {
+		t.Errorf("Expected ErrDuplicateRefund, got: %v", err)
+	}
+
+	// Balance should only reflect one refund
+	bal, _ := l.GetBalance(ctx, agent)
+	if bal.Available != "10.000000" {
+		t.Errorf("Expected available 10.000000 after one refund, got %s", bal.Available)
+	}
+}
+
 func TestParseUSDC(t *testing.T) {
 	tests := []struct {
 		input    string

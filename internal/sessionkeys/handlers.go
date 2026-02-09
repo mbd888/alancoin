@@ -2,9 +2,11 @@ package sessionkeys
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
@@ -35,6 +37,7 @@ type BalanceService interface {
 	CanSpend(ctx context.Context, agentAddr, amount string) (bool, error)
 	Spend(ctx context.Context, agentAddr, amount, reference string) error
 	Refund(ctx context.Context, agentAddr, amount, reference string) error
+	Deposit(ctx context.Context, agentAddr, amount, reference string) error
 
 	// Two-phase hold operations for safe transaction execution.
 	// Hold moves funds from available → pending before on-chain transfer.
@@ -58,6 +61,7 @@ type Handler struct {
 	recorder TransactionRecorder // For recording txs (optional)
 	balance  BalanceService      // For checking/debiting balances (optional)
 	events   EventEmitter        // For broadcasting events (optional)
+	demoMode bool                // Skip on-chain transfers, use ledger only
 }
 
 // NewHandler creates a new session key handler
@@ -78,6 +82,12 @@ func NewHandlerWithExecution(manager *Manager, wallet WalletService, recorder Tr
 // WithEvents adds an event emitter to the handler
 func (h *Handler) WithEvents(events EventEmitter) *Handler {
 	h.events = events
+	return h
+}
+
+// WithDemoMode enables demo mode: balance holds work but on-chain transfers are skipped.
+func (h *Handler) WithDemoMode() *Handler {
+	h.demoMode = true
 	return h
 }
 
@@ -286,10 +296,15 @@ func (h *Handler) Transact(c *gin.Context) {
 		return
 	}
 
-	// Acquire per-key lock to prevent nonce TOCTOU replay attacks.
-	// The lock serializes validate → transfer → record for the same session key,
-	// so a concurrent request cannot reuse the same nonce between validation and recording.
-	unlockKey := h.manager.LockKey(keyID)
+	// Acquire per-key lock(s) to prevent nonce TOCTOU replay attacks.
+	// For delegated keys, lock the entire ancestor chain to prevent concurrent
+	// sibling transactions from exceeding the parent budget.
+	var unlockKey func()
+	if key.ParentKeyID != "" {
+		unlockKey = h.manager.LockKeyChain(c.Request.Context(), keyID)
+	} else {
+		unlockKey = h.manager.LockKey(keyID)
+	}
 	defer unlockKey()
 
 	// Validate the signed transaction (signature + permissions)
@@ -337,26 +352,37 @@ func (h *Handler) Transact(c *gin.Context) {
 			}
 		}
 
-		// Execute on-chain transfer
-		result, err := h.wallet.Transfer(c.Request.Context(), common.HexToAddress(req.To), amountBig)
-		if err != nil {
-			// Release the hold since transfer failed
-			if h.balance != nil {
-				_ = h.balance.ReleaseHold(c.Request.Context(), address, req.Amount, keyID)
-			}
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":   "transfer_failed",
-				"message": "On-chain transfer failed",
-			})
-			return
-		}
-
-		txHash = result.TxHash
-		executed = true
-
-		// Phase 2: Confirm hold (pending → total_out)
-		if h.balance != nil {
+		if h.demoMode && h.balance != nil {
+			// Demo mode: skip on-chain transfer, use synthetic tx hash.
+			// Ledger hold was already placed above, just confirm it.
+			txHash = fmt.Sprintf("0x%016x%016x", time.Now().UnixNano(), time.Now().UnixNano()^0xdeadbeef)
+			executed = true
 			_ = h.balance.ConfirmHold(c.Request.Context(), address, req.Amount, keyID)
+
+			// Credit the recipient in the ledger (deposit, not refund)
+			_ = h.balance.Deposit(c.Request.Context(), req.To, req.Amount, txHash)
+		} else {
+			// Production: execute on-chain transfer
+			result, err := h.wallet.Transfer(c.Request.Context(), common.HexToAddress(req.To), amountBig)
+			if err != nil {
+				// Release the hold since transfer failed
+				if h.balance != nil {
+					_ = h.balance.ReleaseHold(c.Request.Context(), address, req.Amount, keyID)
+				}
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error":   "transfer_failed",
+					"message": "On-chain transfer failed",
+				})
+				return
+			}
+
+			txHash = result.TxHash
+			executed = true
+
+			// Phase 2: Confirm hold (pending → total_out)
+			if h.balance != nil {
+				_ = h.balance.ConfirmHold(c.Request.Context(), address, req.Amount, keyID)
+			}
 		}
 
 		// Record in registry if available
@@ -367,12 +393,24 @@ func (h *Handler) Transact(c *gin.Context) {
 
 	// Record usage AFTER successful transfer (or in dry-run mode).
 	// Recording before transfer would permanently consume budget on transfer failure.
-	if err := h.manager.RecordUsage(c.Request.Context(), keyID, req.Amount, req.Nonce); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "usage_tracking_failed",
-			"message": "Failed to record usage",
-		})
-		return
+	// For delegated keys, cascade the spend up to all ancestors.
+	var usageErr error
+	if key.ParentKeyID != "" {
+		usageErr = h.manager.RecordUsageWithCascade(c.Request.Context(), keyID, req.Amount, req.Nonce)
+	} else {
+		usageErr = h.manager.RecordUsage(c.Request.Context(), keyID, req.Amount, req.Nonce)
+	}
+	if usageErr != nil {
+		if !executed {
+			// No transfer happened, safe to fail
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "usage_tracking_failed",
+				"message": "Failed to record usage",
+			})
+			return
+		}
+		// Transfer already executed -- log the error but still return success
+		// to avoid client retries that would double-spend
 	}
 
 	// Reload key to get updated usage
@@ -415,6 +453,16 @@ func (h *Handler) Transact(c *gin.Context) {
 		},
 	}
 
+	// Add delegation info if this is a delegated key
+	if key.ParentKeyID != "" {
+		response["delegation"] = gin.H{
+			"parentKeyId": key.ParentKeyID,
+			"rootKeyId":   key.RootKeyID,
+			"depth":       key.Depth,
+			"label":       key.DelegationLabel,
+		}
+	}
+
 	if executed {
 		response["status"] = "executed"
 		response["message"] = "Transaction executed on-chain"
@@ -422,7 +470,7 @@ func (h *Handler) Transact(c *gin.Context) {
 
 		// Emit real-time event
 		if h.events != nil {
-			h.events.EmitTransaction(map[string]interface{}{
+			eventData := map[string]interface{}{
 				"txHash":      txHash,
 				"from":        address,
 				"to":          req.To,
@@ -430,7 +478,15 @@ func (h *Handler) Transact(c *gin.Context) {
 				"serviceType": req.ServiceID,
 				"sessionKey":  keyID,
 				"status":      "executed",
-			})
+			}
+			if key.ParentKeyID != "" {
+				eventData["delegation"] = map[string]interface{}{
+					"parentKeyId": key.ParentKeyID,
+					"rootKeyId":   key.RootKeyID,
+					"depth":       key.Depth,
+				}
+			}
+			h.events.EmitTransaction(eventData)
 			h.events.EmitSessionKeyUsed(keyID, address, req.Amount)
 		}
 	} else {
@@ -438,6 +494,137 @@ func (h *Handler) Transact(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// CreateDelegation handles POST /v1/sessions/:keyId/delegate
+// Creates a child session key delegated from the parent key.
+// Authentication is via ECDSA signature from the parent key (no API key needed).
+func (h *Handler) CreateDelegation(c *gin.Context) {
+	parentKeyID := c.Param("keyId")
+
+	var req DelegateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "Invalid request body",
+			"hint":    "Required: publicKey, maxTotal, nonce, timestamp, signature",
+		})
+		return
+	}
+
+	// Lock the parent key to prevent concurrent delegation/transactions
+	unlockKey := h.manager.LockKey(parentKeyID)
+	defer unlockKey()
+
+	childKey, err := h.manager.CreateDelegated(c.Request.Context(), parentKeyID, &req)
+	if err != nil {
+		if ve, ok := err.(*ValidationError); ok {
+			status := http.StatusBadRequest
+			if ve.Code == "parent_not_active" || ve.Code == "ancestor_invalid" {
+				status = http.StatusForbidden
+			}
+			c.JSON(status, gin.H{
+				"error":   ve.Code,
+				"message": ve.Message,
+			})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "delegation_failed",
+			"message": "Failed to create delegated key",
+		})
+		return
+	}
+
+	// Emit real-time event
+	if h.events != nil {
+		h.events.EmitTransaction(map[string]interface{}{
+			"event":       "delegation_created",
+			"parentKeyId": parentKeyID,
+			"childKeyId":  childKey.ID,
+			"depth":       childKey.Depth,
+			"maxTotal":    req.MaxTotal,
+			"label":       req.DelegationLabel,
+		})
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"childKey": childKey,
+		"delegation": gin.H{
+			"parentKeyId": parentKeyID,
+			"depth":       childKey.Depth,
+			"rootKeyId":   childKey.RootKeyID,
+			"label":       childKey.DelegationLabel,
+		},
+	})
+}
+
+// DelegationTreeNode represents a node in the delegation tree response
+type DelegationTreeNode struct {
+	KeyID            string                `json:"keyId"`
+	PublicKey        string                `json:"publicKey"`
+	Label            string                `json:"label,omitempty"`
+	Depth            int                   `json:"depth"`
+	MaxTotal         string                `json:"maxTotal,omitempty"`
+	TotalSpent       string                `json:"totalSpent"`
+	Remaining        string                `json:"remaining"`
+	TransactionCount int                   `json:"transactionCount"`
+	Active           bool                  `json:"active"`
+	Children         []*DelegationTreeNode `json:"children,omitempty"`
+}
+
+// GetDelegationTree handles GET /v1/sessions/:keyId/tree
+// Returns the full delegation tree rooted at the given key.
+func (h *Handler) GetDelegationTree(c *gin.Context) {
+	keyID := c.Param("keyId")
+
+	key, err := h.manager.Get(c.Request.Context(), keyID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "not_found",
+			"message": "Session key not found",
+		})
+		return
+	}
+
+	tree := h.buildTreeNode(c.Request.Context(), key, MaxDelegationDepth+2)
+
+	c.JSON(http.StatusOK, gin.H{
+		"tree":      tree,
+		"rootKeyId": key.RootKeyID,
+		"ownerAddr": key.OwnerAddr,
+	})
+}
+
+func (h *Handler) buildTreeNode(ctx context.Context, key *SessionKey, maxDepth int) *DelegationTreeNode {
+	node := &DelegationTreeNode{
+		KeyID:            key.ID,
+		PublicKey:        key.PublicKey,
+		Label:            key.DelegationLabel,
+		Depth:            key.Depth,
+		MaxTotal:         key.Permission.MaxTotal,
+		TotalSpent:       key.Usage.TotalSpent,
+		Remaining:        calculateRemaining(key.Permission.MaxTotal, key.Usage.TotalSpent),
+		TransactionCount: key.Usage.TransactionCount,
+		Active:           key.IsActive(),
+	}
+
+	// Depth guard prevents stack overflow from cyclic data
+	if maxDepth <= 0 {
+		return node
+	}
+
+	children, err := h.manager.store.GetByParent(ctx, key.ID)
+	if err != nil || len(children) == 0 {
+		return node
+	}
+
+	node.Children = make([]*DelegationTreeNode, 0, len(children))
+	for _, child := range children {
+		node.Children = append(node.Children, h.buildTreeNode(ctx, child, maxDepth-1))
+	}
+
+	return node
 }
 
 func calculateRemaining(limit string, spent string) string {

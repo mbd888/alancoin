@@ -700,6 +700,108 @@ class Alancoin:
         )
 
     # -------------------------------------------------------------------------
+    # Delegation (A2A)
+    # -------------------------------------------------------------------------
+
+    def create_child_session_key(
+        self,
+        parent_key_id: str,
+        public_key: str,
+        max_total: str,
+        nonce: int,
+        timestamp: int,
+        signature: str,
+        max_per_transaction: str = None,
+        max_per_day: str = None,
+        expires_in: str = None,
+        allowed_recipients: list = None,
+        allowed_service_types: list = None,
+        allow_any: bool = False,
+        delegation_label: str = None,
+    ) -> dict:
+        """
+        Create a child session key delegated from a parent key.
+
+        The child key's budget is a strict subset of the parent's remaining
+        budget. Spending cascades upward -- when the child spends, all
+        ancestor budgets are decremented.
+
+        Authentication is via ECDSA signature from the parent key.
+
+        Args:
+            parent_key_id: The parent session key ID
+            public_key: Child key's Ethereum address
+            max_total: Maximum total budget for child
+            nonce: Unique nonce (must be > parent's last nonce)
+            timestamp: Unix timestamp (within 5 min)
+            signature: ECDSA signature from parent key
+            max_per_transaction: Per-tx limit (must be <= parent's)
+            max_per_day: Daily limit
+            expires_in: Duration (cannot exceed parent's expiry)
+            allowed_recipients: Subset of parent's allowed recipients
+            allowed_service_types: Subset of parent's service types
+            allow_any: Only works if parent also allows any
+            delegation_label: What task was delegated
+
+        Returns:
+            Child session key with delegation info
+
+        Example:
+            from alancoin.session_keys import SessionKeyManager
+
+            parent_skm = SessionKeyManager(private_key=parent_private_key)
+            child_skm = SessionKeyManager()
+
+            signed = parent_skm.sign_delegation(child_skm.public_key, "2.00")
+            child_key = client.create_child_session_key(
+                parent_key_id=parent_key_id,
+                delegation_label="translate summary",
+                **signed,
+            )
+        """
+        payload = {
+            "publicKey": public_key,
+            "maxTotal": max_total,
+            "nonce": nonce,
+            "timestamp": timestamp,
+            "signature": signature,
+            "allowAny": allow_any,
+        }
+        if max_per_transaction:
+            payload["maxPerTransaction"] = max_per_transaction
+        if max_per_day:
+            payload["maxPerDay"] = max_per_day
+        if expires_in:
+            payload["expiresIn"] = expires_in
+        if allowed_recipients:
+            payload["allowedRecipients"] = allowed_recipients
+        if allowed_service_types:
+            payload["allowedServiceTypes"] = allowed_service_types
+        if delegation_label:
+            payload["delegationLabel"] = delegation_label
+
+        return self._request(
+            "POST",
+            f"/v1/sessions/{parent_key_id}/delegate",
+            json=payload,
+        )
+
+    def get_delegation_tree(self, key_id: str) -> dict:
+        """
+        Get the delegation tree rooted at a session key.
+
+        Returns a nested tree structure showing each key's ID, label,
+        depth, budget, spent, and children.
+
+        Args:
+            key_id: The session key ID to get the tree for
+
+        Returns:
+            Delegation tree with nested children
+        """
+        return self._request("GET", f"/v1/sessions/{key_id}/tree")
+
+    # -------------------------------------------------------------------------
     # Gas Abstraction
     # -------------------------------------------------------------------------
 
