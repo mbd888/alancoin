@@ -139,7 +139,7 @@ func TestClient_Get_NoPay(t *testing.T) {
 	// Create a server that returns 200
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"message":"success"}`))
+		w.Write([]byte(`{"message":"success"}`))
 	}))
 	defer server.Close()
 
@@ -151,7 +151,7 @@ func TestClient_Get_NoPay(t *testing.T) {
 
 	resp, err := client.Get(server.URL)
 	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
@@ -160,7 +160,7 @@ func TestClient_Get_402_NoPay(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Payment-Required", "true")
 		w.WriteHeader(http.StatusPaymentRequired)
-		_, _ = w.Write([]byte(`{"price":"0.001","currency":"USDC","chain":"base-sepolia","chainId":84532,"recipient":"0x123"}`))
+		w.Write([]byte(`{"price":"0.001","currency":"USDC","chain":"base-sepolia","chainId":84532,"recipient":"0x123"}`))
 	}))
 	defer server.Close()
 
@@ -172,7 +172,7 @@ func TestClient_Get_402_NoPay(t *testing.T) {
 
 	resp, err := client.Get(server.URL)
 	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 	assert.Equal(t, http.StatusPaymentRequired, resp.StatusCode)
 }
 
@@ -186,6 +186,6 @@ func BenchmarkParsePaymentRequirement(b *testing.B) {
 			StatusCode: http.StatusPaymentRequired,
 			Body:       io.NopCloser(bytes.NewBufferString(body)),
 		}
-		_, _ = ParsePaymentRequirement(resp)
+		ParsePaymentRequirement(resp)
 	}
 }

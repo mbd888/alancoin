@@ -114,7 +114,7 @@ func TestLedger_CanSpend(t *testing.T) {
 	agent := "0x1234567890123456789012345678901234567890"
 
 	// Deposit
-	_ = ledger.Deposit(ctx, agent, "10.00", "0xtx1")
+	ledger.Deposit(ctx, agent, "10.00", "0xtx1")
 
 	// Can spend less than balance
 	canSpend, err := ledger.CanSpend(ctx, agent, "5.00")
