@@ -1458,6 +1458,193 @@ class Alancoin:
         return self._request("GET", "/v1/credit/active", params={"limit": limit})
 
     # -------------------------------------------------------------------------
+    # Contracts (Service Agreements with SLA Enforcement)
+    # -------------------------------------------------------------------------
+
+    def propose_contract(
+        self,
+        buyer_addr: str,
+        seller_addr: str,
+        service_type: str,
+        price_per_call: str,
+        buyer_budget: str,
+        duration: str,
+        min_volume: int = 1,
+        seller_penalty: str = "0",
+        max_latency_ms: int = 10000,
+        min_success_rate: float = 95.0,
+        sla_window_size: int = 20,
+    ) -> dict:
+        """
+        Propose a service contract with SLA terms.
+
+        Creates a time-bounded agreement with measurable SLAs. The seller
+        must accept before funds are locked.
+
+        Args:
+            buyer_addr: Buyer's wallet address
+            seller_addr: Seller's wallet address
+            service_type: Type of service (e.g., "translation")
+            price_per_call: Price per service call in USDC (e.g., "0.005")
+            buyer_budget: Total budget for the contract (e.g., "1.00")
+            duration: Contract duration (e.g., "7d", "24h")
+            min_volume: Minimum number of calls required
+            seller_penalty: Amount seller stakes as penalty (e.g., "0.10")
+            max_latency_ms: Maximum allowed latency per call
+            min_success_rate: Minimum success rate percentage (0-100)
+            sla_window_size: Number of recent calls for SLA window
+
+        Returns:
+            Created contract with status 'proposed'
+        """
+        payload = {
+            "buyerAddr": buyer_addr,
+            "sellerAddr": seller_addr,
+            "serviceType": service_type,
+            "pricePerCall": price_per_call,
+            "buyerBudget": buyer_budget,
+            "duration": duration,
+            "minVolume": min_volume,
+            "sellerPenalty": seller_penalty,
+            "maxLatencyMs": max_latency_ms,
+            "minSuccessRate": min_success_rate,
+            "slaWindowSize": sla_window_size,
+        }
+        return self._request("POST", "/v1/contracts", json=payload)
+
+    def get_contract(self, contract_id: str) -> dict:
+        """
+        Get a contract by ID.
+
+        Args:
+            contract_id: The contract ID
+
+        Returns:
+            Contract details including status, SLA terms, and tracking stats
+        """
+        return self._request("GET", f"/v1/contracts/{contract_id}")
+
+    def accept_contract(self, contract_id: str) -> dict:
+        """
+        Accept a proposed contract (seller action).
+
+        Locks buyer budget and seller penalty in escrow. Contract becomes active.
+
+        Args:
+            contract_id: The contract ID to accept
+
+        Returns:
+            Updated contract with status 'active'
+        """
+        return self._request("POST", f"/v1/contracts/{contract_id}/accept")
+
+    def reject_contract(self, contract_id: str) -> dict:
+        """
+        Reject a proposed contract (seller action).
+
+        No funds are moved.
+
+        Args:
+            contract_id: The contract ID to reject
+
+        Returns:
+            Updated contract with status 'rejected'
+        """
+        return self._request("POST", f"/v1/contracts/{contract_id}/reject")
+
+    def record_contract_call(
+        self,
+        contract_id: str,
+        status: str,
+        latency_ms: int = 0,
+        error_message: str = "",
+    ) -> dict:
+        """
+        Record a service call result within a contract.
+
+        On success, payment is micro-released to the seller. If the rolling
+        window success rate drops below the SLA threshold, the contract is
+        violated and the seller penalty is transferred to the buyer.
+
+        Args:
+            contract_id: The contract ID
+            status: Call result - "success" or "failed"
+            latency_ms: Call latency in milliseconds
+            error_message: Error message for failed calls
+
+        Returns:
+            Updated contract with new tracking stats
+        """
+        payload = {"status": status, "latencyMs": latency_ms}
+        if error_message:
+            payload["errorMessage"] = error_message
+        return self._request(
+            "POST",
+            f"/v1/contracts/{contract_id}/call",
+            json=payload,
+        )
+
+    def terminate_contract(self, contract_id: str, reason: str) -> dict:
+        """
+        Terminate a contract early.
+
+        If buyer terminates: remaining budget goes to seller, seller penalty returned.
+        If seller terminates: seller penalty forfeited to buyer, remaining budget refunded.
+
+        Args:
+            contract_id: The contract ID to terminate
+            reason: Reason for termination
+
+        Returns:
+            Updated contract with status 'terminated'
+        """
+        return self._request(
+            "POST",
+            f"/v1/contracts/{contract_id}/terminate",
+            json={"reason": reason},
+        )
+
+    def list_contracts(
+        self, agent_address: str, status: str = "", limit: int = 50
+    ) -> dict:
+        """
+        List contracts involving an agent.
+
+        Args:
+            agent_address: The agent's address
+            status: Filter by status (e.g., "active", "completed")
+            limit: Maximum contracts to return
+
+        Returns:
+            List of contracts
+        """
+        params = {"limit": limit}
+        if status:
+            params["status"] = status
+        return self._request(
+            "GET",
+            f"/v1/agents/{agent_address}/contracts",
+            params=params,
+        )
+
+    def list_contract_calls(self, contract_id: str, limit: int = 50) -> dict:
+        """
+        List calls within a contract.
+
+        Args:
+            contract_id: The contract ID
+            limit: Maximum calls to return
+
+        Returns:
+            List of contract calls
+        """
+        return self._request(
+            "GET",
+            f"/v1/contracts/{contract_id}/calls",
+            params={"limit": limit},
+        )
+
+    # -------------------------------------------------------------------------
     # AI-Powered Search
     # -------------------------------------------------------------------------
 

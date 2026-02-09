@@ -249,3 +249,119 @@ class CreditEvaluation:
             reputation_tier=data.get("reputationTier", ""),
             reason=data.get("reason", ""),
         )
+
+
+@dataclass
+class SLATerms:
+    """SLA terms for a service contract."""
+
+    max_latency_ms: int = 10000
+    min_success_rate: float = 95.0
+    window_size: int = 20
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SLATerms":
+        return cls(
+            max_latency_ms=data.get("maxLatencyMs", 10000),
+            min_success_rate=data.get("minSuccessRate", 95.0),
+            window_size=data.get("slaWindowSize", 20),
+        )
+
+
+@dataclass
+class Contract:
+    """A time-bounded service agreement between two agents."""
+
+    id: str
+    buyer_addr: str
+    seller_addr: str
+    service_type: str
+    price_per_call: str
+    buyer_budget: str
+    status: str
+    duration: str
+    min_volume: int = 1
+    seller_penalty: str = "0"
+    max_latency_ms: int = 10000
+    min_success_rate: float = 95.0
+    sla_window_size: int = 20
+    starts_at: Optional[str] = None
+    expires_at: Optional[str] = None
+    total_calls: int = 0
+    successful_calls: int = 0
+    failed_calls: int = 0
+    total_latency_ms: int = 0
+    budget_spent: str = "0"
+    terminated_by: Optional[str] = None
+    terminated_reason: Optional[str] = None
+    violation_details: Optional[str] = None
+    resolved_at: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    @property
+    def budget_remaining(self) -> str:
+        from decimal import Decimal
+        return str(Decimal(self.buyer_budget) - Decimal(self.budget_spent))
+
+    @property
+    def current_success_rate(self) -> float:
+        if self.total_calls == 0:
+            return 100.0
+        return self.successful_calls / self.total_calls * 100.0
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Contract":
+        return cls(
+            id=data.get("id", ""),
+            buyer_addr=data.get("buyerAddr", ""),
+            seller_addr=data.get("sellerAddr", ""),
+            service_type=data.get("serviceType", ""),
+            price_per_call=data.get("pricePerCall", "0"),
+            buyer_budget=data.get("buyerBudget", "0"),
+            status=data.get("status", ""),
+            duration=data.get("duration", ""),
+            min_volume=data.get("minVolume", 1),
+            seller_penalty=data.get("sellerPenalty", "0"),
+            max_latency_ms=data.get("maxLatencyMs", 10000),
+            min_success_rate=data.get("minSuccessRate", 95.0),
+            sla_window_size=data.get("slaWindowSize", 20),
+            starts_at=data.get("startsAt"),
+            expires_at=data.get("expiresAt"),
+            total_calls=data.get("totalCalls", 0),
+            successful_calls=data.get("successfulCalls", 0),
+            failed_calls=data.get("failedCalls", 0),
+            total_latency_ms=data.get("totalLatencyMs", 0),
+            budget_spent=data.get("budgetSpent", "0"),
+            terminated_by=data.get("terminatedBy"),
+            terminated_reason=data.get("terminatedReason"),
+            violation_details=data.get("violationDetails"),
+            resolved_at=data.get("resolvedAt"),
+            created_at=data.get("createdAt"),
+            updated_at=data.get("updatedAt"),
+        )
+
+
+@dataclass
+class ContractCall:
+    """An individual service call within a contract."""
+
+    id: str
+    contract_id: str
+    status: str
+    amount: str
+    latency_ms: int = 0
+    error_message: Optional[str] = None
+    created_at: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ContractCall":
+        return cls(
+            id=data.get("id", ""),
+            contract_id=data.get("contractId", ""),
+            status=data.get("status", ""),
+            amount=data.get("amount", "0"),
+            latency_ms=data.get("latencyMs", 0),
+            error_message=data.get("errorMessage"),
+            created_at=data.get("createdAt"),
+        )

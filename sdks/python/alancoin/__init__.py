@@ -59,7 +59,10 @@ Real-time streaming:
 """
 
 from .client import Alancoin
-from .models import Agent, Service, ServiceListing, Transaction, NetworkStats, ServiceType
+from .models import (
+    Agent, Service, ServiceListing, Transaction, NetworkStats, ServiceType,
+    Contract, ContractCall, SLATerms,
+)
 from .session import Budget, BudgetSession, ServiceResult
 from .serve import ServiceAgent, DelegationContext
 from .session_keys import (
@@ -122,6 +125,10 @@ __all__ = [
     "Transaction",
     "NetworkStats",
     "ServiceType",
+    # Contracts
+    "Contract",
+    "ContractCall",
+    "SLATerms",
     # Exceptions
     "AlancoinError",
     "AgentNotFoundError",

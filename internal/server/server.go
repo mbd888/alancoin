@@ -24,6 +24,7 @@ import (
 	"github.com/mbd888/alancoin/internal/auth"
 	"github.com/mbd888/alancoin/internal/commentary"
 	"github.com/mbd888/alancoin/internal/config"
+	"github.com/mbd888/alancoin/internal/contracts"
 	"github.com/mbd888/alancoin/internal/credit"
 	"github.com/mbd888/alancoin/internal/discovery"
 	"github.com/mbd888/alancoin/internal/escrow"
@@ -51,28 +52,30 @@ import (
 
 // Server wraps the HTTP server and dependencies
 type Server struct {
-	cfg            *config.Config
-	wallet         wallet.WalletService
-	registry       registry.Store
-	sessionMgr     *sessionkeys.Manager
-	authMgr        *auth.Manager
-	ledger         *ledger.Ledger
-	commentary     *commentary.Service
-	predictions    *predictions.Service
-	depositWatcher *watcher.Watcher
-	webhooks       *webhooks.Dispatcher
-	realtimeHub    *realtime.Hub
-	paymaster      gas.Paymaster
-	escrowService  *escrow.Service
-	escrowTimer    *escrow.Timer
-	creditService  *credit.Service
-	creditTimer    *credit.Timer
-	rateLimiter    *ratelimit.Limiter
-	db             *sql.DB // nil if using in-memory
-	router         *gin.Engine
-	httpSrv        *http.Server
-	logger         *slog.Logger
-	cancelRunCtx   context.CancelFunc // cancels background goroutines started in Run
+	cfg             *config.Config
+	wallet          wallet.WalletService
+	registry        registry.Store
+	sessionMgr      *sessionkeys.Manager
+	authMgr         *auth.Manager
+	ledger          *ledger.Ledger
+	commentary      *commentary.Service
+	predictions     *predictions.Service
+	depositWatcher  *watcher.Watcher
+	webhooks        *webhooks.Dispatcher
+	realtimeHub     *realtime.Hub
+	paymaster       gas.Paymaster
+	escrowService   *escrow.Service
+	escrowTimer     *escrow.Timer
+	creditService   *credit.Service
+	creditTimer     *credit.Timer
+	contractService *contracts.Service
+	contractTimer   *contracts.Timer
+	rateLimiter     *ratelimit.Limiter
+	db              *sql.DB // nil if using in-memory
+	router          *gin.Engine
+	httpSrv         *http.Server
+	logger          *slog.Logger
+	cancelRunCtx    context.CancelFunc // cancels background goroutines started in Run
 
 	// Health state
 	ready   atomic.Bool
@@ -181,6 +184,12 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.escrowTimer = escrow.NewTimer(s.escrowService, escrowStore, s.logger)
 		s.logger.Info("escrow enabled")
 
+		// Contracts (service agreements with SLA enforcement)
+		contractStore := contracts.NewMemoryStore()
+		s.contractService = contracts.NewService(contractStore, &escrowLedgerAdapter{s.ledger})
+		s.contractTimer = contracts.NewTimer(s.contractService, contractStore, s.logger)
+		s.logger.Info("contracts enabled")
+
 		// Credit system (spend on credit, repay from earnings)
 		creditStore := credit.NewPostgresStore(db)
 		if err := creditStore.Migrate(ctx); err != nil {
@@ -224,6 +233,12 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledger})
 		s.escrowTimer = escrow.NewTimer(s.escrowService, escrowStore, s.logger)
 		s.logger.Info("escrow enabled (in-memory)")
+
+		// Contracts with in-memory store
+		contractStore := contracts.NewMemoryStore()
+		s.contractService = contracts.NewService(contractStore, &escrowLedgerAdapter{s.ledger})
+		s.contractTimer = contracts.NewTimer(s.contractService, contractStore, s.logger)
+		s.logger.Info("contracts enabled (in-memory)")
 
 		// Credit system (in-memory) — use demo scorer with relaxed policies
 		creditStore := credit.NewMemoryStore()
@@ -659,6 +674,19 @@ func (s *Server) setupRoutes() {
 		adminCredit := v1.Group("/admin")
 		adminCredit.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
 		creditHandler.RegisterAdminRoutes(adminCredit)
+	}
+
+	// Contract routes (service agreements with SLA enforcement)
+	if s.contractService != nil {
+		contractHandler := contracts.NewHandler(s.contractService)
+
+		// Public routes - anyone can read
+		contractHandler.RegisterRoutes(v1)
+
+		// Protected routes - only authenticated agents can propose/accept/reject/call/terminate
+		protectedContracts := v1.Group("")
+		protectedContracts.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		contractHandler.RegisterProtectedRoutes(protectedContracts)
 	}
 
 	// Predictions routes (verifiable predictions with reputation stakes)
@@ -1127,6 +1155,11 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.creditTimer.Start(runCtx)
 	}
 
+	// Start contract expiration timer
+	if s.contractTimer != nil {
+		go s.contractTimer.Start(runCtx)
+	}
+
 	// Mark as ready after brief delay for startup
 	go func() {
 		time.Sleep(100 * time.Millisecond)
@@ -1181,6 +1214,12 @@ func (s *Server) Shutdown() error {
 	if s.creditTimer != nil {
 		s.creditTimer.Stop()
 		s.logger.Info("credit timer stopped")
+	}
+
+	// Stop contract timer
+	if s.contractTimer != nil {
+		s.contractTimer.Stop()
+		s.logger.Info("contract timer stopped")
 	}
 
 	// Stop rate limiter cleanup goroutine

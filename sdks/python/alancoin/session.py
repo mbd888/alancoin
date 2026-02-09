@@ -404,6 +404,58 @@ class BudgetSession:
             max_price=max_price or self._budget.max_per_tx,
         )
 
+    # -- Contracts (service agreements) ----------------------------------------
+
+    def propose_contract(
+        self,
+        seller_addr: str,
+        service_type: str,
+        price_per_call: str,
+        budget: str,
+        duration: str,
+        **sla_params,
+    ) -> dict:
+        """Propose a service contract within this session's budget.
+
+        Validates the contract budget fits within the session's remaining
+        budget before submitting the proposal.
+
+        Args:
+            seller_addr: Seller's wallet address.
+            service_type: Type of service (e.g., "translation").
+            price_per_call: Price per call in USDC (e.g., "0.005").
+            budget: Total contract budget in USDC (e.g., "1.00").
+            duration: Contract duration (e.g., "7d", "24h").
+            **sla_params: Optional SLA parameters (min_volume, seller_penalty,
+                max_latency_ms, min_success_rate, sla_window_size).
+
+        Returns:
+            Contract proposal response.
+
+        Raises:
+            AlancoinError: If session is inactive.
+            ValidationError: If budget exceeds session remaining.
+        """
+        if not self._active:
+            raise AlancoinError("Session is not active", code="session_inactive")
+
+        budget_dec = Decimal(budget)
+        remaining = Decimal(self._budget.max_total) - self._total_spent
+        if budget_dec > remaining:
+            raise ValidationError(
+                f"Contract budget {budget} exceeds session remaining {remaining}"
+            )
+
+        return self._client.propose_contract(
+            buyer_addr=self._client.address,
+            seller_addr=seller_addr,
+            service_type=service_type,
+            price_per_call=price_per_call,
+            buyer_budget=budget,
+            duration=duration,
+            **sla_params,
+        )
+
     # -- Pipeline (service composition) ----------------------------------------
 
     def pipeline(
