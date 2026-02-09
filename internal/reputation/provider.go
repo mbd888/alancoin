@@ -115,11 +115,12 @@ func (p *RegistryProvider) calculateMetrics(agent *registry.Agent, txns []*regis
 			m.TotalVolumeUSD += amount
 
 			// Track success/failure
-			if tx.Status == "confirmed" || tx.Status == "completed" {
+			switch tx.Status {
+			case "confirmed", "completed":
 				m.SuccessfulTxns++
-			} else if tx.Status == "failed" || tx.Status == "reverted" {
+			case "failed", "reverted":
 				m.FailedTxns++
-			} else {
+			default:
 				// Pending or unknown - do not count as successful or failed
 				m.TotalTransactions--
 			}

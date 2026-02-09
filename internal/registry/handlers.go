@@ -474,10 +474,7 @@ func (h *Handler) DiscoverServices(c *gin.Context) {
 	}
 
 	// Default to active services only
-	active := true
-	if c.Query("includeInactive") == "true" {
-		active = false
-	}
+	active := c.Query("includeInactive") != "true"
 	query.Active = &active
 
 	services, err := h.store.ListServices(ctx, query)
@@ -753,7 +750,8 @@ func isValidAddress(addr string) bool {
 	}
 	// Check hex characters
 	for _, c := range addr[2:] {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+		if !isHex {
 			return false
 		}
 	}

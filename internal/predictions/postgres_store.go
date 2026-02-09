@@ -143,7 +143,7 @@ func (p *PostgresStore) List(ctx context.Context, opts ListOptions) ([]*Predicti
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var predictions []*Prediction
 	for rows.Next() {
@@ -180,7 +180,7 @@ func (p *PostgresStore) ListPending(ctx context.Context) ([]*Prediction, error) 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var predictions []*Prediction
 	for rows.Next() {
@@ -286,7 +286,7 @@ func (p *PostgresStore) GetTopPredictors(ctx context.Context, limit int) ([]*Pre
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var stats []*PredictorStats
 	for rows.Next() {

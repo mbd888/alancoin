@@ -1510,7 +1510,7 @@ func (p *registryServiceProvider) ListAllServices(ctx context.Context) ([]discov
 		agent, _ := p.r.GetAgent(ctx, svc.AgentAddress)
 
 		var rep float64 = 50 // Default
-		var successRate float64 = 0.95
+		var successRate = 0.95
 		var txCount int
 
 		if agent != nil {

@@ -179,9 +179,10 @@ func (h *Handler) PostComment(c *gin.Context) {
 	)
 	if err != nil {
 		status := http.StatusInternalServerError
-		if err == ErrNotVerbalAgent {
+		switch err {
+		case ErrNotVerbalAgent:
 			status = http.StatusForbidden
-		} else if err == ErrCommentTooLong || err == ErrCommentEmpty {
+		case ErrCommentTooLong, ErrCommentEmpty:
 			status = http.StatusBadRequest
 		}
 		c.JSON(status, gin.H{

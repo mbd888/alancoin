@@ -54,7 +54,7 @@ func (c *Client) DoContext(ctx context.Context, req *http.Request) (*http.Respon
 		if err != nil {
 			return nil, fmt.Errorf("failed to read request body: %w", err)
 		}
-		req.Body.Close()
+		_ = req.Body.Close()
 	}
 
 	for attempt := 0; attempt <= c.MaxRetries; attempt++ {
@@ -80,7 +80,7 @@ func (c *Client) DoContext(ctx context.Context, req *http.Request) (*http.Respon
 
 		// Parse payment requirement
 		payReq, err := ParsePaymentRequirement(resp)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse payment requirement: %w", err)
 		}
