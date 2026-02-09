@@ -45,11 +45,14 @@ func (o *PriceOracle) GetETHPrice(ctx context.Context) float64 {
 	// Cache is stale, fetch new price
 	newPrice, err := o.fetchPrice(ctx)
 	if err != nil {
-		// Return last known price (or fallback)
-		o.mu.RLock()
-		defer o.mu.RUnlock()
-		if o.price > 0 {
-			return o.price
+		// Mark cache as stale so next call retries immediately
+		// instead of serving the stale price until original TTL expires
+		o.mu.Lock()
+		o.lastUpdate = time.Time{} // Force refresh on next call
+		price := o.price
+		o.mu.Unlock()
+		if price > 0 {
+			return price
 		}
 		return o.fallback
 	}

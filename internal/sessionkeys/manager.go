@@ -186,8 +186,8 @@ func (m *Manager) ValidateSigned(ctx context.Context, keyID string, req *SignedT
 	// Check recovered address matches session key's public key
 	if !strings.EqualFold(recoveredAddr, key.PublicKey) {
 		return &ValidationError{
-			Code:    "signature_mismatch",
-			Message: fmt.Sprintf("Signature from %s does not match session key %s", recoveredAddr, key.PublicKey),
+			Code:    "invalid_signature",
+			Message: "Signature does not match session key",
 		}
 	}
 
@@ -195,7 +195,7 @@ func (m *Manager) ValidateSigned(ctx context.Context, keyID string, req *SignedT
 	if req.Nonce <= key.Usage.LastNonce {
 		return &ValidationError{
 			Code:    "nonce_reused",
-			Message: fmt.Sprintf("Nonce %d must be greater than last used nonce %d", req.Nonce, key.Usage.LastNonce),
+			Message: "Nonce has already been used",
 		}
 	}
 
@@ -205,7 +205,7 @@ func (m *Manager) ValidateSigned(ctx context.Context, keyID string, req *SignedT
 	if now-req.Timestamp > maxAge {
 		return &ValidationError{
 			Code:    "signature_expired",
-			Message: fmt.Sprintf("Signature timestamp is %d seconds old (max %d)", now-req.Timestamp, maxAge),
+			Message: "Signature has expired",
 		}
 	}
 

@@ -58,12 +58,15 @@ type Watcher struct {
 	checker  AgentChecker
 	logger   *slog.Logger
 
-	// Track processed transactions
+	// Track processed transactions (txHash:logIndex → true)
 	processed map[string]bool
 	mu        sync.Mutex
 
-	// Last processed block
+	// Last processed block (protected by mu)
 	lastBlock uint64
+
+	// Reorg safety: how many blocks back to re-scan
+	reorgDepth uint64
 
 	// Shutdown
 	stop chan struct{}
@@ -78,34 +81,39 @@ func New(cfg Config, creditor BalanceCreditor, checker AgentChecker, logger *slo
 	}
 
 	return &Watcher{
-		client:    client,
-		config:    cfg,
-		creditor:  creditor,
-		checker:   checker,
-		logger:    logger,
-		processed: make(map[string]bool),
-		stop:      make(chan struct{}),
-		done:      make(chan struct{}),
+		client:     client,
+		config:     cfg,
+		creditor:   creditor,
+		checker:    checker,
+		logger:     logger,
+		processed:  make(map[string]bool),
+		reorgDepth: 12, // Re-scan last 12 blocks to handle reorgs
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
 	}, nil
 }
 
 // Start begins watching for deposits
 func (w *Watcher) Start(ctx context.Context) error {
 	// Get starting block
+	w.mu.Lock()
 	if w.config.StartBlock == 0 {
 		block, err := w.client.BlockNumber(ctx)
 		if err != nil {
+			w.mu.Unlock()
 			return fmt.Errorf("failed to get block number: %w", err)
 		}
 		w.lastBlock = block
 	} else {
 		w.lastBlock = w.config.StartBlock
 	}
+	startBlock := w.lastBlock
+	w.mu.Unlock()
 
 	w.logger.Info("deposit watcher started",
 		"platform", w.config.PlatformAddress.Hex(),
 		"usdc", w.config.USDCContract.Hex(),
-		"startBlock", w.lastBlock,
+		"startBlock", startBlock,
 	)
 
 	go w.pollLoop(ctx)
@@ -145,14 +153,26 @@ func (w *Watcher) checkForDeposits(ctx context.Context) error {
 		return fmt.Errorf("failed to get block number: %w", err)
 	}
 
+	w.mu.Lock()
+	// Re-scan from reorgDepth blocks back to catch reorgs.
+	// The dedup in processTransfer prevents double-crediting.
+	fromBlock := w.lastBlock + 1
+	if w.reorgDepth > 0 && fromBlock > w.reorgDepth {
+		safeFrom := w.lastBlock - w.reorgDepth + 1
+		if safeFrom < fromBlock {
+			fromBlock = safeFrom
+		}
+	}
+	w.mu.Unlock()
+
 	// Nothing new
-	if currentBlock <= w.lastBlock {
+	if currentBlock < fromBlock {
 		return nil
 	}
 
 	// Query for Transfer events to our platform address
 	query := ethereum.FilterQuery{
-		FromBlock: new(big.Int).SetUint64(w.lastBlock + 1),
+		FromBlock: new(big.Int).SetUint64(fromBlock),
 		ToBlock:   new(big.Int).SetUint64(currentBlock),
 		Addresses: []common.Address{w.config.USDCContract},
 		Topics: [][]common.Hash{
@@ -168,27 +188,39 @@ func (w *Watcher) checkForDeposits(ctx context.Context) error {
 	}
 
 	for _, vLog := range logs {
+		// Skip removed logs (reorg indicator)
+		if vLog.Removed {
+			w.logger.Warn("reorged transfer event detected, skipping",
+				"tx", vLog.TxHash.Hex(),
+				"block", vLog.BlockNumber,
+			)
+			continue
+		}
 		if err := w.processTransfer(ctx, vLog); err != nil {
 			w.logger.Error("failed to process transfer", "tx", vLog.TxHash.Hex(), "error", err)
 		}
 	}
 
+	w.mu.Lock()
 	w.lastBlock = currentBlock
+	w.mu.Unlock()
 	return nil
 }
 
 func (w *Watcher) processTransfer(ctx context.Context, vLog types.Log) error {
 	txHash := vLog.TxHash.Hex()
+	// Use txHash:logIndex as dedup key to handle multi-transfer transactions
+	dedupKey := fmt.Sprintf("%s:%d", txHash, vLog.Index)
 
 	// Skip if already processed
 	w.mu.Lock()
-	if w.processed[txHash] {
+	if w.processed[dedupKey] {
 		w.mu.Unlock()
 		return nil
 	}
 	// Mark as in-progress to prevent concurrent duplicate processing.
 	// If processing fails, we remove it so the next poll can retry.
-	w.processed[txHash] = true
+	w.processed[dedupKey] = true
 	w.mu.Unlock()
 
 	// On failure, unmark so the transfer is retried on the next poll cycle.
@@ -196,7 +228,7 @@ func (w *Watcher) processTransfer(ctx context.Context, vLog types.Log) error {
 	defer func() {
 		if !succeeded {
 			w.mu.Lock()
-			delete(w.processed, txHash)
+			delete(w.processed, dedupKey)
 			w.mu.Unlock()
 		}
 	}()
@@ -204,9 +236,12 @@ func (w *Watcher) processTransfer(ctx context.Context, vLog types.Log) error {
 	// Parse the Transfer event
 	// Topics[1] = from address (indexed)
 	// Topics[2] = to address (indexed)
-	// Data = amount
+	// Data = amount (uint256, must be exactly 32 bytes)
 	if len(vLog.Topics) < 3 {
-		return fmt.Errorf("invalid transfer event")
+		return fmt.Errorf("invalid transfer event: expected 3 topics, got %d", len(vLog.Topics))
+	}
+	if len(vLog.Data) != 32 {
+		return fmt.Errorf("invalid transfer event data: expected 32 bytes, got %d", len(vLog.Data))
 	}
 
 	from := common.HexToAddress(vLog.Topics[1].Hex())

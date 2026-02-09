@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -176,7 +177,7 @@ func (s *MemoryStore) GetByHash(ctx context.Context, hash string) (*APIKey, erro
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, k := range s.keys {
-		if k.Hash == hash {
+		if subtle.ConstantTimeCompare([]byte(k.Hash), []byte(hash)) == 1 {
 			cp := *k
 			return &cp, nil
 		}

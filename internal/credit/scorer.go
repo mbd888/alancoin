@@ -142,10 +142,16 @@ func (s *Scorer) Evaluate(reputationScore float64, tier string, totalTxns int, s
 
 	// Volume scaling: limit = maxCreditLimit * min(1.0, 0.5 + 0.5*(log10(volume+1)/4))
 	volumeFactor := math.Min(1.0, 0.5+0.5*(math.Log10(totalVolumeUSD+1)/4))
+	if math.IsNaN(volumeFactor) || math.IsInf(volumeFactor, 0) {
+		volumeFactor = 0.5
+	}
 	limit := policy.MaxCreditLimit * volumeFactor
 
 	// Round to 2 decimal places
 	limit = math.Round(limit*100) / 100
+	if math.IsNaN(limit) || math.IsInf(limit, 0) {
+		limit = 0
+	}
 
 	result.Eligible = true
 	result.CreditLimit = limit

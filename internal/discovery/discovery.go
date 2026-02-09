@@ -10,6 +10,7 @@ package discovery
 
 import (
 	"context"
+	"html"
 	"sort"
 	"strconv"
 	"strings"
@@ -275,24 +276,32 @@ func (e *Engine) Recommend(ctx context.Context, query string, topN int) ([]Searc
 		return nil, "No services found matching your criteria.", nil
 	}
 
-	if topN > 0 && len(results) > topN {
+	if topN <= 0 || topN > 20 {
+		topN = 20
+	}
+	if len(results) > topN {
 		results = results[:topN]
 	}
 
-	// Generate recommendation text
+	// Generate recommendation text (HTML-escape user-supplied values)
 	var recommendation string
 	top := results[0]
+	agentName := html.EscapeString(top.AgentName)
+	serviceName := html.EscapeString(top.ServiceName)
+	price := html.EscapeString(top.Price)
+	serviceType := html.EscapeString(top.ServiceType)
+	matchReason := html.EscapeString(top.MatchReason)
 
 	switch parsed.Intent {
 	case "recommend":
-		recommendation = "Based on your needs, I recommend " + top.AgentName + "'s " +
-			top.ServiceName + " ($" + top.Price + "). " + top.MatchReason + "."
+		recommendation = "Based on your needs, I recommend " + agentName + "'s " +
+			serviceName + " ($" + price + "). " + matchReason + "."
 	case "compare":
 		recommendation = "Here are the top options to compare. " +
-			top.AgentName + " offers the best overall match."
+			agentName + " offers the best overall match."
 	default:
 		recommendation = "Found " + strconv.Itoa(len(results)) + " matching services. " +
-			"Top pick: " + top.AgentName + " (" + top.ServiceType + " at $" + top.Price + ")."
+			"Top pick: " + agentName + " (" + serviceType + " at $" + price + ")."
 	}
 
 	return results, recommendation, nil

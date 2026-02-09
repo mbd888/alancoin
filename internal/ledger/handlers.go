@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/mbd888/alancoin/internal/usdc"
+	"github.com/mbd888/alancoin/internal/validation"
 )
 
 // validAmount checks that amount is a valid positive decimal number
@@ -97,6 +98,14 @@ func (h *Handler) RecordDeposit(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "invalid_request",
 			"message": "Invalid request body",
+		})
+		return
+	}
+
+	if !validation.IsValidEthAddress(req.AgentAddress) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_address",
+			"message": "agentAddress must be a valid Ethereum address (0x + 40 hex chars)",
 		})
 		return
 	}

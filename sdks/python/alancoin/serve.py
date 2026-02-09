@@ -325,7 +325,12 @@ class ServiceAgent:
                             })
                             return
                     except Exception as e:
-                        logger.warning("Payment verification failed for tx %s: %s (allowing request)", tx_hash[:16], e)
+                        logger.warning("Payment verification failed for tx %s: %s", tx_hash[:16], e)
+                        self._json(503, {
+                            "error": "verification_unavailable",
+                            "message": "Payment verification service is unavailable. Please retry.",
+                        })
+                        return
 
                 # Invoke handler
                 try:

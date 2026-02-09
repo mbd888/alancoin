@@ -43,10 +43,7 @@ func (t *Timer) Start(ctx context.Context) {
 
 // Stop signals the timer to stop.
 func (t *Timer) Stop() {
-	select {
-	case t.stop <- struct{}{}:
-	default:
-	}
+	close(t.stop)
 }
 
 func (t *Timer) checkDefaults(ctx context.Context) {

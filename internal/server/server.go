@@ -535,12 +535,12 @@ func (s *Server) setupRoutes() {
 		sessionHandler = sessionHandler.WithEvents(&realtimeEventEmitter{s.realtimeHub})
 	}
 
-	v1.GET("/agents/:address/sessions", sessionHandler.ListSessionKeys)
-	v1.GET("/agents/:address/sessions/:keyId", sessionHandler.GetSessionKey)
-
 	protectedSessions := v1.Group("")
 	protectedSessions.Use(auth.Middleware(s.authMgr))
 	{
+		// Session key list/get require ownership — they expose spending limits and usage data
+		protectedSessions.GET("/agents/:address/sessions", auth.RequireOwnership(s.authMgr, "address"), sessionHandler.ListSessionKeys)
+		protectedSessions.GET("/agents/:address/sessions/:keyId", auth.RequireOwnership(s.authMgr, "address"), sessionHandler.GetSessionKey)
 		protectedSessions.POST("/agents/:address/sessions", auth.RequireOwnership(s.authMgr, "address"), sessionHandler.CreateSessionKey)
 		protectedSessions.DELETE("/agents/:address/sessions/:keyId", auth.RequireOwnership(s.authMgr, "address"), sessionHandler.RevokeSessionKey)
 	}
@@ -567,7 +567,8 @@ func (s *Server) setupRoutes() {
 		}
 
 		// Admin route for recording deposits (in production: webhook from blockchain indexer)
-		protectedLedger.POST("/admin/deposits", ledgerHandler.RecordDeposit)
+		// RequireAuth enforces a valid API key — Middleware alone only sets context optionally.
+		protectedLedger.POST("/admin/deposits", auth.RequireAuth(s.authMgr), ledgerHandler.RecordDeposit)
 	}
 
 	// Gas abstraction routes (agents pay USDC only, gas is sponsored)

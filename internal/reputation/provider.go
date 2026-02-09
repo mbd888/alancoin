@@ -29,8 +29,8 @@ func (p *RegistryProvider) GetAgentMetrics(ctx context.Context, address string) 
 		return nil, err
 	}
 
-	// Get all transactions involving this agent
-	txns, err := p.store.ListTransactions(ctx, address, 10000) // Get all
+	// Get transactions involving this agent (capped for memory safety)
+	txns, err := p.store.ListTransactions(ctx, address, 1000)
 	if err != nil {
 		return nil, err
 	}
@@ -41,14 +41,14 @@ func (p *RegistryProvider) GetAgentMetrics(ctx context.Context, address string) 
 // GetAllAgentMetrics fetches metrics for all agents
 func (p *RegistryProvider) GetAllAgentMetrics(ctx context.Context) (map[string]*Metrics, error) {
 	// Get all agents
-	agents, err := p.store.ListAgents(ctx, registry.AgentQuery{Limit: 10000})
+	agents, err := p.store.ListAgents(ctx, registry.AgentQuery{Limit: 1000})
 	if err != nil {
 		return nil, err
 	}
 
 	result := make(map[string]*Metrics)
 	for _, agent := range agents {
-		txns, err := p.store.ListTransactions(ctx, agent.Address, 10000)
+		txns, err := p.store.ListTransactions(ctx, agent.Address, 1000)
 		if err != nil {
 			continue // Skip agents with errors
 		}

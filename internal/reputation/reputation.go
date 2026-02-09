@@ -139,6 +139,11 @@ func (c *Calculator) Calculate(address string, m Metrics) *Score {
 		c.weights.Age*comp.AgeScore +
 		c.weights.Diversity*comp.DiversityScore
 
+	// Guard against NaN/Inf from extreme inputs
+	if math.IsNaN(score) || math.IsInf(score, 0) {
+		score = 0
+	}
+
 	// Clamp to 0-100
 	score = math.Max(0, math.Min(100, score))
 

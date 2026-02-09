@@ -236,10 +236,16 @@ func (s *Service) ReviewAllActive(ctx context.Context) error {
 		return fmt.Errorf("failed to list active credit lines: %w", err)
 	}
 
+	var errs []error
 	for _, line := range lines {
-		_, _, _ = s.Review(ctx, line.AgentAddr)
+		if _, _, err := s.Review(ctx, line.AgentAddr); err != nil {
+			errs = append(errs, fmt.Errorf("review %s: %w", line.AgentAddr, err))
+		}
 	}
 
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to review %d/%d credit lines: %v", len(errs), len(lines), errs[0])
+	}
 	return nil
 }
 

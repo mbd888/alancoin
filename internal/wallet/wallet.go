@@ -6,8 +6,10 @@ import (
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -103,6 +105,9 @@ const erc20ABI = `[
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"from","type":"address"},{"indexed":true,"name":"to","type":"address"},{"indexed":false,"name":"value","type":"uint256"}],"name":"Transfer","type":"event"}
 ]`
 
+// transferEventSig is keccak256("Transfer(address,address,uint256)")
+var transferEventSig = crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
+
 const (
 	// USDCDecimals is the decimal precision of USDC
 	USDCDecimals = 6
@@ -159,6 +164,7 @@ type Wallet struct {
 	chainID      *big.Int
 	usdcContract common.Address
 	usdcABI      abi.ABI
+	txMu         sync.Mutex // Serializes transactions to prevent nonce races
 }
 
 // Compile-time interface check
@@ -269,6 +275,9 @@ func (w *Wallet) BalanceOf(ctx context.Context, addr common.Address) (*big.Int, 
 // Transfer sends USDC to a recipient
 // amount is in human-readable format (e.g., "1.50" for $1.50)
 func (w *Wallet) Transfer(ctx context.Context, to common.Address, amount *big.Int) (*TransferResult, error) {
+	w.txMu.Lock()
+	defer w.txMu.Unlock()
+
 	// Build transfer calldata
 	data, err := w.usdcABI.Pack("transfer", to, amount)
 	if err != nil {
@@ -295,7 +304,7 @@ func (w *Wallet) Transfer(ctx context.Context, to common.Address, amount *big.In
 		Data:  data,
 	})
 	if err != nil {
-		// Use default if estimation fails
+		log.Printf("wallet: gas estimation failed, using default %d: %v", DefaultGasLimit, err)
 		gasLimit = DefaultGasLimit
 	}
 
@@ -385,17 +394,25 @@ func (w *Wallet) VerifyPayment(ctx context.Context, from string, minAmount strin
 	}
 
 	// Parse Transfer events from logs
-	for _, log := range receipt.Logs {
-		if log.Address != w.usdcContract {
+	for _, vLog := range receipt.Logs {
+		if vLog.Address != w.usdcContract {
 			continue
 		}
-		if len(log.Topics) < 3 {
+		if len(vLog.Topics) < 3 {
+			continue
+		}
+		// Verify this is a Transfer event
+		if vLog.Topics[0] != transferEventSig {
+			continue
+		}
+		// Validate data length (uint256 = 32 bytes)
+		if len(vLog.Data) != 32 {
 			continue
 		}
 
-		eventFrom := common.HexToAddress(log.Topics[1].Hex())
-		eventTo := common.HexToAddress(log.Topics[2].Hex())
-		eventAmount := new(big.Int).SetBytes(log.Data)
+		eventFrom := common.HexToAddress(vLog.Topics[1].Hex())
+		eventTo := common.HexToAddress(vLog.Topics[2].Hex())
+		eventAmount := new(big.Int).SetBytes(vLog.Data)
 
 		if eventFrom == fromAddr && eventTo == w.address && eventAmount.Cmp(minAmountRaw) >= 0 {
 			return true, nil

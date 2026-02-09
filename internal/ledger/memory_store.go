@@ -143,7 +143,8 @@ func (m *MemoryStore) Debit(ctx context.Context, agentAddr, amount, reference, d
 		}
 
 		creditUsed.Add(creditUsed, gap)
-		bal.Available = "0.000000"
+		avail.SetInt64(0) // All available consumed when drawing credit
+		bal.Available = usdc.Format(avail)
 		bal.CreditUsed = usdc.Format(creditUsed)
 
 		m.entries = append(m.entries, &Entry{
@@ -292,7 +293,8 @@ func (m *MemoryStore) Hold(ctx context.Context, agentAddr, amount, reference str
 		}
 
 		creditUsed.Add(creditUsed, gap)
-		bal.Available = "0.000000"
+		avail.SetInt64(0) // All available consumed when drawing credit
+		bal.Available = usdc.Format(avail)
 		bal.CreditUsed = usdc.Format(creditUsed)
 
 		m.entries = append(m.entries, &Entry{

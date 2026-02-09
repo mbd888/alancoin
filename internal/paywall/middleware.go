@@ -9,11 +9,47 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
+
+// nonceStore tracks issued nonces to prevent replay attacks.
+type nonceStore struct {
+	mu     sync.Mutex
+	nonces map[string]time.Time // nonce → issued-at
+}
+
+var globalNonces = &nonceStore{nonces: make(map[string]time.Time)}
+
+func (ns *nonceStore) issue(nonce string) {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	ns.nonces[nonce] = time.Now()
+	// Purge expired nonces (older than 10 minutes)
+	cutoff := time.Now().Add(-10 * time.Minute)
+	for k, t := range ns.nonces {
+		if t.Before(cutoff) {
+			delete(ns.nonces, k)
+		}
+	}
+}
+
+func (ns *nonceStore) consume(nonce string, maxAge time.Duration) bool {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	issued, ok := ns.nonces[nonce]
+	if !ok {
+		return false
+	}
+	delete(ns.nonces, nonce) // One-time use
+	return time.Since(issued) <= maxAge
+}
+
+var txHashRe = regexp.MustCompile(`^0x[0-9a-fA-F]{64}$`)
 
 // -----------------------------------------------------------------------------
 // Types
@@ -163,6 +199,8 @@ func returnPaymentRequired(c *gin.Context, cfg Config, price string, description
 		return
 	}
 
+	globalNonces.issue(nonce)
+
 	req := PaymentRequirement{
 		Price:       price,
 		Currency:    "USDC",
@@ -194,10 +232,39 @@ func verifyPayment(ctx context.Context, cfg Config, proof *PaymentProof, require
 		return false, fmt.Errorf("missing sender address")
 	}
 
-	// Normalize tx hash
+	// Validate nonce (one-time use, must have been issued by us)
+	if proof.Nonce == "" {
+		return false, fmt.Errorf("missing nonce")
+	}
+	maxAge := cfg.ValidFor
+	if maxAge == 0 {
+		maxAge = 5 * time.Minute
+	}
+	if !globalNonces.consume(proof.Nonce, maxAge) {
+		return false, fmt.Errorf("invalid or expired nonce")
+	}
+
+	// Validate timestamp freshness
+	if proof.Timestamp > 0 {
+		proofAge := time.Since(time.Unix(proof.Timestamp, 0))
+		if proofAge > maxAge || proofAge < -30*time.Second {
+			return false, fmt.Errorf("payment proof expired or has future timestamp")
+		}
+	}
+
+	// Normalize and validate tx hash format
 	txHash := proof.TxHash
 	if !strings.HasPrefix(txHash, "0x") {
 		txHash = "0x" + txHash
+	}
+	if !txHashRe.MatchString(txHash) {
+		return false, fmt.Errorf("invalid transaction hash format")
+	}
+
+	// Validate from address format (0x + 40 hex chars)
+	from := proof.From
+	if !strings.HasPrefix(from, "0x") || len(from) != 42 {
+		return false, fmt.Errorf("invalid sender address format")
 	}
 
 	// Wait for confirmation if required

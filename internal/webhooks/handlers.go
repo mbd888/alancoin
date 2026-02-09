@@ -63,10 +63,27 @@ func (h *Handler) CreateWebhook(c *gin.Context) {
 		return
 	}
 
-	// Validate events
-	events := make([]EventType, len(req.Events))
-	for i, e := range req.Events {
-		events[i] = EventType(e)
+	// Validate events against known types
+	validEvents := map[EventType]bool{
+		EventPaymentReceived:   true,
+		EventPaymentSent:       true,
+		EventSessionKeyUsed:    true,
+		EventSessionKeyCreated: true,
+		EventSessionKeyRevoked: true,
+		EventBalanceDeposit:    true,
+		EventBalanceWithdraw:   true,
+	}
+	events := make([]EventType, 0, len(req.Events))
+	for _, e := range req.Events {
+		et := EventType(e)
+		if !validEvents[et] {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "invalid_event_type",
+				"message": fmt.Sprintf("Unknown event type: %s", e),
+			})
+			return
+		}
+		events = append(events, et)
 	}
 
 	// Generate ID and secret

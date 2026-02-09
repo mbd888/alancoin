@@ -340,6 +340,17 @@ func (h *Handler) AddService(c *gin.Context) {
 		logger.Warn("unknown service type", "type", req.Type)
 	}
 
+	// Validate price is a valid numeric amount (prevents CAST errors in discovery queries)
+	if errs := validation.Validate(
+		validation.ValidAmount("price", req.Price),
+	); len(errs) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_failed",
+			"message": errs.Error(),
+		})
+		return
+	}
+
 	service := &Service{
 		Type:        req.Type,
 		Name:        req.Name,
@@ -543,9 +554,11 @@ func (h *Handler) sortServices(services []ServiceListing, sortBy string) {
 	case "value":
 		// Compute value score: reputation / price (higher = better deal)
 		for i := range services {
-			priceF := 0.01 // floor to avoid division by zero
+			var priceF float64
 			if p, err := fmt.Sscanf(services[i].Price, "%f", &priceF); p != 1 || err != nil || priceF <= 0 {
-				priceF = 0.01
+				// Unparseable price gets zero value score (not inflated)
+				services[i].ValueScore = 0
+				continue
 			}
 			services[i].ValueScore = services[i].ReputationScore / priceF
 		}
@@ -626,6 +639,9 @@ type FeedItem struct {
 func (h *Handler) GetPublicFeed(c *gin.Context) {
 	ctx := c.Request.Context()
 	limit := parseIntQuery(c, "limit", 50)
+	if limit > 100 {
+		limit = 100 // Cap feed to prevent expensive agent lookups
+	}
 
 	// Get recent transactions across all agents
 	txs, err := h.store.GetRecentTransactions(ctx, limit)

@@ -98,6 +98,11 @@ func NewDispatcher(store Store) *Dispatcher {
 		store: store,
 		client: &http.Client{
 			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        50,
+				MaxIdleConnsPerHost: 5,
+				IdleConnTimeout:     90 * time.Second,
+			},
 		},
 		retry: DefaultRetryConfig(),
 		sem:   make(chan struct{}, maxConcurrentWebhooks),
