@@ -73,6 +73,7 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error)
 			transaction_count, total_spent, spent_today, last_used, last_reset_day,
 			revoked_at, created_at
 		FROM session_keys WHERE id = $1
+		AND revoked_at IS NULL AND expires_at > NOW()
 	`, id).Scan(
 		&key.ID,
 		&key.OwnerAddr,

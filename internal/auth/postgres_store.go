@@ -33,6 +33,8 @@ func (p *PostgresStore) GetByHash(ctx context.Context, hash string) (*APIKey, er
 	err := p.db.QueryRowContext(ctx, `
 		SELECT id, hash, agent_address, name, created_at, last_used, expires_at, revoked
 		FROM api_keys WHERE hash = $1
+		  AND revoked = FALSE
+		  AND (expires_at IS NULL OR expires_at > NOW())
 	`, hash).Scan(
 		&key.ID, &key.Hash, &key.AgentAddr, &key.Name,
 		&key.CreatedAt, &lastUsed, &expiresAt, &key.Revoked,

@@ -1166,24 +1166,14 @@ func TestEscrow_SameBuyerAndSeller(t *testing.T) {
 	svc := NewService(store, ledger)
 	ctx := context.Background()
 
-	// Platform doesn't reject this — the service layer doesn't validate buyer!=seller
-	// (a buyer could buy their own service in theory)
-	esc, err := svc.Create(ctx, CreateRequest{
+	// Self-payment escrow must be rejected to prevent reputation gaming
+	_, err := svc.Create(ctx, CreateRequest{
 		BuyerAddr:  "0xsame",
 		SellerAddr: "0xsame",
 		Amount:     "1.00",
 	})
-	if err != nil {
-		t.Fatalf("Create with same buyer/seller should work: %v", err)
-	}
-
-	// Confirm (buyer == seller, so addr matches)
-	esc, err = svc.Confirm(ctx, esc.ID, "0xsame")
-	if err != nil {
-		t.Fatalf("Confirm should work: %v", err)
-	}
-	if esc.Status != StatusReleased {
-		t.Errorf("Expected released, got %s", esc.Status)
+	if err == nil {
+		t.Fatal("Create with same buyer/seller should be rejected")
 	}
 }
 

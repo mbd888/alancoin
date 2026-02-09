@@ -20,15 +20,16 @@ func NewPostgresStore(db *sql.DB) *PostgresStore {
 func (p *PostgresStore) Migrate(ctx context.Context) error {
 	_, err := p.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS webhooks (
-			id              VARCHAR(36) PRIMARY KEY,
-			agent_address   VARCHAR(42) NOT NULL,
-			url             TEXT NOT NULL,
-			secret          VARCHAR(64) NOT NULL,
-			events          JSONB NOT NULL,
-			active          BOOLEAN DEFAULT TRUE,
-			created_at      TIMESTAMPTZ DEFAULT NOW(),
-			last_success    TIMESTAMPTZ,
-			last_error      TEXT
+			id                    VARCHAR(36) PRIMARY KEY,
+			agent_address         VARCHAR(42) NOT NULL,
+			url                   TEXT NOT NULL,
+			secret                VARCHAR(64) NOT NULL,
+			events                JSONB NOT NULL,
+			active                BOOLEAN DEFAULT TRUE,
+			created_at            TIMESTAMPTZ DEFAULT NOW(),
+			last_success          TIMESTAMPTZ,
+			last_error            TEXT,
+			consecutive_failures  INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE INDEX IF NOT EXISTS idx_webhooks_agent ON webhooks(agent_address);
 		CREATE INDEX IF NOT EXISTS idx_webhooks_active ON webhooks(active) WHERE active = TRUE;
@@ -56,11 +57,11 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*Subscription, erro
 	var lastError sql.NullString
 
 	err := p.db.QueryRowContext(ctx, `
-		SELECT id, agent_address, url, secret, events, active, created_at, last_success, last_error
+		SELECT id, agent_address, url, secret, events, active, created_at, last_success, last_error, consecutive_failures
 		FROM webhooks WHERE id = $1
 	`, id).Scan(
 		&sub.ID, &sub.AgentAddr, &sub.URL, &sub.Secret, &eventsJSON,
-		&sub.Active, &sub.CreatedAt, &lastSuccess, &lastError,
+		&sub.Active, &sub.CreatedAt, &lastSuccess, &lastError, &sub.ConsecutiveFailures,
 	)
 	if err != nil {
 		return nil, err
@@ -80,7 +81,7 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*Subscription, erro
 
 func (p *PostgresStore) GetByAgent(ctx context.Context, agentAddr string) ([]*Subscription, error) {
 	rows, err := p.db.QueryContext(ctx, `
-		SELECT id, agent_address, url, secret, events, active, created_at, last_success, last_error
+		SELECT id, agent_address, url, secret, events, active, created_at, last_success, last_error, consecutive_failures
 		FROM webhooks WHERE agent_address = $1 ORDER BY created_at DESC
 	`, agentAddr)
 	if err != nil {
@@ -97,7 +98,7 @@ func (p *PostgresStore) GetByEvent(ctx context.Context, eventType EventType) ([]
 
 	// Query active webhooks that include this event type
 	rows, err := p.db.QueryContext(ctx, `
-		SELECT id, agent_address, url, secret, events, active, created_at, last_success, last_error
+		SELECT id, agent_address, url, secret, events, active, created_at, last_success, last_error, consecutive_failures
 		FROM webhooks
 		WHERE active = TRUE AND events @> $1::jsonb
 	`, string(eventsJSON))
@@ -114,9 +115,10 @@ func (p *PostgresStore) Update(ctx context.Context, sub *Subscription) error {
 		UPDATE webhooks SET
 			active = $1,
 			last_success = $2,
-			last_error = $3
-		WHERE id = $4
-	`, sub.Active, sub.LastSuccess, sub.LastError, sub.ID)
+			last_error = $3,
+			consecutive_failures = $4
+		WHERE id = $5
+	`, sub.Active, sub.LastSuccess, sub.LastError, sub.ConsecutiveFailures, sub.ID)
 	return err
 }
 
@@ -135,7 +137,7 @@ func (p *PostgresStore) scanSubscriptions(rows *sql.Rows) ([]*Subscription, erro
 
 		if err := rows.Scan(
 			&sub.ID, &sub.AgentAddr, &sub.URL, &sub.Secret, &eventsJSON,
-			&sub.Active, &sub.CreatedAt, &lastSuccess, &lastError,
+			&sub.Active, &sub.CreatedAt, &lastSuccess, &lastError, &sub.ConsecutiveFailures,
 		); err != nil {
 			return nil, err
 		}
