@@ -192,7 +192,7 @@ func TestClient_CreateEscrow_RequestBody(t *testing.T) {
 
 		body, _ := io.ReadAll(r.Body)
 		var m map[string]string
-		json.Unmarshal(body, &m)
+		_ = json.Unmarshal(body, &m)
 		assert.Equal(t, "0xBUYER", m["buyerAddr"])
 		assert.Equal(t, "0xSELLER", m["sellerAddr"])
 		assert.Equal(t, "1.50", m["amount"])
@@ -212,7 +212,7 @@ func TestClient_DisputeEscrow_RequestBody(t *testing.T) {
 		assert.Equal(t, "/v1/escrow/esc-99/dispute", r.URL.Path)
 		body, _ := io.ReadAll(r.Body)
 		var m map[string]string
-		json.Unmarshal(body, &m)
+		_ = json.Unmarshal(body, &m)
 		assert.Equal(t, "bad quality", m["reason"])
 
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "refunded"})
@@ -235,7 +235,7 @@ func TestClient_CallEndpoint_Headers(t *testing.T) {
 
 		body, _ := io.ReadAll(r.Body)
 		var m map[string]any
-		json.Unmarshal(body, &m)
+		_ = json.Unmarshal(body, &m)
 		assert.Equal(t, "hello", m["text"])
 
 		_ = json.NewEncoder(w).Encode(map[string]any{"result": "ok"})
@@ -399,7 +399,7 @@ func TestHandleCallService_HappyPath(t *testing.T) {
 
 		body, _ := io.ReadAll(r.Body)
 		var params map[string]any
-		json.Unmarshal(body, &params)
+		_ = json.Unmarshal(body, &params)
 		assert.Equal(t, "Hello world", params["text"])
 
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -637,7 +637,7 @@ func TestHandleCallService_NoParams(t *testing.T) {
 	serviceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var m map[string]any
-		json.Unmarshal(body, &m)
+		_ = json.Unmarshal(body, &m)
 		assert.Empty(t, m, "empty params should send empty JSON object")
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
 	}))

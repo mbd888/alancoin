@@ -186,6 +186,6 @@ func BenchmarkParsePaymentRequirement(b *testing.B) {
 			StatusCode: http.StatusPaymentRequired,
 			Body:       io.NopCloser(bytes.NewBufferString(body)),
 		}
-		ParsePaymentRequirement(resp)
+		_, _ = ParsePaymentRequirement(resp)
 	}
 }
