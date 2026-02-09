@@ -68,7 +68,11 @@ func TestParseETH(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		result := parseETH(tc.input)
+		result, err := parseETH(tc.input)
+		if err != nil {
+			t.Errorf("parseETH(%s) unexpected error: %v", tc.input, err)
+			continue
+		}
 		if result.String() != tc.expected {
 			t.Errorf("parseETH(%s) = %s, expected %s", tc.input, result.String(), tc.expected)
 		}
