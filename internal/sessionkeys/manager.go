@@ -93,6 +93,20 @@ func (m *Manager) Create(ctx context.Context, ownerAddr string, req *SessionKeyR
 		return nil, fmt.Errorf("must set allowedRecipients, allowedServiceTypes, or allowAny")
 	}
 
+	// Validate spending limit formats — reject malformed strings that would silently bypass limits
+	for _, limit := range []struct{ name, value string }{
+		{"maxPerTransaction", req.MaxPerTransaction},
+		{"maxPerDay", req.MaxPerDay},
+		{"maxTotal", req.MaxTotal},
+	} {
+		if limit.value != "" {
+			v, ok := usdc.Parse(limit.value)
+			if !ok || v.Sign() <= 0 {
+				return nil, fmt.Errorf("invalid %s: must be a positive decimal number", limit.name)
+			}
+		}
+	}
+
 	// Create the session key
 	key := &SessionKey{
 		ID:        idgen.WithPrefix("sk_"),

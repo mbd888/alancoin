@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq" // PostgreSQL driver
+	"github.com/lib/pq"
 )
 
 // PostgresStore implements Store using PostgreSQL
@@ -360,6 +360,10 @@ func (p *PostgresStore) RecordTransaction(ctx context.Context, tx *Transaction) 
 		tx.Amount, nullString(tx.ServiceID), tx.Status, metadata, tx.CreatedAt)
 
 	if err != nil {
+		// Check for unique constraint violation on tx_hash
+		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+			return fmt.Errorf("duplicate transaction hash: %s", tx.TxHash)
+		}
 		return fmt.Errorf("failed to record transaction: %w", err)
 	}
 

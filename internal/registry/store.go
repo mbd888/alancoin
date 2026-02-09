@@ -60,6 +60,7 @@ type MemoryStore struct {
 	mu           sync.RWMutex
 	agents       map[string]*Agent       // address -> agent
 	transactions map[string]*Transaction // id -> transaction
+	txHashes     map[string]bool         // txHash -> exists (dedup)
 	stats        NetworkStats
 }
 
@@ -68,6 +69,7 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		agents:       make(map[string]*Agent),
 		transactions: make(map[string]*Transaction),
+		txHashes:     make(map[string]bool),
 		stats: NetworkStats{
 			TotalVolume: "0",
 			UpdatedAt:   time.Now(),
@@ -367,6 +369,14 @@ func (m *MemoryStore) RecordTransaction(ctx context.Context, tx *Transaction) er
 		tx.ID = idgen.WithPrefix("svc_")
 	}
 	tx.CreatedAt = time.Now()
+
+	// Reject duplicate txHash
+	if tx.TxHash != "" {
+		if m.txHashes[tx.TxHash] {
+			return fmt.Errorf("duplicate transaction hash: %s", tx.TxHash)
+		}
+		m.txHashes[tx.TxHash] = true
+	}
 
 	m.transactions[tx.ID] = tx
 	m.stats.TotalTransactions++

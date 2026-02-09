@@ -27,9 +27,9 @@ func (p *PostgresStore) Create(ctx context.Context, key *SessionKey) error {
 			max_per_transaction, max_per_day, max_total,
 			valid_after, expires_at,
 			allowed_recipients, allowed_service_types, allow_any, label,
-			transaction_count, total_spent, spent_today, last_used, last_reset_day,
+			transaction_count, total_spent, spent_today, last_used, last_reset_day, last_nonce,
 			revoked_at, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 	`,
 		key.ID,
 		strings.ToLower(key.OwnerAddr),
@@ -48,6 +48,7 @@ func (p *PostgresStore) Create(ctx context.Context, key *SessionKey) error {
 		key.Usage.SpentToday,
 		nullTime(key.Usage.LastUsed),
 		key.Usage.LastResetDay,
+		key.Usage.LastNonce,
 		nullTime(timePtr(key.RevokedAt)),
 		key.CreatedAt,
 	)
@@ -65,12 +66,12 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error)
 	var lastResetDay sql.NullString
 
 	err := p.db.QueryRowContext(ctx, `
-		SELECT 
+		SELECT
 			id, owner_address, public_key,
 			max_per_transaction, max_per_day, max_total,
 			valid_after, expires_at,
 			allowed_recipients, allowed_service_types, allow_any, label,
-			transaction_count, total_spent, spent_today, last_used, last_reset_day,
+			transaction_count, total_spent, spent_today, last_used, last_reset_day, COALESCE(last_nonce, 0),
 			revoked_at, created_at
 		FROM session_keys WHERE id = $1
 		AND revoked_at IS NULL AND expires_at > NOW()
@@ -92,6 +93,7 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error)
 		&key.Usage.SpentToday,
 		&lastUsed,
 		&lastResetDay,
+		&key.Usage.LastNonce,
 		&revokedAt,
 		&key.CreatedAt,
 	)
@@ -156,14 +158,16 @@ func (p *PostgresStore) Update(ctx context.Context, key *SessionKey) error {
 			spent_today = $3,
 			last_used = $4,
 			last_reset_day = $5,
-			revoked_at = $6
-		WHERE id = $7
+			last_nonce = $6,
+			revoked_at = $7
+		WHERE id = $8
 	`,
 		key.Usage.TransactionCount,
 		key.Usage.TotalSpent,
 		key.Usage.SpentToday,
 		nullTime(key.Usage.LastUsed),
 		key.Usage.LastResetDay,
+		key.Usage.LastNonce,
 		nullTime(timePtr(key.RevokedAt)),
 		key.ID,
 	)

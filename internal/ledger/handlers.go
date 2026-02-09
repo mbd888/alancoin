@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
+	"github.com/mbd888/alancoin/internal/idgen"
 	"github.com/mbd888/alancoin/internal/usdc"
 	"github.com/mbd888/alancoin/internal/validation"
 )
@@ -178,8 +179,9 @@ func (h *Handler) RequestWithdrawal(c *gin.Context) {
 			return
 		}
 
-		// Use a unique reference for the hold lifecycle so credit_draw_hold tracking works
-		holdRef := "withdrawal:" + address + ":" + req.Amount
+		// Use a unique reference for the hold lifecycle so credit_draw_hold tracking works.
+		// Include a random ID to prevent collision between concurrent same-amount withdrawals.
+		holdRef := "withdrawal:" + address + ":" + idgen.WithPrefix("wd_")
 
 		// Hold funds atomically before transfer to prevent TOCTOU double-spend
 		if err := h.ledger.Hold(c.Request.Context(), address, req.Amount, holdRef); err != nil {

@@ -127,6 +127,17 @@ func (h *Handler) RecordTransaction(c *gin.Context) {
 		return
 	}
 
+	// Verify the authenticated caller is the sender (prevents forged transactions)
+	if callerAddr, ok := c.Get("authAgentAddr"); ok {
+		if addr, isStr := callerAddr.(string); isStr && !strings.EqualFold(addr, req.From) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "forbidden",
+				"message": "Cannot record transactions for another agent's address",
+			})
+			return
+		}
+	}
+
 	status := "confirmed" // Default to confirmed in demo/in-memory mode
 
 	// Verify on-chain if verifier is available
@@ -397,6 +408,17 @@ func (h *Handler) UpdateService(c *gin.Context) {
 			"message": "Invalid request body",
 		})
 		return
+	}
+
+	// Validate price if provided
+	if service.Price != "" {
+		if vErr := validation.ValidAmount("price", service.Price)(); vErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "validation_failed",
+				"message": vErr.Field + ": " + vErr.Message,
+			})
+			return
+		}
 	}
 
 	service.ID = serviceID
