@@ -136,6 +136,15 @@ func (p *PostgresStore) GetByAgent(ctx context.Context, agentAddr string) (*Cred
 func (p *PostgresStore) Update(ctx context.Context, line *CreditLine) error {
 	line.UpdatedAt = time.Now()
 
+	// Default empty numeric strings so the NUMERIC cast doesn't fail
+	// before Postgres can evaluate the WHERE clause.
+	if line.CreditLimit == "" {
+		line.CreditLimit = "0.000000"
+	}
+	if line.CreditUsed == "" {
+		line.CreditUsed = "0.000000"
+	}
+
 	result, err := p.db.ExecContext(ctx, `
 		UPDATE credit_lines SET
 			credit_limit     = $2::NUMERIC(20,6),

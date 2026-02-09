@@ -398,3 +398,202 @@ func TestPostgresCredit_NullableTimestamps(t *testing.T) {
 		t.Errorf("RevokedAt should be zero, got %v", got.RevokedAt)
 	}
 }
+
+func TestPostgresCredit_UpdateNotFound_EmptyFields(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Update with only ID set (all other fields zero/empty) must return
+	// ErrCreditLineNotFound, not a Postgres cast error.
+	fake := &CreditLine{ID: "cl_nonexistent"}
+	err := store.Update(ctx, fake)
+	if err != ErrCreditLineNotFound {
+		t.Errorf("Expected ErrCreditLineNotFound for empty-field update, got %v", err)
+	}
+}
+
+func TestPostgresCredit_UpdateNotFound_ValidFields(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Even with fully-populated data, a missing ID must return ErrCreditLineNotFound.
+	fake := &CreditLine{
+		ID: "cl_ghost", AgentAddr: "0xaaaa000000000000000000000000000000ffffff",
+		CreditLimit: "100.000000", CreditUsed: "50.000000",
+		InterestRate: 0.05, Status: StatusActive,
+		ReputationTier: "trusted", ReputationScore: 90,
+		ApprovedAt: time.Now(), CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	err := store.Update(ctx, fake)
+	if err != ErrCreditLineNotFound {
+		t.Errorf("Expected ErrCreditLineNotFound for valid-field ghost update, got %v", err)
+	}
+}
+
+func TestPostgresCredit_ConcurrentDuplicateCreate(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	addr := "0xaaaa000000000000000000000000000000race01"
+	now := time.Now()
+
+	base := func(id string) *CreditLine {
+		return &CreditLine{
+			ID: id, AgentAddr: addr,
+			CreditLimit: "10.000000", CreditUsed: "0.000000",
+			InterestRate: 0.10, Status: StatusActive,
+			ReputationTier: "established", ReputationScore: 50,
+			ApprovedAt: now, CreatedAt: now, UpdatedAt: now,
+		}
+	}
+
+	if err := store.Create(ctx, base("cl_race_a")); err != nil {
+		t.Fatalf("First create failed: %v", err)
+	}
+
+	// Second create for the same agent while the first is still active must fail.
+	err := store.Create(ctx, base("cl_race_b"))
+	if err != ErrCreditLineExists {
+		t.Errorf("Expected ErrCreditLineExists for concurrent create, got %v", err)
+	}
+}
+
+func TestPostgresCredit_UpdateCreditUsedBeyondLimit(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	line := &CreditLine{
+		ID: "cl_overlimit", AgentAddr: "0xaaaa000000000000000000000000000000over01",
+		CreditLimit: "10.000000", CreditUsed: "0.000000",
+		InterestRate: 0.10, Status: StatusActive,
+		ReputationTier: "established", ReputationScore: 50,
+		ApprovedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.Create(ctx, line); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	// Store layer doesn't enforce used <= limit (that's the service layer's job).
+	// Verify the store accepts the write.
+	line.CreditUsed = "999.000000"
+	if err := store.Update(ctx, line); err != nil {
+		t.Errorf("Update with over-limit credit_used should succeed at store level, got %v", err)
+	}
+
+	got, err := store.Get(ctx, "cl_overlimit")
+	if err != nil {
+		t.Fatalf("Get after over-limit update failed: %v", err)
+	}
+	if got.CreditUsed != "999.000000" {
+		t.Errorf("CreditUsed: got %s, want 999.000000", got.CreditUsed)
+	}
+}
+
+func TestPostgresCredit_ListActiveEmpty(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	active, err := store.ListActive(ctx, 100)
+	if err != nil {
+		t.Fatalf("ListActive on empty table failed: %v", err)
+	}
+	if len(active) != 0 {
+		t.Errorf("Expected 0 active on empty table, got %d", len(active))
+	}
+}
+
+func TestPostgresCredit_ListOverdueEmpty(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	overdue, err := store.ListOverdue(ctx, 90, 100)
+	if err != nil {
+		t.Fatalf("ListOverdue on empty table failed: %v", err)
+	}
+	if len(overdue) != 0 {
+		t.Errorf("Expected 0 overdue on empty table, got %d", len(overdue))
+	}
+}
+
+func TestPostgresCredit_FullLifecycle(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	addr := "0xaaaa000000000000000000000000000000life01"
+	now := time.Now()
+
+	// 1. Create active
+	line := &CreditLine{
+		ID: "cl_lifecycle", AgentAddr: addr,
+		CreditLimit: "100.000000", CreditUsed: "0.000000",
+		InterestRate: 0.08, Status: StatusActive,
+		ReputationTier: "trusted", ReputationScore: 75,
+		ApprovedAt: now, LastReviewAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.Create(ctx, line); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	// 2. Use some credit
+	line.CreditUsed = "30.000000"
+	if err := store.Update(ctx, line); err != nil {
+		t.Fatalf("Update credit_used failed: %v", err)
+	}
+
+	// 3. Suspend
+	line.Status = StatusSuspended
+	if err := store.Update(ctx, line); err != nil {
+		t.Fatalf("Suspend failed: %v", err)
+	}
+
+	got, _ := store.Get(ctx, "cl_lifecycle")
+	if got.Status != StatusSuspended {
+		t.Errorf("Expected suspended, got %s", got.Status)
+	}
+
+	// 4. Reactivate
+	line.Status = StatusActive
+	if err := store.Update(ctx, line); err != nil {
+		t.Fatalf("Reactivate failed: %v", err)
+	}
+
+	// 5. Default
+	line.Status = StatusDefaulted
+	line.DefaultedAt = time.Now()
+	if err := store.Update(ctx, line); err != nil {
+		t.Fatalf("Default failed: %v", err)
+	}
+
+	got, _ = store.Get(ctx, "cl_lifecycle")
+	if got.Status != StatusDefaulted {
+		t.Errorf("Expected defaulted, got %s", got.Status)
+	}
+	if got.DefaultedAt.IsZero() {
+		t.Error("DefaultedAt should be set after defaulting")
+	}
+
+	// 6. New line after default should succeed (old is not active/suspended)
+	newLine := &CreditLine{
+		ID: "cl_lifecycle2", AgentAddr: addr,
+		CreditLimit: "50.000000", CreditUsed: "0.000000",
+		InterestRate: 0.12, Status: StatusActive,
+		ReputationTier: "established", ReputationScore: 40,
+		ApprovedAt: time.Now(), CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	if err := store.Create(ctx, newLine); err != nil {
+		t.Fatalf("Create after default should succeed, got: %v", err)
+	}
+}
