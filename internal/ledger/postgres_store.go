@@ -190,6 +190,18 @@ func (p *PostgresStore) Refund(ctx context.Context, agentAddr, amount, reference
 	}
 	defer tx.Rollback()
 
+	// Idempotency: check if this reference was already refunded
+	var exists bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM ledger_entries WHERE agent_address = $1 AND type = 'refund' AND reference = $2)
+	`, agentAddr, reference).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("failed to check refund idempotency: %w", err)
+	}
+	if exists {
+		return ErrDuplicateRefund
+	}
+
 	result, err := tx.ExecContext(ctx, `
 		UPDATE agent_balances SET
 			available  = available + LEAST($2::NUMERIC(20,6), total_out),
@@ -474,6 +486,7 @@ func (p *PostgresStore) EscrowLock(ctx context.Context, agentAddr, amount, refer
 			escrowed   = escrowed  + $2::NUMERIC(20,6),
 			updated_at = NOW()
 		WHERE agent_address = $1
+		  AND available >= $2::NUMERIC(20,6)
 	`, agentAddr, amount)
 	if err != nil {
 		return fmt.Errorf("failed to lock escrow: %w", err)
@@ -484,7 +497,12 @@ func (p *PostgresStore) EscrowLock(ctx context.Context, agentAddr, amount, refer
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
 	if rows == 0 {
-		return ErrAgentNotFound
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists)
+		if !exists {
+			return ErrAgentNotFound
+		}
+		return ErrInsufficientBalance
 	}
 
 	_, err = tx.ExecContext(ctx, `
@@ -513,6 +531,7 @@ func (p *PostgresStore) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr
 			total_out  = total_out + $2::NUMERIC(20,6),
 			updated_at = NOW()
 		WHERE agent_address = $1
+		  AND escrowed >= $2::NUMERIC(20,6)
 	`, buyerAddr, amount)
 	if err != nil {
 		return fmt.Errorf("failed to debit buyer escrow: %w", err)
@@ -522,7 +541,12 @@ func (p *PostgresStore) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
 	if rows == 0 {
-		return ErrAgentNotFound
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, buyerAddr).Scan(&exists)
+		if !exists {
+			return ErrAgentNotFound
+		}
+		return ErrInsufficientBalance
 	}
 
 	// Credit seller's available

@@ -178,8 +178,11 @@ func (h *Handler) RequestWithdrawal(c *gin.Context) {
 			return
 		}
 
+		// Use a unique reference for the hold lifecycle so credit_draw_hold tracking works
+		holdRef := "withdrawal:" + address + ":" + req.Amount
+
 		// Hold funds atomically before transfer to prevent TOCTOU double-spend
-		if err := h.ledger.Hold(c.Request.Context(), address, req.Amount, "withdrawal"); err != nil {
+		if err := h.ledger.Hold(c.Request.Context(), address, req.Amount, holdRef); err != nil {
 			if err == ErrInsufficientBalance {
 				c.JSON(http.StatusBadRequest, gin.H{
 					"error":   "insufficient_balance",
@@ -198,7 +201,7 @@ func (h *Handler) RequestWithdrawal(c *gin.Context) {
 		txHash, err := h.executor.Transfer(c.Request.Context(), common.HexToAddress(address), amountBig)
 		if err != nil {
 			// Release the hold since transfer failed
-			_ = h.ledger.ReleaseHold(c.Request.Context(), address, req.Amount, "withdrawal")
+			_ = h.ledger.ReleaseHold(c.Request.Context(), address, req.Amount, holdRef)
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "transfer_failed",
 				"message": "Failed to execute withdrawal",
@@ -206,8 +209,8 @@ func (h *Handler) RequestWithdrawal(c *gin.Context) {
 			return
 		}
 
-		// Confirm the hold (pending → total_out)
-		if err := h.ledger.ConfirmHold(c.Request.Context(), address, req.Amount, "withdrawal:"+txHash); err != nil {
+		// Confirm the hold (pending → total_out) — same reference as Hold
+		if err := h.ledger.ConfirmHold(c.Request.Context(), address, req.Amount, holdRef); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"status":  "partial_failure",
 				"error":   "ledger_sync_failed",

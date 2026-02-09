@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -109,4 +111,45 @@ func GetAuthenticatedAgent(c *gin.Context) string {
 func IsAuthenticated(c *gin.Context) bool {
 	_, exists := c.Get(ContextKeyAPIKey)
 	return exists
+}
+
+// RequireAdmin middleware restricts access to admin endpoints.
+// Checks the X-Admin-Secret header against the ADMIN_SECRET env var.
+// In demo mode (no ADMIN_SECRET set), allows any authenticated request.
+func RequireAdmin() gin.HandlerFunc {
+	adminSecret := os.Getenv("ADMIN_SECRET")
+	return func(c *gin.Context) {
+		if adminSecret == "" {
+			// Demo mode: allow any authenticated request
+			if _, exists := c.Get(ContextKeyAPIKey); !exists {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"error":   "unauthorized",
+					"message": "API key required.",
+				})
+				return
+			}
+			c.Next()
+			return
+		}
+
+		// Production mode: require admin secret
+		provided := c.GetHeader("X-Admin-Secret")
+		if provided == "" {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error":   "forbidden",
+				"message": "Admin access required.",
+			})
+			return
+		}
+
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(adminSecret)) != 1 {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error":   "forbidden",
+				"message": "Invalid admin credentials.",
+			})
+			return
+		}
+
+		c.Next()
+	}
 }

@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -244,9 +245,15 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 	escrow.UpdatedAt = now
 
 	if err := s.store.Update(ctx, escrow); err != nil {
-		// Compensate: reverse the ledger release to prevent double-payment
-		_ = s.ledger.RefundEscrow(ctx, escrow.SellerAddr, escrow.Amount, escrow.ID)
-		return nil, fmt.Errorf("failed to update escrow after fund release: %w", err)
+		// Retry once — funds already moved, we must persist the state change
+		if retryErr := s.store.Update(ctx, escrow); retryErr != nil {
+			// CRITICAL: Funds were released to seller but escrow record is stale.
+			// Cannot safely reverse ReleaseEscrow (no inverse operation).
+			// Log for manual resolution rather than applying wrong compensation.
+			log.Printf("CRITICAL: escrow %s funds released to %s but status update failed: %v",
+				escrow.ID, escrow.SellerAddr, retryErr)
+			return nil, fmt.Errorf("failed to update escrow after fund release (requires manual resolution): %w", err)
+		}
 	}
 
 	// Record confirmed transaction for reputation
@@ -335,9 +342,15 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 	escrow.UpdatedAt = now
 
 	if err := s.store.Update(ctx, escrow); err != nil {
-		// Compensate: reverse the release to prevent double-payment on retry
-		_ = s.ledger.RefundEscrow(ctx, escrow.SellerAddr, escrow.Amount, escrow.ID)
-		return fmt.Errorf("failed to update escrow after auto-release: %w", err)
+		// Retry once — funds already moved, we must persist the state change
+		if retryErr := s.store.Update(ctx, escrow); retryErr != nil {
+			// CRITICAL: Funds were auto-released to seller but escrow record is stale.
+			// Cannot safely reverse ReleaseEscrow (no inverse operation).
+			// Log for manual resolution rather than applying wrong compensation.
+			log.Printf("CRITICAL: escrow %s auto-released to %s but status update failed: %v",
+				escrow.ID, escrow.SellerAddr, retryErr)
+			return fmt.Errorf("failed to update escrow after auto-release (requires manual resolution): %w", err)
+		}
 	}
 
 	// Record confirmed transaction for reputation (auto-release counts as success)

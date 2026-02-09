@@ -568,8 +568,8 @@ func (s *Server) setupRoutes() {
 		}
 
 		// Admin route for recording deposits (in production: webhook from blockchain indexer)
-		// RequireAuth enforces a valid API key — Middleware alone only sets context optionally.
-		protectedLedger.POST("/admin/deposits", auth.RequireAuth(s.authMgr), ledgerHandler.RecordDeposit)
+		// RequireAdmin checks X-Admin-Secret header (or allows any auth in demo mode).
+		protectedLedger.POST("/admin/deposits", auth.RequireAdmin(), ledgerHandler.RecordDeposit)
 	}
 
 	// Gas abstraction routes (agents pay USDC only, gas is sponsored)

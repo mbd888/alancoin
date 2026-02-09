@@ -14,6 +14,7 @@ type MemoryStore struct {
 	balances        map[string]*Balance
 	entries         []*Entry
 	deposits        map[string]bool
+	refunds         map[string]bool   // "addr:ref" -> already refunded
 	holdCreditDraws map[string]string // "addr:ref" -> credit drawn amount during Hold
 	mu              sync.RWMutex
 }
@@ -24,6 +25,7 @@ func NewMemoryStore() *MemoryStore {
 		balances:        make(map[string]*Balance),
 		entries:         make([]*Entry, 0),
 		deposits:        make(map[string]bool),
+		refunds:         make(map[string]bool),
 		holdCreditDraws: make(map[string]string),
 	}
 }
@@ -218,6 +220,12 @@ func (m *MemoryStore) Refund(ctx context.Context, agentAddr, amount, reference, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Idempotency: prevent duplicate refunds for the same reference
+	refundKey := agentAddr + ":" + reference
+	if m.refunds[refundKey] {
+		return ErrDuplicateRefund
+	}
+
 	bal, ok := m.balances[agentAddr]
 	if !ok {
 		return ErrAgentNotFound
@@ -239,8 +247,10 @@ func (m *MemoryStore) Refund(ctx context.Context, agentAddr, amount, reference, 
 	bal.TotalOut = usdc.Format(totalOut)
 	bal.UpdatedAt = time.Now()
 
+	m.refunds[refundKey] = true
+
 	m.entries = append(m.entries, &Entry{
-		ID:          "entry_refund",
+		ID:          "entry_refund_" + reference,
 		AgentAddr:   agentAddr,
 		Type:        "refund",
 		Amount:      amount,

@@ -22,6 +22,7 @@ var (
 	ErrAgentNotFound       = errors.New("agent not found")
 	ErrInvalidAmount       = errors.New("invalid amount")
 	ErrDuplicateDeposit    = errors.New("deposit already processed")
+	ErrDuplicateRefund     = errors.New("refund already processed")
 )
 
 // Entry represents a ledger entry
