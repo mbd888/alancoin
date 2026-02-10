@@ -192,6 +192,26 @@ func (p *PostgresStore) ListAutoSelectReady(ctx context.Context, before time.Tim
 	return scanRFPs(rows)
 }
 
+func (p *PostgresStore) ListStaleSelecting(ctx context.Context, before time.Time, limit int) ([]*RFP, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT id, buyer_addr, service_type, description,
+		       min_budget, max_budget, max_latency_ms, min_success_rate,
+		       duration, min_volume, bid_deadline, auto_select,
+		       min_reputation, max_counter_rounds,
+		       scoring_weight_price, scoring_weight_reputation, scoring_weight_sla,
+		       status, winning_bid_id, contract_id, bid_count,
+		       cancel_reason, awarded_at, created_at, updated_at
+		FROM rfps
+		WHERE status = 'selecting' AND bid_deadline < $1
+		ORDER BY bid_deadline ASC
+		LIMIT $2`, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	return scanRFPs(rows)
+}
+
 // --- Bid operations ---
 
 func (p *PostgresStore) CreateBid(ctx context.Context, bid *Bid) error {

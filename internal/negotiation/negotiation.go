@@ -185,6 +185,7 @@ type Store interface {
 	ListByBuyer(ctx context.Context, buyerAddr string, limit int) ([]*RFP, error)
 	ListExpiredRFPs(ctx context.Context, before time.Time, limit int) ([]*RFP, error)
 	ListAutoSelectReady(ctx context.Context, before time.Time, limit int) ([]*RFP, error)
+	ListStaleSelecting(ctx context.Context, before time.Time, limit int) ([]*RFP, error)
 
 	// Bid operations
 	CreateBid(ctx context.Context, bid *Bid) error

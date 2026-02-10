@@ -511,6 +511,14 @@ func (s *Service) CheckExpired(ctx context.Context) {
 			mu.Unlock()
 		}
 	}
+
+	// 3. Stale "selecting" (24h past deadline) → expired
+	stale, err := s.store.ListStaleSelecting(ctx, now.Add(-24*time.Hour), 100)
+	if err == nil {
+		for _, rfp := range stale {
+			s.expireRFP(ctx, rfp)
+		}
+	}
 }
 
 // expireRFP expires an RFP (acquires lock).

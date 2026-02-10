@@ -138,6 +138,26 @@ func (m *MemoryStore) ListAutoSelectReady(_ context.Context, before time.Time, l
 	return result, nil
 }
 
+func (m *MemoryStore) ListStaleSelecting(_ context.Context, before time.Time, limit int) ([]*RFP, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []*RFP
+	for _, r := range m.rfps {
+		if r.Status != RFPStatusSelecting {
+			continue
+		}
+		if r.BidDeadline.Before(before) {
+			cp := *r
+			result = append(result, &cp)
+			if len(result) >= limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
 func (m *MemoryStore) CreateBid(_ context.Context, bid *Bid) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

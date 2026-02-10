@@ -1045,6 +1045,48 @@ func TestCheckExpired_NonAutoWithBids(t *testing.T) {
 	}
 }
 
+func TestCheckExpired_StaleSelecting(t *testing.T) {
+	svc, store, _ := newTestService()
+
+	rfp, _ := svc.PublishRFP(context.Background(), PublishRFPRequest{
+		BuyerAddr:   "0xBuyer",
+		ServiceType: "translation",
+		MinBudget:   "0.50",
+		MaxBudget:   "1.00",
+		Duration:    "7d",
+		BidDeadline: "24h",
+	})
+
+	// Place a bid so it transitions to selecting
+	svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+
+	// Set deadline to 25 hours ago (past the 24h grace period)
+	store.mu.Lock()
+	store.rfps[rfp.ID].BidDeadline = time.Now().Add(-25 * time.Hour)
+	store.rfps[rfp.ID].Status = RFPStatusSelecting
+	store.mu.Unlock()
+
+	svc.CheckExpired(context.Background())
+
+	updated, _ := svc.Get(context.Background(), rfp.ID)
+	if updated.Status != RFPStatusExpired {
+		t.Errorf("expected stale selecting to expire, got %s", updated.Status)
+	}
+
+	// Verify bids were rejected
+	bids, _ := svc.ListBidsByRFP(context.Background(), rfp.ID, 50)
+	for _, b := range bids {
+		if b.Status != BidStatusRejected {
+			t.Errorf("expected bid %s rejected, got %s", b.ID, b.Status)
+		}
+	}
+}
+
 // --- IsTerminal tests ---
 
 func TestRFP_IsTerminal(t *testing.T) {
