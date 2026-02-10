@@ -284,7 +284,7 @@ func (p *PostgresStore) scanComments(rows *sql.Rows) ([]*Comment, error) {
 
 // LikeComment adds a like
 func (p *PostgresStore) LikeComment(ctx context.Context, commentID, agentAddr string) error {
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}
@@ -312,7 +312,7 @@ func (p *PostgresStore) LikeComment(ctx context.Context, commentID, agentAddr st
 
 // UnlikeComment removes a like
 func (p *PostgresStore) UnlikeComment(ctx context.Context, commentID, agentAddr string) error {
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}
@@ -337,7 +337,7 @@ func (p *PostgresStore) UnlikeComment(ctx context.Context, commentID, agentAddr 
 
 // Follow creates a follow relationship
 func (p *PostgresStore) Follow(ctx context.Context, followerAddr, verbalAgentAddr string) error {
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}
@@ -366,7 +366,7 @@ func (p *PostgresStore) Follow(ctx context.Context, followerAddr, verbalAgentAdd
 
 // Unfollow removes a follow relationship
 func (p *PostgresStore) Unfollow(ctx context.Context, followerAddr, verbalAgentAddr string) error {
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}

@@ -18,13 +18,11 @@ type mockLedger struct {
 	released     map[string]string // reference → amount (released escrow)
 	refunded     map[string]string // reference → amount
 	deposits     map[string]string // agentAddr → last amount
-	spends       map[string]string // agentAddr → last amount
 	holds        map[string]string // reference → amount
 	confirmed    map[string]string // reference → amount
 	holdReleased map[string]string // reference → amount
 	escrowErr    error
 	releaseErr   error
-	spendErr     error
 	depositErr   error
 	holdErr      error
 }
@@ -35,7 +33,6 @@ func newMockLedger() *mockLedger {
 		released:     make(map[string]string),
 		refunded:     make(map[string]string),
 		deposits:     make(map[string]string),
-		spends:       make(map[string]string),
 		holds:        make(map[string]string),
 		confirmed:    make(map[string]string),
 		holdReleased: make(map[string]string),
@@ -76,16 +73,6 @@ func (m *mockLedger) Deposit(_ context.Context, agentAddr, amount, reference str
 		return m.depositErr
 	}
 	m.deposits[agentAddr] = amount
-	return nil
-}
-
-func (m *mockLedger) Spend(_ context.Context, agentAddr, amount, reference string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.spendErr != nil {
-		return m.spendErr
-	}
-	m.spends[agentAddr] = amount
 	return nil
 }
 

@@ -211,7 +211,7 @@ func (p *PostgresStore) Update(ctx context.Context, pred *Prediction) error {
 
 // RecordVote records a vote on a prediction
 func (p *PostgresStore) RecordVote(ctx context.Context, predictionID, agentAddr string, agrees bool) error {
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}

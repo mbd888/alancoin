@@ -42,7 +42,7 @@ func (p *PostgresSnapshotStore) Save(ctx context.Context, snap *Snapshot) error 
 }
 
 func (p *PostgresSnapshotStore) SaveBatch(ctx context.Context, snaps []*Snapshot) error {
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}

@@ -301,6 +301,68 @@ func (p *PostgresStore) ListServices(ctx context.Context, query AgentQuery) ([]S
 }
 
 func (p *PostgresStore) DiscoverServices(ctx context.Context, filter ServiceFilter) ([]*ServiceListing, error) {
+	// Try materialized view first (pre-joined with stats + reputation)
+	results, err := p.discoverFromMatview(ctx, filter)
+	if err != nil {
+		// Fall back to base tables if matview doesn't exist yet
+		return p.discoverFromTables(ctx, filter)
+	}
+	return results, nil
+}
+
+func (p *PostgresStore) discoverFromMatview(ctx context.Context, filter ServiceFilter) ([]*ServiceListing, error) {
+	query := `
+		SELECT id, type, service_name, description, price, endpoint,
+		       agent_address, agent_name, tx_count, success_rate,
+		       reputation_score, reputation_tier
+		FROM service_listings_mv
+		WHERE true
+	`
+	var args []interface{}
+
+	if filter.Type != "" {
+		query += fmt.Sprintf(" AND type = $%d", len(args)+1)
+		args = append(args, filter.Type)
+	}
+	if filter.MinPrice != "" {
+		query += fmt.Sprintf(" AND CAST(price AS DECIMAL) >= $%d", len(args)+1)
+		args = append(args, filter.MinPrice)
+	}
+	if filter.MaxPrice != "" {
+		query += fmt.Sprintf(" AND CAST(price AS DECIMAL) <= $%d", len(args)+1)
+		args = append(args, filter.MaxPrice)
+	}
+
+	query += " ORDER BY CAST(price AS DECIMAL) ASC"
+
+	if filter.Limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+	}
+	if filter.Offset > 0 {
+		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
+	}
+
+	rows, err := p.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []*ServiceListing
+	for rows.Next() {
+		var listing ServiceListing
+		if err := rows.Scan(&listing.ID, &listing.Type, &listing.Name, &listing.Description,
+			&listing.Price, &listing.Endpoint, &listing.AgentAddress, &listing.AgentName,
+			&listing.TxCount, &listing.SuccessRate,
+			&listing.ReputationScore, &listing.ReputationTier); err != nil {
+			continue
+		}
+		results = append(results, &listing)
+	}
+	return results, nil
+}
+
+func (p *PostgresStore) discoverFromTables(ctx context.Context, filter ServiceFilter) ([]*ServiceListing, error) {
 	query := `
 		SELECT s.id, s.type, s.name, s.description, s.price, s.endpoint,
 		       a.address, a.name as agent_name
@@ -314,12 +376,10 @@ func (p *PostgresStore) DiscoverServices(ctx context.Context, filter ServiceFilt
 		query += fmt.Sprintf(" AND s.type = $%d", len(args)+1)
 		args = append(args, filter.Type)
 	}
-
 	if filter.MinPrice != "" {
 		query += fmt.Sprintf(" AND CAST(s.price AS DECIMAL) >= $%d", len(args)+1)
 		args = append(args, filter.MinPrice)
 	}
-
 	if filter.MaxPrice != "" {
 		query += fmt.Sprintf(" AND CAST(s.price AS DECIMAL) <= $%d", len(args)+1)
 		args = append(args, filter.MaxPrice)
@@ -349,7 +409,6 @@ func (p *PostgresStore) DiscoverServices(ctx context.Context, filter ServiceFilt
 		}
 		results = append(results, &listing)
 	}
-
 	return results, nil
 }
 

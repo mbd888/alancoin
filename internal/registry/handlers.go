@@ -528,7 +528,8 @@ func (h *Handler) DiscoverServices(c *gin.Context) {
 }
 
 // enrichWithReputation adds reputation data to service listings.
-// It batches lookups by unique agent address to avoid redundant calls.
+// If the matview already provided reputation data (non-zero score or non-empty tier),
+// this skips the per-agent lookups for that listing.
 func (h *Handler) enrichWithReputation(ctx context.Context, services []ServiceListing) {
 	if h.reputation == nil {
 		return
@@ -542,6 +543,11 @@ func (h *Handler) enrichWithReputation(ctx context.Context, services []ServiceLi
 	cache := make(map[string]*repData)
 
 	for i := range services {
+		// Skip if matview already populated reputation data
+		if services[i].ReputationTier != "" && services[i].ReputationTier != "new" || services[i].ReputationScore > 0 || services[i].TxCount > 0 {
+			continue
+		}
+
 		addr := services[i].AgentAddress
 		if _, ok := cache[addr]; !ok {
 			score, tier, err := h.reputation.GetScore(ctx, addr)

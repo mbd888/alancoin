@@ -82,6 +82,8 @@ type Server struct {
 	reputationStore    reputation.SnapshotStore
 	reputationWorker   *reputation.Worker
 	reputationSigner   *reputation.Signer
+	matviewRefresher   *registry.MatviewRefresher
+	partitionMaint     *registry.PartitionMaintainer
 	rateLimiter        *ratelimit.Limiter
 	db                 *sql.DB // nil if using in-memory
 	router             *gin.Engine
@@ -696,6 +698,12 @@ func (s *Server) setupRoutes() {
 			workerInterval = 10 * time.Second // Fast in demo mode
 		}
 		s.reputationWorker = reputation.NewWorker(reputationProvider, s.reputationStore, workerInterval, s.logger)
+	}
+
+	// Create matview refresher for service discovery (Postgres only)
+	if s.db != nil {
+		s.matviewRefresher = registry.NewMatviewRefresher(s.db, 30*time.Second, s.logger)
+		s.partitionMaint = registry.NewPartitionMaintainer(s.db, 24*time.Hour, s.logger)
 	}
 
 	reputationHandler := reputation.NewHandlerFull(reputationProvider, s.reputationStore, s.reputationSigner)
@@ -1322,6 +1330,16 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.reputationWorker.Start(runCtx)
 	}
 
+	// Start materialized view refresher for service discovery
+	if s.matviewRefresher != nil {
+		go s.matviewRefresher.Start(runCtx)
+	}
+
+	// Start partition maintainer for transactions table
+	if s.partitionMaint != nil {
+		go s.partitionMaint.Start(runCtx)
+	}
+
 	// Mark as ready after brief delay for startup
 	go func() {
 		time.Sleep(100 * time.Millisecond)
@@ -1406,6 +1424,18 @@ func (s *Server) Shutdown() error {
 	if s.reputationWorker != nil {
 		s.reputationWorker.Stop()
 		s.logger.Info("reputation worker stopped")
+	}
+
+	// Stop matview refresher
+	if s.matviewRefresher != nil {
+		s.matviewRefresher.Stop()
+		s.logger.Info("matview refresher stopped")
+	}
+
+	// Stop partition maintainer
+	if s.partitionMaint != nil {
+		s.partitionMaint.Stop()
+		s.logger.Info("partition maintainer stopped")
 	}
 
 	// Stop rate limiter cleanup goroutine
@@ -1955,10 +1985,6 @@ func (a *stakesLedgerAdapter) RefundEscrow(ctx context.Context, agentAddr, amoun
 
 func (a *stakesLedgerAdapter) Deposit(ctx context.Context, agentAddr, amount, reference string) error {
 	return a.l.Deposit(ctx, agentAddr, amount, reference)
-}
-
-func (a *stakesLedgerAdapter) Spend(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.Spend(ctx, agentAddr, amount, reference)
 }
 
 func (a *stakesLedgerAdapter) Hold(ctx context.Context, agentAddr, amount, reference string) error {

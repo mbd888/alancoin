@@ -93,6 +93,7 @@ class StakeHolding:
     cost_basis: str
     status: str
     total_earned: str
+    vested_at: str
 
     @classmethod
     def from_dict(cls, data: dict) -> "StakeHolding":
@@ -104,6 +105,7 @@ class StakeHolding:
             cost_basis=data.get("costBasis", "0"),
             status=data.get("status", ""),
             total_earned=data.get("totalEarned", "0"),
+            vested_at=data.get("vestedAt", ""),
         )
 
 
@@ -463,4 +465,25 @@ class InvestMixin:
             "GET",
             f"/v1/stakes/{stake_id}/orders",
             params=params,
+        )
+
+    def list_seller_orders(
+        self,
+        seller_address: str,
+        limit: int = 50,
+    ) -> dict:
+        """
+        List all sell orders placed by a seller across all stakes.
+
+        Args:
+            seller_address: The seller's wallet address
+            limit: Maximum orders to return
+
+        Returns:
+            Dict with 'orders' list and 'count'
+        """
+        return self._request(
+            "GET",
+            f"/v1/agents/{seller_address}/orders",
+            params={"limit": limit},
         )

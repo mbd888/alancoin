@@ -115,7 +115,8 @@ func (s *PostgresStore) ListDueForDistribution(ctx context.Context, now time.Tim
 			total_distributed, undistributed, last_distributed_at, created_at, updated_at
 		FROM stakes
 		WHERE status = 'open' AND undistributed > 0
-		ORDER BY created_at ASC LIMIT $1`,
+		ORDER BY created_at ASC LIMIT $1
+		FOR UPDATE SKIP LOCKED`,
 		limit,
 	)
 	if err != nil {

@@ -22,7 +22,7 @@ func NewDistributor(service *Service, logger *slog.Logger) *Distributor {
 		service:  service,
 		interval: 60 * time.Second,
 		logger:   logger,
-		stop:     make(chan struct{}),
+		stop:     make(chan struct{}, 1),
 	}
 }
 
