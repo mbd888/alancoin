@@ -12,7 +12,6 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U alancoin"]
       interval: 5s
@@ -38,12 +37,28 @@ services:
       - USDC_CONTRACT=0x036CbD53842c5426634e7929541eC2318f3dCF7e
       - DEFAULT_PRICE=0.001
       - PRIVATE_KEY=${PRIVATE_KEY}
+      - REPUTATION_HMAC_SECRET=${REPUTATION_HMAC_SECRET:-}
+      - ADMIN_SECRET=${ADMIN_SECRET:-}
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health/live"]
       interval: 10s
       timeout: 3s
       retries: 3
       start_period: 10s
+    restart: unless-stopped
+
+  sandbox:
+    build:
+      context: ./experiments
+      dockerfile: sandbox/Dockerfile
+    depends_on:
+      alancoin:
+        condition: service_healthy
+    ports:
+      - "8090:8090"
+    environment:
+      - SANDBOX_API_KEY=${SANDBOX_API_KEY:-}
+      - ALANCOIN_URL=http://alancoin:8080
     restart: unless-stopped
 
 volumes:
