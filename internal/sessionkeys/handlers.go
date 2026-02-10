@@ -51,7 +51,7 @@ type BalanceService interface {
 
 // RevenueAccumulator intercepts payments for revenue staking.
 type RevenueAccumulator interface {
-	AccumulateRevenue(ctx context.Context, agentAddr, amount string) error
+	AccumulateRevenue(ctx context.Context, agentAddr, amount, txRef string) error
 }
 
 // EventEmitter broadcasts events to real-time subscribers
@@ -440,7 +440,8 @@ func (h *Handler) Transact(c *gin.Context) {
 
 		// Intercept revenue for stakes (seller earned money)
 		if h.revenue != nil {
-			if revErr := h.revenue.AccumulateRevenue(c.Request.Context(), req.To, req.Amount); revErr != nil {
+			revRef := fmt.Sprintf("sk_tx:%s:%s", keyID, txHash)
+			if revErr := h.revenue.AccumulateRevenue(c.Request.Context(), req.To, req.Amount, revRef); revErr != nil {
 				h.logger.Warn("AccumulateRevenue failed: payment succeeded but revenue not escrowed for stakes",
 					"seller", req.To, "amount", req.Amount, "error", revErr)
 			}

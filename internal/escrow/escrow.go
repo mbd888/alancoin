@@ -92,7 +92,7 @@ type TransactionRecorder interface {
 
 // RevenueAccumulator intercepts payments for revenue staking.
 type RevenueAccumulator interface {
-	AccumulateRevenue(ctx context.Context, agentAddr, amount string) error
+	AccumulateRevenue(ctx context.Context, agentAddr, amount, txRef string) error
 }
 
 // CreateRequest contains the parameters for creating an escrow.
@@ -275,7 +275,7 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 
 	// Intercept revenue for stakes (seller earned money)
 	if s.revenue != nil {
-		_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, escrow.Amount)
+		_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, escrow.Amount, "escrow_confirm:"+escrow.ID)
 	}
 
 	return escrow, nil
@@ -377,7 +377,7 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 
 	// Intercept revenue for stakes (seller earned money)
 	if s.revenue != nil {
-		_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, escrow.Amount)
+		_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, escrow.Amount, "escrow_release:"+escrow.ID)
 	}
 
 	return nil

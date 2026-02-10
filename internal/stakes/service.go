@@ -14,9 +14,10 @@ import (
 
 // Service implements the revenue staking business logic.
 type Service struct {
-	store  Store
-	ledger LedgerService
-	locks  sync.Map // per-stake ID locks
+	store    Store
+	ledger   LedgerService
+	locks    sync.Map // per-stake ID locks
+	seenRefs sync.Map // txRef → struct{} for AccumulateRevenue idempotency
 }
 
 // NewService creates a new staking service.
@@ -134,16 +135,26 @@ func (s *Service) Invest(ctx context.Context, stakeID string, req InvestRequest)
 	totalCost := new(big.Int).Mul(priceBig, big.NewInt(int64(req.Shares)))
 	totalCostStr := usdc.Format(totalCost)
 
-	// Debit investor
-	ref := fmt.Sprintf("stake_invest:%s", stakeID)
-	if err := s.ledger.Spend(ctx, investorAddr, totalCostStr, ref); err != nil {
-		return nil, fmt.Errorf("failed to debit investor: %w", err)
+	// Two-phase hold: Hold investor funds (available → pending) before any
+	// state mutations. If Deposit or any subsequent step fails, we release
+	// the hold instead of leaving the ledger inconsistent.
+	holdRef := fmt.Sprintf("stake_invest:%s:%s", stakeID, investorAddr)
+	if err := s.ledger.Hold(ctx, investorAddr, totalCostStr, holdRef); err != nil {
+		return nil, fmt.Errorf("failed to hold investor funds: %w", err)
 	}
 
-	// Credit agent
-	if err := s.ledger.Deposit(ctx, stake.AgentAddr, totalCostStr, ref); err != nil {
-		log.Printf("CRITICAL: stake %s investor debited but agent credit failed: %v", stakeID, err)
-		return nil, fmt.Errorf("failed to credit agent (requires manual resolution): %w", err)
+	// Credit agent — if this fails, release the hold
+	if err := s.ledger.Deposit(ctx, stake.AgentAddr, totalCostStr, holdRef); err != nil {
+		if relErr := s.ledger.ReleaseHold(ctx, investorAddr, totalCostStr, holdRef); relErr != nil {
+			log.Printf("CRITICAL: stake %s deposit failed AND hold release failed: %v", stakeID, relErr)
+		}
+		return nil, fmt.Errorf("failed to credit agent: %w", err)
+	}
+
+	// Confirm hold (pending → total_out) — deposit succeeded
+	if err := s.ledger.ConfirmHold(ctx, investorAddr, totalCostStr, holdRef); err != nil {
+		log.Printf("CRITICAL: stake %s agent credited but confirm hold failed: %v", stakeID, err)
+		return nil, fmt.Errorf("failed to confirm investor hold: %w", err)
 	}
 
 	// Calculate vesting date
@@ -184,9 +195,18 @@ func (s *Service) Invest(ctx context.Context, stakeID string, req InvestRequest)
 
 // AccumulateRevenue escrows the revenue share portion when an agent earns money.
 // Called by the revenue interceptor after session key payments, escrow releases,
-// and stream settlements.
-func (s *Service) AccumulateRevenue(ctx context.Context, agentAddr, amount string) error {
+// and stream settlements. The txRef parameter is an idempotency key — if the
+// same txRef is seen twice, the second call is silently skipped to prevent
+// double-escrowing the same revenue.
+func (s *Service) AccumulateRevenue(ctx context.Context, agentAddr, amount, txRef string) error {
 	agentAddr = strings.ToLower(agentAddr)
+
+	// Idempotency check: skip if this transaction ref was already processed
+	if txRef != "" {
+		if _, loaded := s.seenRefs.LoadOrStore(txRef, struct{}{}); loaded {
+			return nil // already processed
+		}
+	}
 
 	stakes, err := s.store.ListByAgent(ctx, agentAddr)
 	if err != nil {
@@ -295,6 +315,7 @@ func (s *Service) Distribute(ctx context.Context, stake *Stake) error {
 
 	totalDistributed := big.NewInt(0)
 	holdingCount := 0
+	failedCount := 0
 
 	for _, h := range holdings {
 		payout := new(big.Int).Mul(perShare, big.NewInt(int64(h.Shares)))
@@ -308,6 +329,7 @@ func (s *Service) Distribute(ctx context.Context, stake *Stake) error {
 		// Release escrow: agent → investor
 		if err := s.ledger.ReleaseEscrow(ctx, fresh.AgentAddr, h.InvestorAddr, payoutStr, ref); err != nil {
 			log.Printf("WARNING: failed to distribute to %s for stake %s: %v", h.InvestorAddr, fresh.ID, err)
+			failedCount++
 			continue
 		}
 
@@ -330,8 +352,18 @@ func (s *Service) Distribute(ctx context.Context, stake *Stake) error {
 		holdingCount++
 	}
 
+	// Only record a distribution if at least one holder was paid
+	if holdingCount == 0 {
+		log.Printf("WARNING: stake %s distribution attempted but all %d payouts failed", fresh.ID, failedCount)
+		return nil
+	}
+
 	// Record distribution event
 	now := time.Now()
+	distStatus := "completed"
+	if failedCount > 0 {
+		distStatus = "partial"
+	}
 	dist := &Distribution{
 		ID:             generateDistributionID(),
 		StakeID:        fresh.ID,
@@ -341,7 +373,7 @@ func (s *Service) Distribute(ctx context.Context, stake *Stake) error {
 		PerShareAmount: usdc.Format(perShare),
 		ShareCount:     totalIssuedShares,
 		HoldingCount:   holdingCount,
-		Status:         "completed",
+		Status:         distStatus,
 		CreatedAt:      now,
 	}
 
@@ -349,11 +381,13 @@ func (s *Service) Distribute(ctx context.Context, stake *Stake) error {
 		log.Printf("WARNING: distribution record for stake %s failed: %v", fresh.ID, err)
 	}
 
-	// Update stake totals
+	// Update stake totals — only subtract what was actually distributed,
+	// carrying forward any failed payouts for the next distribution cycle.
+	remaining := new(big.Int).Sub(undistBig, totalDistributed)
 	distTotalBig, _ := usdc.Parse(fresh.TotalDistributed)
 	newDistTotal := new(big.Int).Add(distTotalBig, totalDistributed)
 	fresh.TotalDistributed = usdc.Format(newDistTotal)
-	fresh.Undistributed = "0.000000"
+	fresh.Undistributed = usdc.Format(remaining)
 	fresh.LastDistributedAt = &now
 	fresh.UpdatedAt = now
 
@@ -388,7 +422,20 @@ func (s *Service) CloseStake(ctx context.Context, stakeID string) (*Stake, error
 		}
 	}
 
+	// Cancel all open orders — prevents orphaned fillable orders on a closed stake
+	openOrders, err := s.store.ListOrdersByStake(ctx, stakeID, string(OrderStatusOpen), 1000)
+	if err != nil {
+		log.Printf("WARNING: failed to list orders for cleanup on close stake %s: %v", stakeID, err)
+	}
 	now := time.Now()
+	for _, order := range openOrders {
+		order.Status = string(OrderStatusCancelled)
+		order.UpdatedAt = now
+		if err := s.store.UpdateOrder(ctx, order); err != nil {
+			log.Printf("WARNING: failed to cancel order %s during stake close: %v", order.ID, err)
+		}
+	}
+
 	stake.Status = string(StakeStatusClosed)
 	stake.Undistributed = "0.000000"
 	stake.UpdatedAt = now
@@ -467,17 +514,24 @@ func (s *Service) FillOrder(ctx context.Context, orderID string, req FillOrderRe
 	totalCost := new(big.Int).Mul(priceBig, big.NewInt(int64(order.Shares)))
 	totalCostStr := usdc.Format(totalCost)
 
-	ref := fmt.Sprintf("stake_market:%s", order.ID)
-
-	// Debit buyer
-	if err := s.ledger.Spend(ctx, buyerAddr, totalCostStr, ref); err != nil {
-		return nil, nil, fmt.Errorf("failed to debit buyer: %w", err)
+	// Two-phase hold: Hold buyer funds first, then credit seller, then confirm.
+	holdRef := fmt.Sprintf("stake_market:%s:%s", order.ID, buyerAddr)
+	if err := s.ledger.Hold(ctx, buyerAddr, totalCostStr, holdRef); err != nil {
+		return nil, nil, fmt.Errorf("failed to hold buyer funds: %w", err)
 	}
 
-	// Credit seller
-	if err := s.ledger.Deposit(ctx, order.SellerAddr, totalCostStr, ref); err != nil {
-		log.Printf("CRITICAL: order %s buyer debited but seller credit failed: %v", orderID, err)
-		return nil, nil, fmt.Errorf("failed to credit seller (requires manual resolution): %w", err)
+	// Credit seller — if this fails, release the hold
+	if err := s.ledger.Deposit(ctx, order.SellerAddr, totalCostStr, holdRef); err != nil {
+		if relErr := s.ledger.ReleaseHold(ctx, buyerAddr, totalCostStr, holdRef); relErr != nil {
+			log.Printf("CRITICAL: order %s deposit failed AND hold release failed: %v", orderID, relErr)
+		}
+		return nil, nil, fmt.Errorf("failed to credit seller: %w", err)
+	}
+
+	// Confirm hold (pending → total_out) — seller credited
+	if err := s.ledger.ConfirmHold(ctx, buyerAddr, totalCostStr, holdRef); err != nil {
+		log.Printf("CRITICAL: order %s seller credited but confirm hold failed: %v", orderID, err)
+		return nil, nil, fmt.Errorf("failed to confirm buyer hold: %w", err)
 	}
 
 	// Reduce seller's holding
@@ -605,7 +659,9 @@ func (s *Service) GetPortfolio(ctx context.Context, investorAddr string) (*Portf
 		if h.Status == string(HoldingStatusVesting) && h.IsVested(time.Now()) {
 			h.Status = string(HoldingStatusActive)
 			h.UpdatedAt = time.Now()
-			_ = s.store.UpdateHolding(ctx, h)
+			if err := s.store.UpdateHolding(ctx, h); err != nil {
+				log.Printf("WARNING: holding %s vesting auto-upgrade failed: %v", h.ID, err)
+			}
 		}
 
 		costBig, _ := usdc.Parse(h.CostBasis)
@@ -668,6 +724,14 @@ func (s *Service) ListOrdersByStake(ctx context.Context, stakeID, status string,
 		limit = 50
 	}
 	return s.store.ListOrdersByStake(ctx, stakeID, status, limit)
+}
+
+// ListOrdersBySeller returns orders placed by a seller.
+func (s *Service) ListOrdersBySeller(ctx context.Context, sellerAddr string, limit int) ([]*Order, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	return s.store.ListOrdersBySeller(ctx, strings.ToLower(sellerAddr), limit)
 }
 
 // ListDueForDistribution returns stakes that need distribution.

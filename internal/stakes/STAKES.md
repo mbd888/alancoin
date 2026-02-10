@@ -167,7 +167,7 @@ POST /v1/stakes/:id/close
 Authorization: Bearer <api_key>
 ```
 
-Closes the offering to new investments. Any undistributed revenue in escrow is returned to the agent.
+Closes the offering to new investments. Any undistributed revenue in escrow is returned to the agent. All open sell orders on the stake are automatically cancelled.
 
 ### Place Sell Order
 
@@ -207,11 +207,19 @@ DELETE /v1/stakes/orders/:orderId
 Authorization: Bearer <api_key>
 ```
 
-### List Orders
+### List Orders (by Stake)
 
 ```
 GET /v1/stakes/:id/orders?status=open&limit=50
 ```
+
+### List Orders (by Seller)
+
+```
+GET /v1/agents/:address/orders?limit=50
+```
+
+Returns all orders placed by the seller across all stakes.
 
 ## Python SDK
 
@@ -285,7 +293,8 @@ client.cancel_order(order_id="ord_...")
 Agent earns revenue
         |
         v
-AccumulateRevenue()
+AccumulateRevenue(agentAddr, amount, txRef)
+  - Idempotency check: skip if txRef already seen
   - Calculates revenue share (amount * BPS / 10000)
   - EscrowLock(agent, share) — funds set aside
   - Updates stake.undistributed
@@ -298,20 +307,22 @@ Distributor Timer (every 60s)
     - Calculates per-share amount
     - ReleaseEscrow(agent → each investor)
     - Records Distribution event
-    - Resets undistributed to 0
+    - Subtracts actual distributed from undistributed
+    - Failed payouts carry forward to next cycle
 ```
 
 ### Revenue Interception
 
-Revenue is intercepted via a `RevenueAccumulator` interface injected into each payment package. When any of these operations credit an agent's balance, `AccumulateRevenue()` is called automatically:
+Revenue is intercepted via a `RevenueAccumulator` interface injected into each payment package. When any of these operations credit an agent's balance, `AccumulateRevenue()` is called automatically with a unique `txRef` for idempotency:
 
-| Payment Path | File | Hook Location |
-|---|---|---|
-| Session key payments | `sessionkeys/handlers.go` | After `Deposit(seller)` in `Transact()` |
-| Escrow releases | `escrow/escrow.go` | After `ReleaseEscrow()` in `Confirm()` and `AutoRelease()` |
-| Stream settlements | `streams/service.go` | After `Deposit(seller)` in `settle()` (skipped for disputes) |
+| Payment Path | File | Hook Location | txRef Format |
+|---|---|---|---|
+| Session key payments | `sessionkeys/handlers.go` | After `Deposit(seller)` in `Transact()` | `sk_tx:<keyID>:<txHash>` |
+| Escrow confirms | `escrow/escrow.go` | After `ReleaseEscrow()` in `Confirm()` | `escrow_confirm:<escrowID>` |
+| Escrow auto-releases | `escrow/escrow.go` | After `ReleaseEscrow()` in `AutoRelease()` | `escrow_release:<escrowID>` |
+| Stream settlements | `streams/service.go` | After `Deposit(seller)` in `settle()` (skipped for disputes) | `stream_settle:<streamID>` |
 
-The `revenueAccumulatorAdapter` in `server.go` bridges `stakes.Service` to all three packages.
+The `revenueAccumulatorAdapter` in `server.go` bridges `stakes.Service` to all three packages. The `txRef` ensures the same payment is never double-escrowed, even if the interceptor fires twice.
 
 ### Authentication
 
@@ -325,6 +336,18 @@ All mutating handlers validate that the authenticated agent (`authAgentAddr`) ma
 | `POST /stakes/orders/:id/fill` | `buyerAddr` |
 | `DELETE /stakes/orders/:id` | Validated in service via `callerAddr` |
 
+### Investment Settlement (Two-Phase Holds)
+
+Both `Invest()` and `FillOrder()` use two-phase balance holds to prevent inconsistent ledger state if a step fails mid-transaction:
+
+```
+Invest:
+1. Hold(investor, totalCost)        — available → pending
+2. Deposit(agent, totalCost)        — credit agent
+3. ConfirmHold(investor, totalCost) — pending → total_out
+   (if step 2 fails → ReleaseHold returns funds to available)
+```
+
 ### Secondary Market Settlement
 
 ```
@@ -333,11 +356,13 @@ Seller lists shares → Order created (status: open)
 Buyer fills order
         |
         v
-1. Spend(buyer, totalCost)
-2. Deposit(seller, totalCost)
-3. Reduce seller holding shares (or liquidate if 0)
-4. Create/augment buyer holding (immediately vested)
-5. Mark order filled
+1. Hold(buyer, totalCost)         — available → pending
+2. Deposit(seller, totalCost)     — credit seller
+3. ConfirmHold(buyer, totalCost)  — pending → total_out
+   (if step 2 fails → ReleaseHold returns funds to available)
+4. Reduce seller holding shares (or liquidate if 0)
+5. Create/augment buyer holding (immediately vested)
+6. Mark order filled
 ```
 
 ### Database Schema
@@ -367,19 +392,23 @@ See `migrations/011_stakes.sql` for full schema with constraints and indexes.
 - **No self-investment** — Agent cannot buy their own shares
 - **Vesting enforced** — Shares cannot be sold until the vesting period expires
 - **Escrow-backed distributions** — Revenue share is locked in escrow immediately on earn, preventing the agent from spending it before distribution
+- **Two-phase balance holds** — `Invest()` and `FillOrder()` use Hold → Deposit → ConfirmHold, with ReleaseHold on failure, preventing inconsistent ledger state
+- **Idempotent revenue accumulation** — `AccumulateRevenue()` accepts a `txRef` idempotency key, preventing double-escrowing from duplicate calls
+- **Partial distribution carry-forward** — If individual holder payouts fail during distribution, only the successfully distributed amount is subtracted from `undistributed`; failed payouts carry forward to the next distribution cycle
 - **NUMERIC(20,6) arithmetic** — All monetary calculations use PostgreSQL NUMERIC or Go `math/big`, never floats
 - **Per-stake mutex locking** — Prevents race conditions on concurrent operations
 - **Auth ownership validation** — All mutating handlers verify the caller owns the address they're acting on
 
 ## Testing
 
-31 tests in `stakes_test.go` covering:
+40 tests in `stakes_test.go` covering:
 - CreateStake validation (revenue share bounds, max cap, vesting period)
 - Invest lifecycle (valid, self-investment, insufficient shares/balance, closed stake)
-- AccumulateRevenue (with/without investors, unrelated agents)
-- Distribute (single/multiple investors, proportional payouts)
-- CloseStake (valid, refunds undistributed, idempotent)
-- Secondary market (vesting enforcement, ownership checks, fill/cancel, liquidation)
+- AccumulateRevenue (with/without investors, unrelated agents, idempotency, different refs, empty ref)
+- Distribute (single/multiple investors, proportional payouts, partial failure carry-forward)
+- CloseStake (valid, refunds undistributed, idempotent, cancels orphaned orders)
+- Secondary market (vesting enforcement, ownership checks, fill/cancel, liquidation, seller order listing)
+- Two-phase hold recovery (Invest deposit failure → hold released, FillOrder deposit failure → hold released)
 - Portfolio aggregation
 - Full end-to-end lifecycle
 
@@ -393,6 +422,6 @@ internal/stakes/
 ├── distributor.go     # Background timer for revenue distribution (60s)
 ├── postgres_store.go  # PostgreSQL store implementation
 ├── memory_store.go    # In-memory store for demo/testing
-├── stakes_test.go     # 31 tests
+├── stakes_test.go     # 40 tests
 └── STAKES.md          # This file
 ```

@@ -29,6 +29,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/agents/:address/stakes", h.ListAgentStakes)
 	r.GET("/agents/:address/portfolio", h.GetPortfolio)
 	r.GET("/agents/:address/holdings", h.ListInvestorHoldings)
+	r.GET("/agents/:address/orders", h.ListSellerOrders)
 }
 
 // RegisterProtectedRoutes sets up protected (auth-required) stake routes.
@@ -209,6 +210,20 @@ func (h *Handler) ListInvestorHoldings(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"holdings": holdings, "count": len(holdings)})
+}
+
+// ListSellerOrders handles GET /v1/agents/:address/orders
+func (h *Handler) ListSellerOrders(c *gin.Context) {
+	address := c.Param("address")
+	limit := parseLimit(c, 50, 200)
+
+	orders, err := h.service.ListOrdersBySeller(c.Request.Context(), address, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"orders": orders, "count": len(orders)})
 }
 
 // ListDistributions handles GET /v1/stakes/:id/distributions

@@ -1932,8 +1932,8 @@ type revenueAccumulatorAdapter struct {
 	stakes *stakes.Service
 }
 
-func (a *revenueAccumulatorAdapter) AccumulateRevenue(ctx context.Context, agentAddr, amount string) error {
-	return a.stakes.AccumulateRevenue(ctx, agentAddr, amount)
+func (a *revenueAccumulatorAdapter) AccumulateRevenue(ctx context.Context, agentAddr, amount, txRef string) error {
+	return a.stakes.AccumulateRevenue(ctx, agentAddr, amount, txRef)
 }
 
 // stakesLedgerAdapter adapts ledger.Ledger to stakes.LedgerService
@@ -1959,6 +1959,18 @@ func (a *stakesLedgerAdapter) Deposit(ctx context.Context, agentAddr, amount, re
 
 func (a *stakesLedgerAdapter) Spend(ctx context.Context, agentAddr, amount, reference string) error {
 	return a.l.Spend(ctx, agentAddr, amount, reference)
+}
+
+func (a *stakesLedgerAdapter) Hold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.Hold(ctx, agentAddr, amount, reference)
+}
+
+func (a *stakesLedgerAdapter) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.ConfirmHold(ctx, agentAddr, amount, reference)
+}
+
+func (a *stakesLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
 }
 
 // contractFormerAdapter adapts contracts.Service to negotiation.ContractFormer

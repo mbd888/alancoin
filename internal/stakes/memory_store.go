@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 // Compile-time assertion.
@@ -103,7 +105,8 @@ func (m *MemoryStore) ListDueForDistribution(_ context.Context, now time.Time, l
 	defer m.mu.RUnlock()
 	var due []*Stake
 	for _, s := range m.stakes {
-		if s.Status != string(StakeStatusOpen) || s.Undistributed == "0" || s.Undistributed == "0.000000" {
+		undistBig, _ := usdc.Parse(s.Undistributed)
+		if s.Status != string(StakeStatusOpen) || undistBig == nil || undistBig.Sign() <= 0 {
 			continue
 		}
 		freq := freqToDuration(s.DistributionFreq)

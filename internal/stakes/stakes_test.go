@@ -13,25 +13,32 @@ import (
 // --- Mock Ledger ---
 
 type mockLedger struct {
-	mu         sync.Mutex
-	escrows    map[string]string // reference → amount
-	released   map[string]string // reference → amount (released escrow)
-	refunded   map[string]string // reference → amount
-	deposits   map[string]string // agentAddr → last amount
-	spends     map[string]string // agentAddr → last amount
-	escrowErr  error
-	releaseErr error
-	spendErr   error
-	depositErr error
+	mu           sync.Mutex
+	escrows      map[string]string // reference → amount
+	released     map[string]string // reference → amount (released escrow)
+	refunded     map[string]string // reference → amount
+	deposits     map[string]string // agentAddr → last amount
+	spends       map[string]string // agentAddr → last amount
+	holds        map[string]string // reference → amount
+	confirmed    map[string]string // reference → amount
+	holdReleased map[string]string // reference → amount
+	escrowErr    error
+	releaseErr   error
+	spendErr     error
+	depositErr   error
+	holdErr      error
 }
 
 func newMockLedger() *mockLedger {
 	return &mockLedger{
-		escrows:  make(map[string]string),
-		released: make(map[string]string),
-		refunded: make(map[string]string),
-		deposits: make(map[string]string),
-		spends:   make(map[string]string),
+		escrows:      make(map[string]string),
+		released:     make(map[string]string),
+		refunded:     make(map[string]string),
+		deposits:     make(map[string]string),
+		spends:       make(map[string]string),
+		holds:        make(map[string]string),
+		confirmed:    make(map[string]string),
+		holdReleased: make(map[string]string),
 	}
 }
 
@@ -79,6 +86,30 @@ func (m *mockLedger) Spend(_ context.Context, agentAddr, amount, reference strin
 		return m.spendErr
 	}
 	m.spends[agentAddr] = amount
+	return nil
+}
+
+func (m *mockLedger) Hold(_ context.Context, agentAddr, amount, reference string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.holdErr != nil {
+		return m.holdErr
+	}
+	m.holds[reference] = amount
+	return nil
+}
+
+func (m *mockLedger) ConfirmHold(_ context.Context, agentAddr, amount, reference string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.confirmed[reference] = amount
+	return nil
+}
+
+func (m *mockLedger) ReleaseHold(_ context.Context, agentAddr, amount, reference string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.holdReleased[reference] = amount
 	return nil
 }
 
@@ -251,9 +282,12 @@ func TestInvest(t *testing.T) {
 		t.Errorf("expected vesting, got %s", holding.Status)
 	}
 
-	// Verify ledger was called
-	if ledger.spends[investorAddr] != "50.000000" {
-		t.Errorf("expected investor spent 50.000000, got %s", ledger.spends[investorAddr])
+	// Verify ledger was called (two-phase hold)
+	if len(ledger.holds) == 0 {
+		t.Error("expected a hold to be placed on investor funds")
+	}
+	if len(ledger.confirmed) == 0 {
+		t.Error("expected hold to be confirmed after deposit")
 	}
 	if ledger.deposits[agentAddr] != "50.000000" {
 		t.Errorf("expected agent received 50.000000, got %s", ledger.deposits[agentAddr])
@@ -318,7 +352,7 @@ func TestInvest_InsufficientBalance(t *testing.T) {
 	svc, ledger := newTestService()
 	stake := createTestStake(t, svc)
 
-	ledger.spendErr = errors.New("insufficient balance")
+	ledger.holdErr = errors.New("insufficient balance")
 
 	_, err := svc.Invest(context.Background(), stake.ID, InvestRequest{
 		InvestorAddr: investorAddr,
@@ -339,7 +373,7 @@ func TestAccumulateRevenue(t *testing.T) {
 	investInStake(t, svc, stake.ID, 100)
 
 	// Agent earns $100
-	err := svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000")
+	err := svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000", "")
 	if err != nil {
 		t.Fatalf("AccumulateRevenue: %v", err)
 	}
@@ -368,7 +402,7 @@ func TestAccumulateRevenue_NoInvestors(t *testing.T) {
 	svc, ledger := newTestService()
 	createTestStake(t, svc) // no one invested
 
-	err := svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000")
+	err := svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000", "")
 	if err != nil {
 		t.Fatalf("AccumulateRevenue: %v", err)
 	}
@@ -385,7 +419,7 @@ func TestAccumulateRevenue_UnrelatedAgent(t *testing.T) {
 	investInStake(t, svc, createTestStake(t, svc).ID, 10)
 
 	// Different agent earns money — should not affect our stake
-	err := svc.AccumulateRevenue(context.Background(), "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead", "100.000000")
+	err := svc.AccumulateRevenue(context.Background(), "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead", "100.000000", "")
 	if err != nil {
 		t.Fatalf("AccumulateRevenue: %v", err)
 	}
@@ -402,7 +436,7 @@ func TestDistribute(t *testing.T) {
 	investInStake(t, svc, stake.ID, 100)
 
 	// Accumulate revenue
-	_ = svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000")
+	_ = svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000", "")
 
 	// Distribute
 	updated, _ := svc.GetStake(context.Background(), stake.ID)
@@ -468,7 +502,7 @@ func TestDistribute_MultipleInvestors(t *testing.T) {
 	}
 
 	// Agent earns $200 → 15% = $30 → distributed to 400 shares
-	_ = svc.AccumulateRevenue(context.Background(), agentAddr, "200.000000")
+	_ = svc.AccumulateRevenue(context.Background(), agentAddr, "200.000000", "")
 
 	updated, _ := svc.GetStake(context.Background(), stake.ID)
 	err = svc.Distribute(context.Background(), updated)
@@ -512,7 +546,7 @@ func TestCloseStake_RefundsUndistributed(t *testing.T) {
 	investInStake(t, svc, stake.ID, 100)
 
 	// Accumulate some revenue
-	_ = svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000")
+	_ = svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000", "")
 
 	// Close should refund the undistributed escrow
 	_, err := svc.CloseStake(context.Background(), stake.ID)
@@ -675,9 +709,16 @@ func TestFillOrder(t *testing.T) {
 		t.Errorf("expected seller to have 50 remaining, got %d", sellerHolding.Shares)
 	}
 
-	// Verify ledger calls
-	if ledger.spends[buyerAddr] != "37.500000" {
-		t.Errorf("expected buyer spent 37.500000, got %s", ledger.spends[buyerAddr])
+	// Verify ledger calls (two-phase hold)
+	foundHold := false
+	for _, amt := range ledger.holds {
+		if amt == "37.500000" {
+			foundHold = true
+			break
+		}
+	}
+	if !foundHold {
+		t.Error("expected a hold of 37.500000 on buyer")
 	}
 	if ledger.deposits[investorAddr] != "37.500000" {
 		t.Errorf("expected seller received 37.500000, got %s", ledger.deposits[investorAddr])
@@ -835,7 +876,7 @@ func TestFullLifecycle(t *testing.T) {
 	holding := investInStake(t, svc, stake.ID, 500)
 
 	// 3. Agent earns revenue
-	_ = svc.AccumulateRevenue(ctx, agentAddr, "1000.000000")
+	_ = svc.AccumulateRevenue(ctx, agentAddr, "1000.000000", "")
 
 	// 4. Verify undistributed = 15% of 1000 = 150
 	updated, _ := svc.GetStake(ctx, stake.ID)
@@ -962,5 +1003,303 @@ func TestHoldingIsVested(t *testing.T) {
 	h2 := &Holding{VestedAt: time.Now().Add(time.Hour)}
 	if h2.IsVested(time.Now()) {
 		t.Error("holding should NOT be vested (future vesting date)")
+	}
+}
+
+// =========================================================================
+// P0 Fix: Two-phase hold recovery tests
+// =========================================================================
+
+func TestInvest_DepositFailure_ReleasesHold(t *testing.T) {
+	svc, ledger := newTestService()
+	stake := createTestStake(t, svc)
+
+	// Deposit will fail — hold should be released
+	ledger.depositErr = errors.New("deposit failed")
+
+	_, err := svc.Invest(context.Background(), stake.ID, InvestRequest{
+		InvestorAddr: investorAddr,
+		Shares:       10,
+	})
+	if err == nil {
+		t.Fatal("expected error when deposit fails")
+	}
+
+	// Verify hold was placed
+	if len(ledger.holds) == 0 {
+		t.Error("expected hold to be placed before deposit attempt")
+	}
+
+	// Verify hold was released (not confirmed)
+	if len(ledger.holdReleased) == 0 {
+		t.Error("expected hold to be released after deposit failure")
+	}
+	if len(ledger.confirmed) != 0 {
+		t.Error("expected no confirmed holds after deposit failure")
+	}
+
+	// Verify stake was not modified
+	updated, _ := svc.GetStake(context.Background(), stake.ID)
+	if updated.AvailableShares != stake.TotalShares {
+		t.Errorf("expected shares unchanged, got %d available", updated.AvailableShares)
+	}
+}
+
+func TestFillOrder_DepositFailure_ReleasesHold(t *testing.T) {
+	svc, ledger := newTestService()
+	stake := createTestStake(t, svc)
+	holding := investInStake(t, svc, stake.ID, 100)
+
+	// Manually vest
+	holding.VestedAt = time.Now().Add(-time.Hour)
+	holding.Status = string(HoldingStatusActive)
+	_ = svc.store.UpdateHolding(context.Background(), holding)
+
+	order, _ := svc.PlaceOrder(context.Background(), PlaceOrderRequest{
+		SellerAddr:    investorAddr,
+		HoldingID:     holding.ID,
+		Shares:        50,
+		PricePerShare: "0.75",
+	})
+
+	// Now make deposit fail
+	ledger.depositErr = errors.New("deposit failed")
+
+	_, _, err := svc.FillOrder(context.Background(), order.ID, FillOrderRequest{
+		BuyerAddr: buyerAddr,
+	})
+	if err == nil {
+		t.Fatal("expected error when deposit fails")
+	}
+
+	// Verify hold was released
+	if len(ledger.holdReleased) == 0 {
+		t.Error("expected hold to be released after deposit failure")
+	}
+
+	// Order should still be open
+	o, _ := svc.GetOrder(context.Background(), order.ID)
+	if o.Status != string(OrderStatusOpen) {
+		t.Errorf("expected order still open, got %s", o.Status)
+	}
+}
+
+// =========================================================================
+// P0 Fix: Distribution carry-forward tests
+// =========================================================================
+
+func TestDistribute_PartialFailure_CarriesForward(t *testing.T) {
+	svc, ledger := newTestService()
+	stake := createTestStake(t, svc)
+
+	// Two investors
+	investInStake(t, svc, stake.ID, 300)
+	_, _ = svc.Invest(context.Background(), stake.ID, InvestRequest{
+		InvestorAddr: buyerAddr,
+		Shares:       100,
+	})
+
+	// Accumulate revenue: 15% of $200 = $30
+	_ = svc.AccumulateRevenue(context.Background(), agentAddr, "200.000000", "")
+
+	// Make escrow release fail — all distributions will fail
+	ledger.releaseErr = errors.New("release failed")
+
+	updated, _ := svc.GetStake(context.Background(), stake.ID)
+	_ = svc.Distribute(context.Background(), updated)
+
+	// Undistributed should remain at $30 (carried forward, not zeroed)
+	afterDist, _ := svc.GetStake(context.Background(), stake.ID)
+	if afterDist.Undistributed == "0.000000" {
+		t.Error("expected undistributed to be carried forward, not zeroed")
+	}
+	if afterDist.Undistributed != "30.000000" {
+		t.Errorf("expected undistributed 30.000000, got %s", afterDist.Undistributed)
+	}
+}
+
+func TestDistribute_PartialSuccess_SubtractsDistributed(t *testing.T) {
+	svc, ledger := newTestService()
+	stake := createTestStake(t, svc)
+
+	// One investor with 100 shares
+	investInStake(t, svc, stake.ID, 100)
+
+	// Accumulate: 15% of $100 = $15
+	_ = svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000", "")
+
+	// Allow releases (default: no error)
+	updated, _ := svc.GetStake(context.Background(), stake.ID)
+	err := svc.Distribute(context.Background(), updated)
+	if err != nil {
+		t.Fatalf("Distribute: %v", err)
+	}
+
+	afterDist, _ := svc.GetStake(context.Background(), stake.ID)
+
+	// All succeeded, so undistributed should be 0
+	if afterDist.Undistributed != "0.000000" {
+		t.Errorf("expected undistributed 0.000000, got %s", afterDist.Undistributed)
+	}
+
+	// Verify distribution status is "completed" (not "partial")
+	dists, _ := svc.ListDistributions(context.Background(), stake.ID, 10)
+	if len(dists) != 1 {
+		t.Fatalf("expected 1 distribution, got %d", len(dists))
+	}
+	if dists[0].Status != "completed" {
+		t.Errorf("expected completed status, got %s", dists[0].Status)
+	}
+	_ = ledger
+}
+
+// =========================================================================
+// P0 Fix: AccumulateRevenue idempotency tests
+// =========================================================================
+
+func TestAccumulateRevenue_Idempotent(t *testing.T) {
+	svc, ledger := newTestService()
+	stake := createTestStake(t, svc)
+	investInStake(t, svc, stake.ID, 100)
+
+	// First call with a txRef
+	err := svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000", "tx_123")
+	if err != nil {
+		t.Fatalf("AccumulateRevenue: %v", err)
+	}
+
+	// 15% of $100 = $15 escrowed
+	updated, _ := svc.GetStake(context.Background(), stake.ID)
+	if updated.Undistributed != "15.000000" {
+		t.Errorf("expected 15.000000, got %s", updated.Undistributed)
+	}
+
+	// Second call with SAME txRef — should be a no-op
+	err = svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000", "tx_123")
+	if err != nil {
+		t.Fatalf("AccumulateRevenue (duplicate): %v", err)
+	}
+
+	// Should still be $15, not $30
+	updated2, _ := svc.GetStake(context.Background(), stake.ID)
+	if updated2.Undistributed != "15.000000" {
+		t.Errorf("expected 15.000000 after duplicate call, got %s", updated2.Undistributed)
+	}
+
+	// Only one escrow call
+	if len(ledger.escrows) != 1 {
+		t.Errorf("expected 1 escrow call, got %d", len(ledger.escrows))
+	}
+}
+
+func TestAccumulateRevenue_DifferentRefs(t *testing.T) {
+	svc, _ := newTestService()
+	stake := createTestStake(t, svc)
+	investInStake(t, svc, stake.ID, 100)
+
+	// Two calls with different refs — both should process
+	_ = svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000", "tx_aaa")
+	_ = svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000", "tx_bbb")
+
+	updated, _ := svc.GetStake(context.Background(), stake.ID)
+	if updated.Undistributed != "30.000000" {
+		t.Errorf("expected 30.000000 (two distinct txs), got %s", updated.Undistributed)
+	}
+}
+
+func TestAccumulateRevenue_EmptyRef_NoDedup(t *testing.T) {
+	svc, _ := newTestService()
+	stake := createTestStake(t, svc)
+	investInStake(t, svc, stake.ID, 100)
+
+	// Empty ref — no dedup, both should process
+	_ = svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000", "")
+	_ = svc.AccumulateRevenue(context.Background(), agentAddr, "100.000000", "")
+
+	updated, _ := svc.GetStake(context.Background(), stake.ID)
+	if updated.Undistributed != "30.000000" {
+		t.Errorf("expected 30.000000 (empty ref = no dedup), got %s", updated.Undistributed)
+	}
+}
+
+// =========================================================================
+// P1 Fix: CloseStake cancels orphaned orders
+// =========================================================================
+
+func TestCloseStake_CancelsOpenOrders(t *testing.T) {
+	svc, _ := newTestService()
+	stake := createTestStake(t, svc)
+	holding := investInStake(t, svc, stake.ID, 100)
+
+	// Vest and place two orders
+	holding.VestedAt = time.Now().Add(-time.Hour)
+	holding.Status = string(HoldingStatusActive)
+	_ = svc.store.UpdateHolding(context.Background(), holding)
+
+	order1, _ := svc.PlaceOrder(context.Background(), PlaceOrderRequest{
+		SellerAddr:    investorAddr,
+		HoldingID:     holding.ID,
+		Shares:        30,
+		PricePerShare: "0.75",
+	})
+	order2, _ := svc.PlaceOrder(context.Background(), PlaceOrderRequest{
+		SellerAddr:    investorAddr,
+		HoldingID:     holding.ID,
+		Shares:        20,
+		PricePerShare: "1.00",
+	})
+
+	// Close the stake
+	_, err := svc.CloseStake(context.Background(), stake.ID)
+	if err != nil {
+		t.Fatalf("CloseStake: %v", err)
+	}
+
+	// Both orders should be cancelled
+	o1, _ := svc.GetOrder(context.Background(), order1.ID)
+	if o1.Status != string(OrderStatusCancelled) {
+		t.Errorf("expected order1 cancelled, got %s", o1.Status)
+	}
+	o2, _ := svc.GetOrder(context.Background(), order2.ID)
+	if o2.Status != string(OrderStatusCancelled) {
+		t.Errorf("expected order2 cancelled, got %s", o2.Status)
+	}
+}
+
+// =========================================================================
+// P1 Fix: ListOrdersBySeller
+// =========================================================================
+
+func TestListOrdersBySeller(t *testing.T) {
+	svc, _ := newTestService()
+	stake := createTestStake(t, svc)
+	holding := investInStake(t, svc, stake.ID, 100)
+
+	// Vest
+	holding.VestedAt = time.Now().Add(-time.Hour)
+	holding.Status = string(HoldingStatusActive)
+	_ = svc.store.UpdateHolding(context.Background(), holding)
+
+	// Place an order
+	_, _ = svc.PlaceOrder(context.Background(), PlaceOrderRequest{
+		SellerAddr:    investorAddr,
+		HoldingID:     holding.ID,
+		Shares:        50,
+		PricePerShare: "0.75",
+	})
+
+	// Query by seller
+	orders, err := svc.ListOrdersBySeller(context.Background(), investorAddr, 50)
+	if err != nil {
+		t.Fatalf("ListOrdersBySeller: %v", err)
+	}
+	if len(orders) != 1 {
+		t.Errorf("expected 1 order, got %d", len(orders))
+	}
+
+	// Different seller should return 0
+	orders2, _ := svc.ListOrdersBySeller(context.Background(), buyerAddr, 50)
+	if len(orders2) != 0 {
+		t.Errorf("expected 0 orders for different seller, got %d", len(orders2))
 	}
 }

@@ -107,7 +107,7 @@ type TransactionRecorder interface {
 
 // RevenueAccumulator intercepts payments for revenue staking.
 type RevenueAccumulator interface {
-	AccumulateRevenue(ctx context.Context, agentAddr, amount string) error
+	AccumulateRevenue(ctx context.Context, agentAddr, amount, txRef string) error
 }
 
 // OpenRequest contains the parameters for opening a stream.

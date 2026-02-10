@@ -169,6 +169,11 @@ type LedgerService interface {
 	RefundEscrow(ctx context.Context, agentAddr, amount, reference string) error
 	Deposit(ctx context.Context, agentAddr, amount, reference string) error
 	Spend(ctx context.Context, agentAddr, amount, reference string) error
+	// Two-phase holds: Hold moves available → pending, ConfirmHold moves
+	// pending → total_out, ReleaseHold moves pending → available.
+	Hold(ctx context.Context, agentAddr, amount, reference string) error
+	ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error
+	ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error
 }
 
 // Request/response types for handlers.

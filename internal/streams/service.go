@@ -264,7 +264,7 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 
 	// Intercept revenue for stakes (seller earned money)
 	if s.revenue != nil && spentBig.Sign() > 0 && status != StatusDisputed {
-		_ = s.revenue.AccumulateRevenue(ctx, stream.SellerAddr, stream.SpentAmount)
+		_ = s.revenue.AccumulateRevenue(ctx, stream.SellerAddr, stream.SpentAmount, "stream_settle:"+stream.ID)
 	}
 
 	return stream, nil
