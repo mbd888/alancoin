@@ -207,7 +207,7 @@ func (s *PostgresStore) ListHoldingsByStake(ctx context.Context, stakeID string)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanHoldings(rows)
 }
 
@@ -221,7 +221,7 @@ func (s *PostgresStore) ListHoldingsByInvestor(ctx context.Context, investorAddr
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanHoldings(rows)
 }
 
@@ -265,7 +265,7 @@ func (s *PostgresStore) ListDistributions(ctx context.Context, stakeID string, l
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var result []*Distribution
 	for rows.Next() {
