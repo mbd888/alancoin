@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -30,6 +31,16 @@ const (
 	EventSessionKeyRevoked EventType = "session_key.revoked"
 	EventBalanceDeposit    EventType = "balance.deposit"
 	EventBalanceWithdraw   EventType = "balance.withdraw"
+
+	// Negotiation events
+	EventRFPPublished EventType = "rfp.published"
+	EventRFPAwarded   EventType = "rfp.awarded"
+	EventRFPExpired   EventType = "rfp.expired"
+	EventRFPCancelled EventType = "rfp.cancelled"
+	EventBidPlaced    EventType = "bid.placed"
+	EventBidAccepted  EventType = "bid.accepted"
+	EventBidRejected  EventType = "bid.rejected"
+	EventBidCountered EventType = "bid.countered"
 )
 
 // Event represents a webhook event
@@ -136,7 +147,12 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event *Event) error {
 		// Send async with concurrency limit
 		d.sem <- struct{}{}
 		go func(s *Subscription) {
-			defer func() { <-d.sem }()
+			defer func() {
+				<-d.sem
+				if r := recover(); r != nil {
+					slog.Error("webhook dispatch panic", "subscription", s.ID, "panic", r)
+				}
+			}()
 			d.send(ctx, s, event)
 		}(sub)
 	}
@@ -161,7 +177,12 @@ func (d *Dispatcher) DispatchToAgent(ctx context.Context, agentAddr string, even
 			if et == event.Type {
 				d.sem <- struct{}{}
 				go func(s *Subscription) {
-					defer func() { <-d.sem }()
+					defer func() {
+						<-d.sem
+						if r := recover(); r != nil {
+							slog.Error("webhook dispatch panic", "subscription", s.ID, "panic", r)
+						}
+					}()
 					d.send(ctx, s, event)
 				}(sub)
 				break

@@ -51,7 +51,7 @@ func (p *PostgresStore) Create(ctx context.Context, line *CreditLine) error {
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Check for existing active or suspended credit line for this agent.
 	var existingStatus string

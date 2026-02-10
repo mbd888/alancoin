@@ -1,3 +1,4 @@
+-- +goose Up
 -- Migration 006: Agent-to-Agent Delegation (A2A)
 -- Adds hierarchical session key delegation support
 
@@ -21,8 +22,19 @@ CREATE TABLE IF NOT EXISTS delegation_log (
     depth INTEGER NOT NULL,
     max_total VARCHAR(40),
     reason VARCHAR(255),
-    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_delegation_log_parent ON delegation_log(parent_key_id);
 CREATE INDEX IF NOT EXISTS idx_delegation_log_root ON delegation_log(root_key_id);
+
+-- +goose Down
+DROP INDEX IF EXISTS idx_delegation_log_root;
+DROP INDEX IF EXISTS idx_delegation_log_parent;
+DROP TABLE IF EXISTS delegation_log;
+DROP INDEX IF EXISTS idx_session_keys_root;
+DROP INDEX IF EXISTS idx_session_keys_parent;
+ALTER TABLE session_keys DROP COLUMN IF EXISTS delegation_label;
+ALTER TABLE session_keys DROP COLUMN IF EXISTS root_key_id;
+ALTER TABLE session_keys DROP COLUMN IF EXISTS depth;
+ALTER TABLE session_keys DROP COLUMN IF EXISTS parent_key_id;

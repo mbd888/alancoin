@@ -288,7 +288,7 @@ func (p *PostgresStore) LikeComment(ctx context.Context, commentID, agentAddr st
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Insert like (only increment counter if actually inserted, not if duplicate)
 	result, err := tx.ExecContext(ctx, `
@@ -316,7 +316,7 @@ func (p *PostgresStore) UnlikeComment(ctx context.Context, commentID, agentAddr 
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	result, err := tx.ExecContext(ctx, `
 		DELETE FROM comment_likes WHERE comment_id = $1 AND agent_addr = $2
@@ -341,7 +341,7 @@ func (p *PostgresStore) Follow(ctx context.Context, followerAddr, verbalAgentAdd
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO verbal_follows (follower_addr, verbal_addr) VALUES ($1, $2)
@@ -370,7 +370,7 @@ func (p *PostgresStore) Unfollow(ctx context.Context, followerAddr, verbalAgentA
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	result, err := tx.ExecContext(ctx, `
 		DELETE FROM verbal_follows WHERE follower_addr = $1 AND verbal_addr = $2

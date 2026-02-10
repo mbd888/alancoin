@@ -224,6 +224,22 @@ class Wallet:
             time.sleep(2)
         raise PaymentError(f"Transaction not confirmed within {timeout}s", tx_hash=tx_hash)
 
+    def close(self):
+        """Close the underlying HTTP provider session."""
+        provider = self.w3.provider
+        if hasattr(provider, '_request_kwargs') or hasattr(provider, 'endpoint_uri'):
+            # Web3 HTTPProvider uses a requests.Session internally
+            session = getattr(provider, '_session', None) or getattr(provider, 'session', None)
+            if session and hasattr(session, 'close'):
+                session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
 
 def parse_usdc(amount: str) -> int:
     """

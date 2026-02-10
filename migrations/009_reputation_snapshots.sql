@@ -1,3 +1,4 @@
+-- +goose Up
 -- Reputation snapshots for historical score tracking
 CREATE TABLE IF NOT EXISTS reputation_snapshots (
     id              SERIAL PRIMARY KEY,
@@ -17,3 +18,7 @@ CREATE TABLE IF NOT EXISTS reputation_snapshots (
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_addr_time ON reputation_snapshots(address, created_at DESC);
+
+-- +goose Down
+DROP INDEX IF EXISTS idx_snapshots_addr_time;
+DROP TABLE IF EXISTS reputation_snapshots;

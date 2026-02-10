@@ -81,10 +81,10 @@ type Hub struct {
 	mu         sync.RWMutex
 	logger     *slog.Logger
 
-	// Stats (totalEvents uses atomic for lock-free access from Run goroutine)
+	// Stats
 	totalEvents  atomic.Int64
-	totalClients int64
-	peakClients  int64
+	totalClients atomic.Int64
+	peakClients  atomic.Int64
 }
 
 // NewHub creates a new WebSocket hub
@@ -111,9 +111,9 @@ func (h *Hub) Run(ctx context.Context) {
 		case client := <-h.register:
 			h.mu.Lock()
 			h.clients[client] = true
-			h.totalClients++
-			if int64(len(h.clients)) > h.peakClients {
-				h.peakClients = int64(len(h.clients))
+			h.totalClients.Add(1)
+			if current := int64(len(h.clients)); current > h.peakClients.Load() {
+				h.peakClients.Store(current)
 			}
 			n := len(h.clients)
 			h.mu.Unlock()
@@ -260,8 +260,8 @@ func (h *Hub) Stats() map[string]interface{} {
 	return map[string]interface{}{
 		"connectedClients": len(h.clients),
 		"totalEvents":      h.totalEvents.Load(),
-		"totalClients":     h.totalClients,
-		"peakClients":      h.peakClients,
+		"totalClients":     h.totalClients.Load(),
+		"peakClients":      h.peakClients.Load(),
 	}
 }
 

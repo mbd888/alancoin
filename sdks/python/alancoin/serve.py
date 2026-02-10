@@ -466,22 +466,26 @@ class ServiceAgent:
                         })
                         return
 
-                # Build delegation context if enabled and headers present
+                # Build delegation context if enabled and present in body
                 delegation_ctx = None
                 if agent._enable_delegation:
-                    del_key_id = self.headers.get("X-Delegation-KeyId", "").strip()
-                    del_budget = self.headers.get("X-Delegation-Budget", "").strip()
-                    del_private_key = self.headers.get("X-Delegation-PrivateKey", "").strip()
-                    del_depth = self.headers.get("X-Delegation-Depth", "0").strip()
+                    del_key_id = params.pop("_delegation_key_id", "")
+                    del_budget = params.pop("_delegation_budget", "")
+                    del_private_key = params.pop("_delegation_private_key", "")
+                    del_depth = params.pop("_delegation_depth", 0)
                     if del_key_id and del_budget and del_private_key:
-                        delegation_ctx = DelegationContext(
-                            client=agent._client,
-                            parent_skm=SessionKeyManager(private_key=del_private_key),
-                            parent_key_id=del_key_id,
-                            owner_address=self.headers.get("X-Payment-From", ""),
-                            remaining_budget=del_budget,
-                            depth=int(del_depth),
-                        )
+                        try:
+                            delegation_ctx = DelegationContext(
+                                client=agent._client,
+                                parent_skm=SessionKeyManager(private_key=del_private_key),
+                                parent_key_id=del_key_id,
+                                owner_address=self.headers.get("X-Payment-From", ""),
+                                remaining_budget=str(del_budget),
+                                depth=int(del_depth),
+                            )
+                        except Exception as e:
+                            logger.warning("Invalid delegation context: %s", e)
+                            # Continue without delegation — handler can still serve
 
                 # Invoke handler
                 try:

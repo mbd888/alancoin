@@ -99,7 +99,7 @@ func (p *PostgresStore) Credit(ctx context.Context, agentAddr, amount, txHash, d
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Upsert balance, auto-repay credit in the same atomic transaction.
 	// If credit_used > 0, reduce it by min(amount, credit_used) and add remainder to available.
@@ -137,7 +137,7 @@ func (p *PostgresStore) Debit(ctx context.Context, agentAddr, amount, reference,
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Credit-aware debit: debit from available first, draw gap from credit.
 	// gap = max(0, amount - available)
@@ -188,7 +188,7 @@ func (p *PostgresStore) Refund(ctx context.Context, agentAddr, amount, reference
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Idempotency: check if this reference was already refunded
 	var exists bool
@@ -239,7 +239,7 @@ func (p *PostgresStore) Withdraw(ctx context.Context, agentAddr, amount, txHash 
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Atomic debit with balance guard — prevents overdraft without relying on CHECK constraint error
 	result, err := tx.ExecContext(ctx, `
@@ -287,7 +287,7 @@ func (p *PostgresStore) Hold(ctx context.Context, agentAddr, amount, reference s
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Read current balance under row lock to compute credit draw
 	var currentAvailable, currentCreditLimit, currentCreditUsed string
@@ -367,7 +367,7 @@ func (p *PostgresStore) ConfirmHold(ctx context.Context, agentAddr, amount, refe
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	result, err := tx.ExecContext(ctx, `
 		UPDATE agent_balances SET
@@ -419,7 +419,7 @@ func (p *PostgresStore) ReleaseHold(ctx context.Context, agentAddr, amount, refe
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Look up any credit draw associated with this hold
 	var creditDrawAmount sql.NullString
@@ -478,7 +478,7 @@ func (p *PostgresStore) EscrowLock(ctx context.Context, agentAddr, amount, refer
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	result, err := tx.ExecContext(ctx, `
 		UPDATE agent_balances SET
@@ -522,7 +522,7 @@ func (p *PostgresStore) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Debit buyer's escrowed
 	result, err := tx.ExecContext(ctx, `
@@ -588,7 +588,7 @@ func (p *PostgresStore) RefundEscrow(ctx context.Context, agentAddr, amount, ref
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	result, err := tx.ExecContext(ctx, `
 		UPDATE agent_balances SET
@@ -664,7 +664,7 @@ func (p *PostgresStore) SetCreditLimit(ctx context.Context, agentAddr, limit str
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO agent_balances (agent_address, credit_limit, updated_at)
@@ -694,7 +694,7 @@ func (p *PostgresStore) UseCredit(ctx context.Context, agentAddr, amount string)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// CHECK constraint ensures credit_used <= credit_limit
 	result, err := tx.ExecContext(ctx, `
@@ -733,7 +733,7 @@ func (p *PostgresStore) RepayCredit(ctx context.Context, agentAddr, amount strin
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Capture the actual repay amount (min of requested amount and outstanding credit)
 	// before the UPDATE modifies credit_used.

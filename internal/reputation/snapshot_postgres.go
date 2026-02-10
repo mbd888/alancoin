@@ -46,7 +46,7 @@ func (p *PostgresSnapshotStore) SaveBatch(ctx context.Context, snaps []*Snapshot
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO reputation_snapshots

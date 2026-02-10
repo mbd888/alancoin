@@ -215,7 +215,7 @@ func (p *PostgresStore) RecordVote(ctx context.Context, predictionID, agentAddr 
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Check for existing vote to correctly adjust counts
 	var previousAgrees sql.NullBool

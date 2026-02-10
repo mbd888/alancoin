@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
 	"time"
@@ -97,7 +98,9 @@ func (s *Service) Accept(ctx context.Context, id, callerAddr string) (*Contract,
 	if sellerPenalty.Sign() > 0 {
 		if err := s.ledger.EscrowLock(ctx, contract.SellerAddr, contract.SellerPenalty, penaltyRef); err != nil {
 			// Compensate: refund buyer budget
-			_ = s.ledger.RefundEscrow(ctx, contract.BuyerAddr, contract.BuyerBudget, contract.ID)
+			if refErr := s.ledger.RefundEscrow(ctx, contract.BuyerAddr, contract.BuyerBudget, contract.ID); refErr != nil {
+				log.Printf("CRITICAL: contract %s failed to refund buyer budget on seller penalty lock failure: %v", contract.ID, refErr)
+			}
 			return nil, fmt.Errorf("failed to lock seller penalty: %w", err)
 		}
 	}
@@ -112,9 +115,13 @@ func (s *Service) Accept(ctx context.Context, id, callerAddr string) (*Contract,
 
 	if err := s.store.Update(ctx, contract); err != nil {
 		// Compensate: refund both locks
-		_ = s.ledger.RefundEscrow(ctx, contract.BuyerAddr, contract.BuyerBudget, contract.ID)
+		if refErr := s.ledger.RefundEscrow(ctx, contract.BuyerAddr, contract.BuyerBudget, contract.ID); refErr != nil {
+			log.Printf("CRITICAL: contract %s failed to refund buyer budget on store update failure: %v", contract.ID, refErr)
+		}
 		if sellerPenalty.Sign() > 0 {
-			_ = s.ledger.RefundEscrow(ctx, contract.SellerAddr, contract.SellerPenalty, penaltyRef)
+			if refErr := s.ledger.RefundEscrow(ctx, contract.SellerAddr, contract.SellerPenalty, penaltyRef); refErr != nil {
+				log.Printf("CRITICAL: contract %s failed to refund seller penalty on store update failure: %v", contract.ID, refErr)
+			}
 		}
 		return nil, fmt.Errorf("failed to update contract: %w", err)
 	}
@@ -296,18 +303,26 @@ func (s *Service) Terminate(ctx context.Context, id, callerAddr, reason string) 
 	if caller == contract.BuyerAddr {
 		// Buyer terminates: remaining budget goes to seller as compensation, seller penalty returned
 		if budgetRemaining.Sign() > 0 {
-			_ = s.ledger.ReleaseEscrow(ctx, contract.BuyerAddr, contract.SellerAddr, bigFloatString(budgetRemaining), contract.ID+"_term")
+			if err := s.ledger.ReleaseEscrow(ctx, contract.BuyerAddr, contract.SellerAddr, bigFloatString(budgetRemaining), contract.ID+"_term"); err != nil {
+				log.Printf("CRITICAL: contract %s terminate failed to release buyer budget to seller: %v", contract.ID, err)
+			}
 		}
 		if sellerPenalty.Sign() > 0 {
-			_ = s.ledger.RefundEscrow(ctx, contract.SellerAddr, contract.SellerPenalty, penaltyRef)
+			if err := s.ledger.RefundEscrow(ctx, contract.SellerAddr, contract.SellerPenalty, penaltyRef); err != nil {
+				log.Printf("CRITICAL: contract %s terminate failed to refund seller penalty: %v", contract.ID, err)
+			}
 		}
 	} else {
 		// Seller terminates: seller penalty forfeited to buyer, remaining buyer budget refunded
 		if sellerPenalty.Sign() > 0 {
-			_ = s.ledger.ReleaseEscrow(ctx, contract.SellerAddr, contract.BuyerAddr, contract.SellerPenalty, penaltyRef)
+			if err := s.ledger.ReleaseEscrow(ctx, contract.SellerAddr, contract.BuyerAddr, contract.SellerPenalty, penaltyRef); err != nil {
+				log.Printf("CRITICAL: contract %s terminate failed to release seller penalty to buyer: %v", contract.ID, err)
+			}
 		}
 		if budgetRemaining.Sign() > 0 {
-			_ = s.ledger.RefundEscrow(ctx, contract.BuyerAddr, bigFloatString(budgetRemaining), contract.ID+"_refund")
+			if err := s.ledger.RefundEscrow(ctx, contract.BuyerAddr, bigFloatString(budgetRemaining), contract.ID+"_refund"); err != nil {
+				log.Printf("CRITICAL: contract %s terminate failed to refund buyer budget: %v", contract.ID, err)
+			}
 		}
 	}
 
@@ -328,13 +343,17 @@ func (s *Service) complete(ctx context.Context, contract *Contract) (*Contract, 
 	// Refund remaining buyer budget
 	budgetRemaining := subtractBigFloat(contract.BuyerBudget, contract.BudgetSpent)
 	if budgetRemaining.Sign() > 0 {
-		_ = s.ledger.RefundEscrow(ctx, contract.BuyerAddr, bigFloatString(budgetRemaining), contract.ID+"_refund")
+		if err := s.ledger.RefundEscrow(ctx, contract.BuyerAddr, bigFloatString(budgetRemaining), contract.ID+"_refund"); err != nil {
+			log.Printf("CRITICAL: contract %s complete failed to refund buyer budget: %v", contract.ID, err)
+		}
 	}
 
 	// Return seller penalty
 	sellerPenalty := parseBigFloat(contract.SellerPenalty)
 	if sellerPenalty.Sign() > 0 {
-		_ = s.ledger.RefundEscrow(ctx, contract.SellerAddr, contract.SellerPenalty, contract.ID+"_pen")
+		if err := s.ledger.RefundEscrow(ctx, contract.SellerAddr, contract.SellerPenalty, contract.ID+"_pen"); err != nil {
+			log.Printf("CRITICAL: contract %s complete failed to refund seller penalty: %v", contract.ID, err)
+		}
 	}
 
 	if err := s.store.Update(ctx, contract); err != nil {
@@ -356,13 +375,17 @@ func (s *Service) violate(ctx context.Context, contract *Contract, details strin
 	sellerPenalty := parseBigFloat(contract.SellerPenalty)
 	penaltyRef := contract.ID + "_pen"
 	if sellerPenalty.Sign() > 0 {
-		_ = s.ledger.ReleaseEscrow(ctx, contract.SellerAddr, contract.BuyerAddr, contract.SellerPenalty, penaltyRef)
+		if err := s.ledger.ReleaseEscrow(ctx, contract.SellerAddr, contract.BuyerAddr, contract.SellerPenalty, penaltyRef); err != nil {
+			log.Printf("CRITICAL: contract %s violate failed to release seller penalty to buyer: %v", contract.ID, err)
+		}
 	}
 
 	// Refund remaining buyer budget
 	budgetRemaining := subtractBigFloat(contract.BuyerBudget, contract.BudgetSpent)
 	if budgetRemaining.Sign() > 0 {
-		_ = s.ledger.RefundEscrow(ctx, contract.BuyerAddr, bigFloatString(budgetRemaining), contract.ID+"_refund")
+		if err := s.ledger.RefundEscrow(ctx, contract.BuyerAddr, bigFloatString(budgetRemaining), contract.ID+"_refund"); err != nil {
+			log.Printf("CRITICAL: contract %s violate failed to refund buyer budget: %v", contract.ID, err)
+		}
 	}
 
 	if err := s.store.Update(ctx, contract); err != nil {
@@ -395,7 +418,9 @@ func (s *Service) CheckExpired(ctx context.Context) {
 		}
 
 		if fresh.TotalCalls >= fresh.MinVolume {
-			_, _ = s.complete(ctx, fresh)
+			if _, err := s.complete(ctx, fresh); err != nil {
+				log.Printf("ERROR: contract %s expired completion failed: %v", fresh.ID, err)
+			}
 		} else {
 			now := time.Now()
 			fresh.Status = StatusTerminated
@@ -406,16 +431,22 @@ func (s *Service) CheckExpired(ctx context.Context) {
 			// Refund remaining buyer budget
 			budgetRemaining := subtractBigFloat(fresh.BuyerBudget, fresh.BudgetSpent)
 			if budgetRemaining.Sign() > 0 {
-				_ = s.ledger.RefundEscrow(ctx, fresh.BuyerAddr, bigFloatString(budgetRemaining), fresh.ID+"_refund")
+				if err := s.ledger.RefundEscrow(ctx, fresh.BuyerAddr, bigFloatString(budgetRemaining), fresh.ID+"_refund"); err != nil {
+					log.Printf("CRITICAL: contract %s expired failed to refund buyer budget: %v", fresh.ID, err)
+				}
 			}
 
 			// Return seller penalty
 			sellerPenalty := parseBigFloat(fresh.SellerPenalty)
 			if sellerPenalty.Sign() > 0 {
-				_ = s.ledger.RefundEscrow(ctx, fresh.SellerAddr, fresh.SellerPenalty, fresh.ID+"_pen")
+				if err := s.ledger.RefundEscrow(ctx, fresh.SellerAddr, fresh.SellerPenalty, fresh.ID+"_pen"); err != nil {
+					log.Printf("CRITICAL: contract %s expired failed to refund seller penalty: %v", fresh.ID, err)
+				}
 			}
 
-			_ = s.store.Update(ctx, fresh)
+			if err := s.store.Update(ctx, fresh); err != nil {
+				log.Printf("ERROR: contract %s expired status update failed: %v", fresh.ID, err)
+			}
 		}
 
 		mu.Unlock()

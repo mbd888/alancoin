@@ -42,26 +42,26 @@ func (o *PriceOracle) GetETHPrice(ctx context.Context) float64 {
 	}
 	o.mu.RUnlock()
 
-	// Cache is stale, fetch new price
+	// Cache is stale — take write lock before fetching to prevent thundering herd
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	// Double-check under write lock (another goroutine may have refreshed)
+	if time.Since(o.lastUpdate) < o.ttl && o.price > 0 {
+		return o.price
+	}
+
 	newPrice, err := o.fetchPrice(ctx)
 	if err != nil {
-		// Mark cache as stale so next call retries immediately
-		// instead of serving the stale price until original TTL expires
-		o.mu.Lock()
 		o.lastUpdate = time.Time{} // Force refresh on next call
-		price := o.price
-		o.mu.Unlock()
-		if price > 0 {
-			return price
+		if o.price > 0 {
+			return o.price
 		}
 		return o.fallback
 	}
 
-	o.mu.Lock()
 	o.price = newPrice
 	o.lastUpdate = time.Now()
-	o.mu.Unlock()
-
 	return newPrice
 }
 

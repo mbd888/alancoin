@@ -17,8 +17,9 @@ context manager revokes the session key on exit.
 """
 
 import logging
+import threading
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Union
 
 import requests
@@ -27,6 +28,14 @@ logger = logging.getLogger(__name__)
 
 from .exceptions import AlancoinError, ValidationError
 from .session_keys import SessionKeyManager
+
+
+def _parse_decimal(value: str, field_name: str = "amount") -> Decimal:
+    """Safely parse a string to Decimal, raising ValidationError on failure."""
+    try:
+        return Decimal(value)
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValidationError(f"Invalid {field_name}: {value!r} is not a valid decimal")
 
 if TYPE_CHECKING:
     from .client import Alancoin
@@ -129,6 +138,7 @@ class BudgetSession:
         self._total_spent = Decimal("0")
         self._tx_count = 0
         self._active = False
+        self._lock = threading.Lock()
 
     # -- Properties -----------------------------------------------------------
 
@@ -198,14 +208,17 @@ class BudgetSession:
 
     def _stop(self):
         """Revoke session key and deactivate."""
-        if self._active and self._key_id:
+        with self._lock:
+            if not self._active:
+                return
+            self._active = False
+        if self._key_id:
             try:
                 self._client.revoke_session_key(
                     self._client.address, self._key_id
                 )
             except Exception as e:
                 logger.warning("Failed to revoke session key %s: %s", self._key_id, e)
-        self._active = False
         self._skm = None
 
     # -- Payment --------------------------------------------------------------
@@ -227,13 +240,13 @@ class BudgetSession:
         if not self._active:
             raise AlancoinError("Session is not active", code="session_inactive")
 
-        amount_dec = Decimal(amount)
-        if self._budget.max_per_tx and amount_dec > Decimal(self._budget.max_per_tx):
+        amount_dec = _parse_decimal(amount, "payment amount")
+        if self._budget.max_per_tx and amount_dec > _parse_decimal(self._budget.max_per_tx, "max_per_tx"):
             raise AlancoinError(
                 f"Payment of ${amount} exceeds per-transaction limit of ${self._budget.max_per_tx}",
                 code="per_tx_limit_exceeded",
             )
-        if self._total_spent + amount_dec > Decimal(self._budget.max_total):
+        if self._total_spent + amount_dec > _parse_decimal(self._budget.max_total, "max_total"):
             raise AlancoinError(
                 f"Payment of ${amount} would exceed session budget "
                 f"(spent: ${self._total_spent}, limit: ${self._budget.max_total})",
@@ -314,13 +327,13 @@ class BudgetSession:
         service = self._select_service(listings, prefer)
 
         # 3. Budget check
-        price_dec = Decimal(service.price)
-        if self._budget.max_per_tx and price_dec > Decimal(self._budget.max_per_tx):
+        price_dec = _parse_decimal(service.price, "service price")
+        if self._budget.max_per_tx and price_dec > _parse_decimal(self._budget.max_per_tx, "max_per_tx"):
             raise AlancoinError(
                 f"Service costs ${service.price} which exceeds per-transaction limit of ${self._budget.max_per_tx}",
                 code="per_tx_limit_exceeded",
             )
-        if self._total_spent + price_dec > Decimal(self._budget.max_total):
+        if self._total_spent + price_dec > _parse_decimal(self._budget.max_total, "max_total"):
             raise AlancoinError(
                 f"Service costs ${service.price} but only "
                 f"${self.remaining} remaining in budget",
@@ -597,10 +610,10 @@ class BudgetSession:
         service = self._select_service(listings, prefer)
 
         # 3. Budget check (service price + delegation budget)
-        price_dec = Decimal(service.price)
-        del_dec = Decimal(delegation_budget)
+        price_dec = _parse_decimal(service.price, "service price")
+        del_dec = _parse_decimal(delegation_budget, "delegation budget")
         total_needed = price_dec + del_dec
-        if self._total_spent + total_needed > Decimal(self._budget.max_total):
+        if self._total_spent + total_needed > _parse_decimal(self._budget.max_total, "max_total"):
             raise AlancoinError(
                 f"Service (${service.price}) + delegation (${delegation_budget}) "
                 f"exceeds remaining budget (${self.remaining})",
@@ -627,7 +640,7 @@ class BudgetSession:
         child_key = child_resp.get("childKey", {})
         child_key_id = child_key.get("id")
 
-        # 6. Call endpoint with delegation headers
+        # 6. Call endpoint with delegation context in body (not headers)
         if service.endpoint:
             import requests
             headers = {
@@ -635,15 +648,16 @@ class BudgetSession:
                 "X-Payment-TxHash": tx_result.get("txHash", ""),
                 "X-Payment-Amount": service.price,
                 "X-Payment-From": self._client.address,
-                "X-Delegation-KeyId": child_key_id,
-                "X-Delegation-Budget": delegation_budget,
-                "X-Delegation-PrivateKey": child_skm.private_key,
-                "X-Delegation-Depth": str(child_key.get("depth", 1)),
             }
+            body = dict(params)
+            body["_delegation_key_id"] = child_key_id
+            body["_delegation_budget"] = delegation_budget
+            body["_delegation_private_key"] = child_skm.private_key
+            body["_delegation_depth"] = child_key.get("depth", 1)
             try:
                 resp = requests.post(
                     service.endpoint,
-                    json=params,
+                    json=body,
                     headers=headers,
                     timeout=60,
                 )
@@ -725,6 +739,8 @@ class BudgetSession:
             reputation: Highest reputation score.
             best_value: Best reputation-to-price ratio.
         """
+        if not listings:
+            raise AlancoinError("No services to select from", code="no_services")
         if strategy == "reputation":
             return max(listings, key=lambda s: s.reputation_score)
         if strategy == "best_value":
@@ -759,7 +775,10 @@ class BudgetSession:
                 timeout=30,
             )
             resp.raise_for_status()
-            return resp.json()
+            try:
+                return resp.json()
+            except ValueError:
+                return {"raw_response": resp.text, "paid": True, "amount": service.price}
         except requests.exceptions.RequestException as e:
             logger.warning(
                 "Service endpoint call failed for %s: %s", service.endpoint, e

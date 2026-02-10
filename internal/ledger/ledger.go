@@ -10,6 +10,7 @@ package ledger
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"time"
@@ -212,9 +213,13 @@ func (l *Ledger) CanSpend(ctx context.Context, agentAddr, amount string) (bool, 
 		return false, err
 	}
 
-	availableBig, _ := usdc.Parse(bal.Available)
-	creditLimitBig, _ := usdc.Parse(bal.CreditLimit)
-	creditUsedBig, _ := usdc.Parse(bal.CreditUsed)
+	availableBig, ok1 := usdc.Parse(bal.Available)
+	creditLimitBig, ok2 := usdc.Parse(bal.CreditLimit)
+	creditUsedBig, ok3 := usdc.Parse(bal.CreditUsed)
+	if !ok1 || !ok2 || !ok3 {
+		return false, fmt.Errorf("corrupted balance data for %s: available=%q credit_limit=%q credit_used=%q",
+			agentAddr, bal.Available, bal.CreditLimit, bal.CreditUsed)
+	}
 
 	// Effective spendable = available + (credit_limit - credit_used)
 	creditAvailable := new(big.Int).Sub(creditLimitBig, creditUsedBig)

@@ -30,9 +30,12 @@ func NewPostgresStore(db *sql.DB) *PostgresStore {
 // -----------------------------------------------------------------------------
 
 func (p *PostgresStore) CreateAgent(ctx context.Context, agent *Agent) error {
-	metadata, _ := json.Marshal(agent.Metadata)
+	metadata, err := json.Marshal(agent.Metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal agent metadata: %w", err)
+	}
 
-	_, err := p.db.ExecContext(ctx, `
+	_, err = p.db.ExecContext(ctx, `
 		INSERT INTO agents (address, name, description, metadata, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $5)
 	`, strings.ToLower(agent.Address), agent.Name, agent.Description, metadata, time.Now())
@@ -45,9 +48,11 @@ func (p *PostgresStore) CreateAgent(ctx context.Context, agent *Agent) error {
 	}
 
 	// Initialize stats
-	_, _ = p.db.ExecContext(ctx, `
+	if _, err := p.db.ExecContext(ctx, `
 		INSERT INTO agent_stats (agent_address) VALUES ($1) ON CONFLICT DO NOTHING
-	`, strings.ToLower(agent.Address))
+	`, strings.ToLower(agent.Address)); err != nil {
+		slog.Warn("failed to initialize agent stats", "address", agent.Address, "error", err)
+	}
 
 	return nil
 }
@@ -78,18 +83,27 @@ func (p *PostgresStore) GetAgent(ctx context.Context, address string) (*Agent, e
 	}
 
 	// Load services
-	services, _ := p.getAgentServices(ctx, address)
+	services, svcErr := p.getAgentServices(ctx, address)
+	if svcErr != nil {
+		slog.Warn("failed to load agent services", "address", address, "error", svcErr)
+	}
 	agent.Services = services
 
 	// Load stats
-	stats, _ := p.getAgentStats(ctx, address)
+	stats, statsErr := p.getAgentStats(ctx, address)
+	if statsErr != nil {
+		slog.Warn("failed to load agent stats", "address", address, "error", statsErr)
+	}
 	agent.Stats = stats
 
 	return &agent, nil
 }
 
 func (p *PostgresStore) UpdateAgent(ctx context.Context, agent *Agent) error {
-	metadata, _ := json.Marshal(agent.Metadata)
+	metadata, err := json.Marshal(agent.Metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal agent metadata: %w", err)
+	}
 
 	result, err := p.db.ExecContext(ctx, `
 		UPDATE agents SET name = $1, description = $2, metadata = $3, updated_at = NOW()
