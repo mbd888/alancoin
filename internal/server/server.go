@@ -40,6 +40,7 @@ import (
 	"github.com/mbd888/alancoin/internal/reputation"
 	"github.com/mbd888/alancoin/internal/security"
 	"github.com/mbd888/alancoin/internal/sessionkeys"
+	"github.com/mbd888/alancoin/internal/streams"
 	"github.com/mbd888/alancoin/internal/validation"
 	"github.com/mbd888/alancoin/internal/wallet"
 	"github.com/mbd888/alancoin/internal/watcher"
@@ -70,6 +71,8 @@ type Server struct {
 	creditTimer     *credit.Timer
 	contractService *contracts.Service
 	contractTimer   *contracts.Timer
+	streamService   *streams.Service
+	streamTimer     *streams.Timer
 	rateLimiter     *ratelimit.Limiter
 	db              *sql.DB // nil if using in-memory
 	router          *gin.Engine
@@ -190,6 +193,12 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.contractTimer = contracts.NewTimer(s.contractService, contractStore, s.logger)
 		s.logger.Info("contracts enabled (postgres)")
 
+		// Streams with PostgreSQL store (streaming micropayments)
+		streamStore := streams.NewPostgresStore(db)
+		s.streamService = streams.NewService(streamStore, &streamLedgerAdapter{s.ledger})
+		s.streamTimer = streams.NewTimer(s.streamService, streamStore, s.logger)
+		s.logger.Info("streams enabled (postgres)")
+
 		// Credit system (spend on credit, repay from earnings)
 		creditStore := credit.NewPostgresStore(db)
 		if err := creditStore.Migrate(ctx); err != nil {
@@ -239,6 +248,12 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.contractService = contracts.NewService(contractStore, &escrowLedgerAdapter{s.ledger})
 		s.contractTimer = contracts.NewTimer(s.contractService, contractStore, s.logger)
 		s.logger.Info("contracts enabled (in-memory)")
+
+		// Streams with in-memory store (streaming micropayments)
+		streamStore := streams.NewMemoryStore()
+		s.streamService = streams.NewService(streamStore, &streamLedgerAdapter{s.ledger})
+		s.streamTimer = streams.NewTimer(s.streamService, streamStore, s.logger)
+		s.logger.Info("streams enabled (in-memory)")
 
 		// Credit system (in-memory) — use demo scorer with relaxed policies
 		creditStore := credit.NewMemoryStore()
@@ -693,6 +708,19 @@ func (s *Server) setupRoutes() {
 		protectedContracts := v1.Group("")
 		protectedContracts.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
 		contractHandler.RegisterProtectedRoutes(protectedContracts)
+	}
+
+	// Streaming micropayment routes (per-tick payments for continuous services)
+	if s.streamService != nil {
+		streamHandler := streams.NewHandler(s.streamService)
+
+		// Public routes - anyone can read
+		streamHandler.RegisterRoutes(v1)
+
+		// Protected routes - only authenticated agents can open/tick/close
+		protectedStreams := v1.Group("")
+		protectedStreams.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		streamHandler.RegisterProtectedRoutes(protectedStreams)
 	}
 
 	// Predictions routes (verifiable predictions with reputation stakes)
@@ -1175,6 +1203,11 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.contractTimer.Start(runCtx)
 	}
 
+	// Start stream stale-close timer
+	if s.streamTimer != nil {
+		go s.streamTimer.Start(runCtx)
+	}
+
 	// Mark as ready after brief delay for startup
 	go func() {
 		time.Sleep(100 * time.Millisecond)
@@ -1235,6 +1268,12 @@ func (s *Server) Shutdown() error {
 	if s.contractTimer != nil {
 		s.contractTimer.Stop()
 		s.logger.Info("contract timer stopped")
+	}
+
+	// Stop stream timer
+	if s.streamTimer != nil {
+		s.streamTimer.Stop()
+		s.logger.Info("stream timer stopped")
 	}
 
 	// Stop rate limiter cleanup goroutine
@@ -1415,6 +1454,27 @@ func (a *creditLedgerAdapter) SetCreditLimit(ctx context.Context, agentAddr, lim
 
 func (a *creditLedgerAdapter) RepayCredit(ctx context.Context, agentAddr, amount string) error {
 	return a.l.RepayCredit(ctx, agentAddr, amount)
+}
+
+// streamLedgerAdapter adapts ledger.Ledger to streams.LedgerService
+type streamLedgerAdapter struct {
+	l *ledger.Ledger
+}
+
+func (a *streamLedgerAdapter) Hold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.Hold(ctx, agentAddr, amount, reference)
+}
+
+func (a *streamLedgerAdapter) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.ConfirmHold(ctx, agentAddr, amount, reference)
+}
+
+func (a *streamLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
+}
+
+func (a *streamLedgerAdapter) Deposit(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.Deposit(ctx, agentAddr, amount, reference)
 }
 
 // registryChecker implements watcher.AgentChecker

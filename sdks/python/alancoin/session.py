@@ -772,3 +772,231 @@ class BudgetSession:
                 "endpoint": service.endpoint,
                 "note": "Payment succeeded but endpoint call failed",
             }
+
+
+@dataclass
+class StreamResult:
+    """Result of a tick in a streaming session.
+
+    Carries the tick data plus running totals.
+    """
+
+    tick: dict
+    stream: dict
+    tick_count: int
+    spent: str
+    remaining: str
+
+    def __repr__(self):
+        return (
+            f"StreamResult(tick={self.tick_count}, "
+            f"spent=${self.spent}, remaining=${self.remaining})"
+        )
+
+
+class StreamingSession:
+    """A streaming micropayment session for continuous services.
+
+    Opens a payment stream with a held amount, then delivers value
+    via ticks. On close (or context exit), the spent amount settles
+    to the seller and the unused hold returns to the buyer.
+
+    Example::
+
+        with client.stream(
+            seller_addr="0xSeller...",
+            hold_amount="1.00",
+            price_per_tick="0.0001",
+        ) as stream:
+            for token in generate_tokens():
+                result = stream.tick(metadata=f"token:{token}")
+                if result.remaining == "0.000000":
+                    break  # Budget exhausted
+
+        # Stream auto-closed, unused funds returned
+    """
+
+    def __init__(
+        self,
+        client: "Alancoin",
+        seller_addr: str,
+        hold_amount: str,
+        price_per_tick: str,
+        service_id: str = None,
+        stale_timeout_secs: int = 60,
+    ):
+        self._client = client
+        self._seller_addr = seller_addr
+        self._hold_amount = hold_amount
+        self._price_per_tick = price_per_tick
+        self._service_id = service_id
+        self._stale_timeout_secs = stale_timeout_secs
+        self._stream_id: Optional[str] = None
+        self._tick_count = 0
+        self._spent = Decimal("0")
+        self._active = False
+
+    # -- Properties -----------------------------------------------------------
+
+    @property
+    def stream_id(self) -> Optional[str]:
+        """The server-assigned stream ID."""
+        return self._stream_id
+
+    @property
+    def tick_count(self) -> int:
+        """Number of ticks recorded so far."""
+        return self._tick_count
+
+    @property
+    def spent(self) -> str:
+        """Total USDC spent so far."""
+        return str(self._spent)
+
+    @property
+    def remaining(self) -> str:
+        """USDC remaining in the hold."""
+        return str(Decimal(self._hold_amount) - self._spent)
+
+    @property
+    def is_active(self) -> bool:
+        """Whether the stream is currently open."""
+        return self._active
+
+    # -- Context manager ------------------------------------------------------
+
+    def __enter__(self):
+        self._open()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._active:
+            self.close()
+        return False
+
+    def _open(self):
+        """Open the payment stream."""
+        if not self._client.address:
+            raise ValidationError(
+                "Wallet required for streams. Pass a Wallet to Alancoin()."
+            )
+
+        resp = self._client.open_stream(
+            buyer_addr=self._client.address,
+            seller_addr=self._seller_addr,
+            hold_amount=self._hold_amount,
+            price_per_tick=self._price_per_tick,
+            service_id=self._service_id,
+            stale_timeout_secs=self._stale_timeout_secs,
+        )
+
+        stream = resp.get("stream", {})
+        self._stream_id = stream.get("id")
+        self._active = True
+        logger.info(
+            "Stream opened: %s (hold=%s, tick=%s)",
+            self._stream_id,
+            self._hold_amount,
+            self._price_per_tick,
+        )
+
+    # -- Tick -----------------------------------------------------------------
+
+    def tick(
+        self,
+        amount: str = None,
+        metadata: str = None,
+    ) -> StreamResult:
+        """Record a micropayment tick.
+
+        Args:
+            amount: Tick amount (omit to use price_per_tick).
+            metadata: Optional payload (e.g., token count, chunk ID).
+
+        Returns:
+            StreamResult with tick data and running totals.
+
+        Raises:
+            AlancoinError: If stream is closed or hold is exhausted.
+        """
+        if not self._active:
+            raise AlancoinError("Stream is not active", code="stream_inactive")
+
+        resp = self._client.tick_stream(
+            stream_id=self._stream_id,
+            amount=amount,
+            metadata=metadata,
+        )
+
+        tick_data = resp.get("tick", {})
+        stream_data = resp.get("stream", {})
+
+        self._tick_count = stream_data.get("tickCount", self._tick_count + 1)
+        self._spent = Decimal(stream_data.get("spentAmount", str(self._spent)))
+
+        return StreamResult(
+            tick=tick_data,
+            stream=stream_data,
+            tick_count=self._tick_count,
+            spent=str(self._spent),
+            remaining=self.remaining,
+        )
+
+    # -- Close ----------------------------------------------------------------
+
+    def close(self, reason: str = None) -> dict:
+        """Close the stream, settling funds.
+
+        The spent amount goes to the seller. The unused hold returns
+        to the buyer.
+
+        Args:
+            reason: Optional close reason.
+
+        Returns:
+            Settled stream with final amounts.
+        """
+        if not self._active:
+            raise AlancoinError("Stream is not active", code="stream_inactive")
+
+        resp = self._client.close_stream(
+            stream_id=self._stream_id,
+            reason=reason,
+        )
+        self._active = False
+
+        stream = resp.get("stream", {})
+        logger.info(
+            "Stream closed: %s (spent=%s, ticks=%d)",
+            self._stream_id,
+            stream.get("spentAmount", self.spent),
+            self._tick_count,
+        )
+        return resp
+
+    # -- Info -----------------------------------------------------------------
+
+    def get_ticks(self, limit: int = 100) -> list:
+        """Get the tick history for this stream.
+
+        Args:
+            limit: Maximum ticks to return.
+
+        Returns:
+            List of tick records.
+        """
+        resp = self._client.list_stream_ticks(self._stream_id, limit=limit)
+        return resp.get("ticks", [])
+
+    def refresh(self) -> dict:
+        """Refresh stream state from the server.
+
+        Returns:
+            Current stream data.
+        """
+        resp = self._client.get_stream(self._stream_id)
+        stream = resp.get("stream", {})
+        self._tick_count = stream.get("tickCount", self._tick_count)
+        self._spent = Decimal(stream.get("spentAmount", str(self._spent)))
+        self._active = stream.get("status") == "open"
+        return stream

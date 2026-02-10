@@ -1376,6 +1376,155 @@ class Alancoin:
         )
 
     # -------------------------------------------------------------------------
+    # Streaming Micropayments
+    # -------------------------------------------------------------------------
+
+    def open_stream(
+        self,
+        buyer_addr: str,
+        seller_addr: str,
+        hold_amount: str,
+        price_per_tick: str,
+        service_id: str = None,
+        stale_timeout_secs: int = 60,
+    ) -> dict:
+        """
+        Open a streaming micropayment channel.
+
+        Holds funds from the buyer's balance. The seller delivers value in
+        ticks, each costing price_per_tick. On close, the spent amount goes
+        to the seller and the unused hold returns to the buyer.
+
+        Args:
+            buyer_addr: Buyer's wallet address
+            seller_addr: Seller's wallet address
+            hold_amount: Maximum USDC to hold (e.g., "1.00")
+            price_per_tick: Cost per tick unit (e.g., "0.0001")
+            service_id: Optional service ID for tracking
+            stale_timeout_secs: Seconds of inactivity before auto-close (default 60)
+
+        Returns:
+            Created stream object
+
+        Example:
+            stream = client.open_stream(
+                buyer_addr=wallet.address,
+                seller_addr="0xSeller...",
+                hold_amount="0.50",
+                price_per_tick="0.0001",
+            )
+            stream_id = stream['stream']['id']
+        """
+        payload = {
+            "buyerAddr": buyer_addr,
+            "sellerAddr": seller_addr,
+            "holdAmount": hold_amount,
+            "pricePerTick": price_per_tick,
+            "staleTimeoutSecs": stale_timeout_secs,
+        }
+        if service_id:
+            payload["serviceId"] = service_id
+        return self._request("POST", "/v1/streams", json=payload)
+
+    def tick_stream(
+        self,
+        stream_id: str,
+        amount: str = None,
+        metadata: str = None,
+    ) -> dict:
+        """
+        Record a micropayment tick on an open stream.
+
+        Each tick increments the spent amount. If amount is omitted, the
+        stream's price_per_tick is used.
+
+        Args:
+            stream_id: The stream ID
+            amount: Tick amount in USDC (omit for price_per_tick)
+            metadata: Optional metadata (e.g., token count, chunk ID)
+
+        Returns:
+            Tick details and updated stream state
+
+        Example:
+            result = client.tick_stream("str_abc123")
+            print(f"Spent so far: ${result['stream']['spentAmount']}")
+        """
+        payload = {}
+        if amount:
+            payload["amount"] = amount
+        if metadata:
+            payload["metadata"] = metadata
+        return self._request("POST", f"/v1/streams/{stream_id}/tick", json=payload)
+
+    def close_stream(self, stream_id: str, reason: str = None) -> dict:
+        """
+        Close a stream, settling funds between buyer and seller.
+
+        The spent amount goes to the seller's available balance. The unused
+        portion of the hold returns to the buyer.
+
+        Either the buyer or seller can close the stream.
+
+        Args:
+            stream_id: The stream ID to close
+            reason: Optional close reason
+
+        Returns:
+            Settled stream with final amounts
+        """
+        payload = {}
+        if reason:
+            payload["reason"] = reason
+        return self._request("POST", f"/v1/streams/{stream_id}/close", json=payload)
+
+    def get_stream(self, stream_id: str) -> dict:
+        """
+        Get a stream by ID.
+
+        Args:
+            stream_id: The stream ID
+
+        Returns:
+            Stream details including status, spent/held amounts, tick count
+        """
+        return self._request("GET", f"/v1/streams/{stream_id}")
+
+    def list_stream_ticks(self, stream_id: str, limit: int = 100) -> dict:
+        """
+        List ticks for a stream.
+
+        Args:
+            stream_id: The stream ID
+            limit: Maximum ticks to return
+
+        Returns:
+            List of ticks with sequence numbers and cumulative amounts
+        """
+        return self._request(
+            "GET",
+            f"/v1/streams/{stream_id}/ticks",
+            params={"limit": limit},
+        )
+
+    def list_streams(self, agent_address: str, limit: int = 50) -> dict:
+        """
+        List streams involving an agent (as buyer or seller).
+
+        Args:
+            agent_address: The agent's address
+            limit: Maximum streams to return
+
+        Returns:
+            List of streams
+        """
+        return self._request(
+            "GET",
+            f"/v1/agents/{agent_address}/streams",
+            params={"limit": limit},
+        )
+
+    # -------------------------------------------------------------------------
     # Credit & Lending
     # -------------------------------------------------------------------------
 
@@ -1854,6 +2003,52 @@ class Alancoin:
             )
 
         return BudgetSession(self, budget)
+
+    def stream(
+        self,
+        seller_addr: str,
+        hold_amount: str,
+        price_per_tick: str,
+        service_id: str = None,
+        stale_timeout_secs: int = 60,
+    ) -> "StreamingSession":
+        """
+        Create a streaming micropayment session.
+
+        Returns a context manager that opens a payment stream on entry
+        and settles it on exit. Use tick() to record micropayments.
+
+        Args:
+            seller_addr: Seller's wallet address
+            hold_amount: Maximum USDC to hold (e.g., "1.00")
+            price_per_tick: Cost per tick (e.g., "0.0001")
+            service_id: Optional service ID for tracking
+            stale_timeout_secs: Auto-close after this many idle seconds
+
+        Returns:
+            StreamingSession context manager
+
+        Example::
+
+            with client.stream(
+                seller_addr="0xSeller...",
+                hold_amount="0.50",
+                price_per_tick="0.0001",
+            ) as s:
+                for token in tokens:
+                    result = s.tick(metadata=f"token:{token}")
+                print(f"Total: ${s.spent} for {s.tick_count} ticks")
+        """
+        from .session import StreamingSession
+
+        return StreamingSession(
+            client=self,
+            seller_addr=seller_addr,
+            hold_amount=hold_amount,
+            price_per_tick=price_per_tick,
+            service_id=service_id,
+            stale_timeout_secs=stale_timeout_secs,
+        )
 
     # -------------------------------------------------------------------------
     # Internal

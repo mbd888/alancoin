@@ -63,7 +63,7 @@ from .models import (
     Agent, Service, ServiceListing, Transaction, NetworkStats, ServiceType,
     Contract, ContractCall, SLATerms,
 )
-from .session import Budget, BudgetSession, ServiceResult
+from .session import Budget, BudgetSession, ServiceResult, StreamingSession, StreamResult
 from .serve import ServiceAgent, DelegationContext
 from .session_keys import (
     SessionKeyManager,
@@ -107,6 +107,9 @@ __all__ = [
     "Budget",
     "BudgetSession",
     "ServiceResult",
+    # Streaming Micropayments
+    "StreamingSession",
+    "StreamResult",
     # Service Agent Framework
     "ServiceAgent",
     "DelegationContext",
