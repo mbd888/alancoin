@@ -5,7 +5,7 @@ from urllib.parse import urljoin
 
 import requests
 
-from .models import Agent, Service, ServiceListing, Transaction, NetworkStats
+from .models import Agent, Service, ServiceListing, Transaction, NetworkStats, RFP, Bid
 from .exceptions import (
     AlancoinError,
     AgentNotFoundError,
@@ -1878,6 +1878,304 @@ class Alancoin:
             "GET",
             f"/v1/contracts/{contract_id}/calls",
             params={"limit": limit},
+        )
+
+    # -------------------------------------------------------------------------
+    # Negotiation (RFPs & Bidding)
+    # -------------------------------------------------------------------------
+
+    def publish_rfp(
+        self,
+        buyer_addr: str,
+        service_type: str,
+        min_budget: str,
+        max_budget: str,
+        duration: str,
+        bid_deadline: str,
+        description: str = "",
+        max_latency_ms: int = 0,
+        min_success_rate: float = 0,
+        min_volume: int = 0,
+        auto_select: bool = False,
+        min_reputation: float = 0,
+        max_counter_rounds: int = 0,
+        scoring_weight_price: float = 0,
+        scoring_weight_reputation: float = 0,
+        scoring_weight_sla: float = 0,
+    ) -> RFP:
+        """
+        Publish a Request for Proposals.
+
+        Sellers browse open RFPs and place competitive bids. At the deadline,
+        the buyer selects a winner (or auto-select picks the highest-scored bid).
+        The winner auto-forms a binding contract.
+
+        Args:
+            buyer_addr: Buyer's wallet address
+            service_type: Type of service needed (e.g., "translation")
+            min_budget: Minimum budget in USDC (e.g., "0.50")
+            max_budget: Maximum budget in USDC (e.g., "1.00")
+            duration: Contract duration (e.g., "7d", "24h")
+            bid_deadline: When bidding closes (RFC3339 or duration like "24h")
+            description: What the buyer needs
+            max_latency_ms: Maximum allowed latency per call
+            min_success_rate: Minimum success rate percentage
+            min_volume: Minimum number of calls
+            auto_select: If True, system picks best bid at deadline
+            min_reputation: Minimum bidder reputation score
+            max_counter_rounds: Maximum counter-offer rounds (default 3)
+            scoring_weight_price: Weight for price in scoring (0-1)
+            scoring_weight_reputation: Weight for reputation in scoring (0-1)
+            scoring_weight_sla: Weight for SLA in scoring (0-1)
+
+        Returns:
+            The created RFP
+        """
+        payload = {
+            "buyerAddr": buyer_addr,
+            "serviceType": service_type,
+            "minBudget": min_budget,
+            "maxBudget": max_budget,
+            "duration": duration,
+            "bidDeadline": bid_deadline,
+        }
+        if description:
+            payload["description"] = description
+        if max_latency_ms:
+            payload["maxLatencyMs"] = max_latency_ms
+        if min_success_rate:
+            payload["minSuccessRate"] = min_success_rate
+        if min_volume:
+            payload["minVolume"] = min_volume
+        if auto_select:
+            payload["autoSelect"] = auto_select
+        if min_reputation:
+            payload["minReputation"] = min_reputation
+        if max_counter_rounds:
+            payload["maxCounterRounds"] = max_counter_rounds
+        if scoring_weight_price or scoring_weight_reputation or scoring_weight_sla:
+            payload["scoringWeights"] = {
+                "price": scoring_weight_price or 0.30,
+                "reputation": scoring_weight_reputation or 0.40,
+                "sla": scoring_weight_sla or 0.30,
+            }
+
+        response = self._request("POST", "/v1/rfps", json=payload)
+        return RFP.from_dict(response.get("rfp", response))
+
+    def list_rfps(
+        self,
+        service_type: str = None,
+        limit: int = 50,
+    ) -> List[RFP]:
+        """
+        List open RFPs.
+
+        Args:
+            service_type: Filter by service type
+            limit: Maximum results (default 50)
+
+        Returns:
+            List of open RFPs
+        """
+        params = {"limit": limit}
+        if service_type:
+            params["type"] = service_type
+        response = self._request("GET", "/v1/rfps", params=params)
+        return [RFP.from_dict(r) for r in response.get("rfps", [])]
+
+    def get_rfp(self, rfp_id: str) -> RFP:
+        """
+        Get an RFP by ID.
+
+        Args:
+            rfp_id: The RFP ID
+
+        Returns:
+            The RFP with full details
+        """
+        response = self._request("GET", f"/v1/rfps/{rfp_id}")
+        return RFP.from_dict(response.get("rfp", response))
+
+    def place_bid(
+        self,
+        rfp_id: str,
+        seller_addr: str,
+        price_per_call: str,
+        total_budget: str,
+        duration: str,
+        max_latency_ms: int = 0,
+        success_rate: float = 0,
+        seller_penalty: str = "",
+        message: str = "",
+    ) -> Bid:
+        """
+        Place a bid on an RFP.
+
+        Args:
+            rfp_id: The RFP ID to bid on
+            seller_addr: Seller's wallet address
+            price_per_call: Price per service call in USDC
+            total_budget: Total budget offered in USDC
+            duration: Contract duration offered
+            max_latency_ms: Latency guarantee in ms
+            success_rate: Success rate guarantee (0-100)
+            seller_penalty: Penalty stake in USDC
+            message: Optional message to buyer
+
+        Returns:
+            The created Bid with computed score
+        """
+        payload = {
+            "sellerAddr": seller_addr,
+            "pricePerCall": price_per_call,
+            "totalBudget": total_budget,
+            "duration": duration,
+        }
+        if max_latency_ms:
+            payload["maxLatencyMs"] = max_latency_ms
+        if success_rate:
+            payload["successRate"] = success_rate
+        if seller_penalty:
+            payload["sellerPenalty"] = seller_penalty
+        if message:
+            payload["message"] = message
+
+        response = self._request("POST", f"/v1/rfps/{rfp_id}/bids", json=payload)
+        return Bid.from_dict(response.get("bid", response))
+
+    def list_bids(self, rfp_id: str, limit: int = 50) -> List[Bid]:
+        """
+        List bids for an RFP.
+
+        Args:
+            rfp_id: The RFP ID
+            limit: Maximum results
+
+        Returns:
+            List of Bids sorted by score
+        """
+        params = {"limit": limit}
+        response = self._request("GET", f"/v1/rfps/{rfp_id}/bids", params=params)
+        return [Bid.from_dict(b) for b in response.get("bids", [])]
+
+    def counter_bid(
+        self,
+        rfp_id: str,
+        bid_id: str,
+        caller_addr: str,
+        price_per_call: str = "",
+        total_budget: str = "",
+        max_latency_ms: int = 0,
+        success_rate: float = 0,
+        seller_penalty: str = "",
+        message: str = "",
+    ) -> Bid:
+        """
+        Counter-offer on a bid.
+
+        Either the buyer or seller can counter. Unset fields keep the
+        previous bid's values.
+
+        Args:
+            rfp_id: The RFP ID
+            bid_id: The bid ID to counter
+            caller_addr: Address of the party making the counter
+            price_per_call: New price per call (or empty to keep)
+            total_budget: New total budget (or empty to keep)
+            max_latency_ms: New latency guarantee (or 0 to keep)
+            success_rate: New success rate (or 0 to keep)
+            seller_penalty: New penalty stake (or empty to keep)
+            message: Counter-offer message
+
+        Returns:
+            The new counter Bid
+        """
+        payload = {"callerAddr": caller_addr}
+        if price_per_call:
+            payload["pricePerCall"] = price_per_call
+        if total_budget:
+            payload["totalBudget"] = total_budget
+        if max_latency_ms:
+            payload["maxLatencyMs"] = max_latency_ms
+        if success_rate:
+            payload["successRate"] = success_rate
+        if seller_penalty:
+            payload["sellerPenalty"] = seller_penalty
+        if message:
+            payload["message"] = message
+
+        response = self._request(
+            "POST", f"/v1/rfps/{rfp_id}/bids/{bid_id}/counter", json=payload
+        )
+        return Bid.from_dict(response.get("bid", response))
+
+    def select_bid(self, rfp_id: str, bid_id: str, caller_addr: str) -> dict:
+        """
+        Select the winning bid for an RFP.
+
+        Forms a binding contract with the winning bidder. Other bids are
+        rejected automatically.
+
+        Args:
+            rfp_id: The RFP ID
+            bid_id: The winning bid ID
+            caller_addr: Buyer's wallet address
+
+        Returns:
+            Dict with updated RFP and the formed contract ID
+        """
+        return self._request(
+            "POST",
+            f"/v1/rfps/{rfp_id}/select",
+            json={"bidId": bid_id, "callerAddr": caller_addr},
+        )
+
+    def cancel_rfp(self, rfp_id: str, caller_addr: str, reason: str = "") -> RFP:
+        """
+        Cancel an RFP.
+
+        All pending bids are rejected. Only the buyer can cancel.
+
+        Args:
+            rfp_id: The RFP ID to cancel
+            caller_addr: Buyer's wallet address
+            reason: Cancellation reason
+
+        Returns:
+            The cancelled RFP
+        """
+        payload = {"callerAddr": caller_addr}
+        if reason:
+            payload["reason"] = reason
+        response = self._request("POST", f"/v1/rfps/{rfp_id}/cancel", json=payload)
+        return RFP.from_dict(response.get("rfp", response))
+
+    def list_agent_rfps(
+        self,
+        agent_address: str,
+        role: str = "",
+        limit: int = 50,
+    ) -> dict:
+        """
+        List RFPs or bids involving a specific agent.
+
+        When role="buyer" (default): returns {"rfps": [...], "count": N}
+        When role="seller": returns {"bids": [...], "count": N}
+
+        Args:
+            agent_address: The agent's wallet address
+            role: Filter by role ("buyer" or "seller")
+            limit: Maximum results
+
+        Returns:
+            Dict with "rfps" (buyer role) or "bids" (seller role)
+        """
+        params = {"limit": limit}
+        if role:
+            params["role"] = role
+        return self._request(
+            "GET", f"/v1/agents/{agent_address}/rfps", params=params
         )
 
     # -------------------------------------------------------------------------

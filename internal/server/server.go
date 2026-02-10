@@ -32,6 +32,7 @@ import (
 	"github.com/mbd888/alancoin/internal/ledger"
 	"github.com/mbd888/alancoin/internal/logging"
 	"github.com/mbd888/alancoin/internal/metrics"
+	"github.com/mbd888/alancoin/internal/negotiation"
 	"github.com/mbd888/alancoin/internal/paywall"
 	"github.com/mbd888/alancoin/internal/predictions"
 	"github.com/mbd888/alancoin/internal/ratelimit"
@@ -53,35 +54,37 @@ import (
 
 // Server wraps the HTTP server and dependencies
 type Server struct {
-	cfg              *config.Config
-	wallet           wallet.WalletService
-	registry         registry.Store
-	sessionMgr       *sessionkeys.Manager
-	authMgr          *auth.Manager
-	ledger           *ledger.Ledger
-	commentary       *commentary.Service
-	predictions      *predictions.Service
-	depositWatcher   *watcher.Watcher
-	webhooks         *webhooks.Dispatcher
-	realtimeHub      *realtime.Hub
-	paymaster        gas.Paymaster
-	escrowService    *escrow.Service
-	escrowTimer      *escrow.Timer
-	creditService    *credit.Service
-	creditTimer      *credit.Timer
-	contractService  *contracts.Service
-	contractTimer    *contracts.Timer
-	streamService    *streams.Service
-	streamTimer      *streams.Timer
-	reputationStore  reputation.SnapshotStore
-	reputationWorker *reputation.Worker
-	reputationSigner *reputation.Signer
-	rateLimiter      *ratelimit.Limiter
-	db               *sql.DB // nil if using in-memory
-	router           *gin.Engine
-	httpSrv          *http.Server
-	logger           *slog.Logger
-	cancelRunCtx     context.CancelFunc // cancels background goroutines started in Run
+	cfg                *config.Config
+	wallet             wallet.WalletService
+	registry           registry.Store
+	sessionMgr         *sessionkeys.Manager
+	authMgr            *auth.Manager
+	ledger             *ledger.Ledger
+	commentary         *commentary.Service
+	predictions        *predictions.Service
+	depositWatcher     *watcher.Watcher
+	webhooks           *webhooks.Dispatcher
+	realtimeHub        *realtime.Hub
+	paymaster          gas.Paymaster
+	escrowService      *escrow.Service
+	escrowTimer        *escrow.Timer
+	creditService      *credit.Service
+	creditTimer        *credit.Timer
+	contractService    *contracts.Service
+	contractTimer      *contracts.Timer
+	streamService      *streams.Service
+	streamTimer        *streams.Timer
+	negotiationService *negotiation.Service
+	negotiationTimer   *negotiation.Timer
+	reputationStore    reputation.SnapshotStore
+	reputationWorker   *reputation.Worker
+	reputationSigner   *reputation.Signer
+	rateLimiter        *ratelimit.Limiter
+	db                 *sql.DB // nil if using in-memory
+	router             *gin.Engine
+	httpSrv            *http.Server
+	logger             *slog.Logger
+	cancelRunCtx       context.CancelFunc // cancels background goroutines started in Run
 
 	// Health state
 	ready   atomic.Bool
@@ -202,6 +205,14 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.streamTimer = streams.NewTimer(s.streamService, streamStore, s.logger)
 		s.logger.Info("streams enabled (postgres)")
 
+		// Negotiation with PostgreSQL store (autonomous deal-making)
+		negotiationStore := negotiation.NewPostgresStore(db)
+		reputationProvForNeg := reputation.NewRegistryProvider(s.registry)
+		s.negotiationService = negotiation.NewService(negotiationStore, reputationProvForNeg).
+			WithContractFormer(&contractFormerAdapter{s.contractService})
+		s.negotiationTimer = negotiation.NewTimer(s.negotiationService, s.logger)
+		s.logger.Info("negotiation enabled (postgres)")
+
 		// Reputation snapshots (PostgreSQL)
 		s.reputationStore = reputation.NewPostgresSnapshotStore(db)
 		s.logger.Info("reputation snapshots enabled (postgres)")
@@ -261,6 +272,14 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.streamService = streams.NewService(streamStore, &streamLedgerAdapter{s.ledger})
 		s.streamTimer = streams.NewTimer(s.streamService, streamStore, s.logger)
 		s.logger.Info("streams enabled (in-memory)")
+
+		// Negotiation with in-memory store (autonomous deal-making)
+		negotiationStore := negotiation.NewMemoryStore()
+		reputationProvForNeg := reputation.NewRegistryProvider(s.registry)
+		s.negotiationService = negotiation.NewService(negotiationStore, reputationProvForNeg).
+			WithContractFormer(&contractFormerAdapter{s.contractService})
+		s.negotiationTimer = negotiation.NewTimer(s.negotiationService, s.logger)
+		s.logger.Info("negotiation enabled (in-memory)")
 
 		// Reputation snapshots (in-memory)
 		s.reputationStore = reputation.NewMemorySnapshotStore()
@@ -745,6 +764,19 @@ func (s *Server) setupRoutes() {
 		protectedStreams := v1.Group("")
 		protectedStreams.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
 		streamHandler.RegisterProtectedRoutes(protectedStreams)
+	}
+
+	// Negotiation routes (autonomous deal-making between agents)
+	if s.negotiationService != nil {
+		negotiationHandler := negotiation.NewHandler(s.negotiationService)
+
+		// Public routes - anyone can browse RFPs and bids
+		negotiationHandler.RegisterRoutes(v1)
+
+		// Protected routes - only authenticated agents can publish/bid/counter/select/cancel
+		protectedNeg := v1.Group("")
+		protectedNeg.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		negotiationHandler.RegisterProtectedRoutes(protectedNeg)
 	}
 
 	// Predictions routes (verifiable predictions with reputation stakes)
@@ -1232,6 +1264,11 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.streamTimer.Start(runCtx)
 	}
 
+	// Start negotiation deadline timer
+	if s.negotiationTimer != nil {
+		go s.negotiationTimer.Start(runCtx)
+	}
+
 	// Start reputation snapshot worker
 	if s.reputationWorker != nil {
 		go s.reputationWorker.Start(runCtx)
@@ -1303,6 +1340,12 @@ func (s *Server) Shutdown() error {
 	if s.streamTimer != nil {
 		s.streamTimer.Stop()
 		s.logger.Info("stream timer stopped")
+	}
+
+	// Stop negotiation timer
+	if s.negotiationTimer != nil {
+		s.negotiationTimer.Stop()
+		s.logger.Info("negotiation timer stopped")
 	}
 
 	// Stop reputation worker
@@ -1827,4 +1870,35 @@ func (p *registryMetricProvider) GetMarketMetric(ctx context.Context, metric str
 	default:
 		return 0, errors.New("unknown metric: " + metric)
 	}
+}
+
+// contractFormerAdapter adapts contracts.Service to negotiation.ContractFormer
+type contractFormerAdapter struct {
+	contracts *contracts.Service
+}
+
+func (a *contractFormerAdapter) FormContract(ctx context.Context, rfp *negotiation.RFP, bid *negotiation.Bid) (string, error) {
+	contract, err := a.contracts.Propose(ctx, contracts.ProposeRequest{
+		BuyerAddr:      rfp.BuyerAddr,
+		SellerAddr:     bid.SellerAddr,
+		ServiceType:    rfp.ServiceType,
+		PricePerCall:   bid.PricePerCall,
+		BuyerBudget:    bid.TotalBudget,
+		Duration:       bid.Duration,
+		MinVolume:      rfp.MinVolume,
+		SellerPenalty:  bid.SellerPenalty,
+		MaxLatencyMs:   bid.MaxLatencyMs,
+		MinSuccessRate: bid.SuccessRate,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to propose contract: %w", err)
+	}
+
+	// Auto-accept on behalf of the seller (they agreed via their bid)
+	_, err = a.contracts.Accept(ctx, contract.ID, bid.SellerAddr)
+	if err != nil {
+		return contract.ID, fmt.Errorf("contract proposed but accept failed: %w", err)
+	}
+
+	return contract.ID, nil
 }

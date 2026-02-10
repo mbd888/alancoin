@@ -404,3 +404,125 @@ class ContractCall:
             error_message=data.get("errorMessage"),
             created_at=data.get("createdAt"),
         )
+
+
+@dataclass
+class ScoringWeights:
+    """Scoring weights for RFP bid evaluation."""
+
+    price: float = 0.30
+    reputation: float = 0.40
+    sla: float = 0.30
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ScoringWeights":
+        return cls(
+            price=data.get("price", 0.30),
+            reputation=data.get("reputation", 0.40),
+            sla=data.get("sla", 0.30),
+        )
+
+
+@dataclass
+class RFP:
+    """A Request for Proposal published by a buyer."""
+
+    id: str
+    buyer_addr: str
+    service_type: str
+    min_budget: str
+    max_budget: str
+    duration: str
+    status: str
+    description: str = ""
+    max_latency_ms: int = 10000
+    min_success_rate: float = 95.0
+    min_volume: int = 1
+    bid_deadline: Optional[str] = None
+    auto_select: bool = False
+    min_reputation: float = 0.0
+    max_counter_rounds: int = 3
+    scoring_weights: Optional[ScoringWeights] = None
+    winning_bid_id: Optional[str] = None
+    contract_id: Optional[str] = None
+    bid_count: int = 0
+    cancel_reason: Optional[str] = None
+    awarded_at: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RFP":
+        weights = None
+        if "scoringWeights" in data:
+            weights = ScoringWeights.from_dict(data["scoringWeights"])
+        return cls(
+            id=data.get("id", ""),
+            buyer_addr=data.get("buyerAddr", ""),
+            service_type=data.get("serviceType", ""),
+            min_budget=data.get("minBudget", "0"),
+            max_budget=data.get("maxBudget", "0"),
+            duration=data.get("duration", ""),
+            status=data.get("status", ""),
+            description=data.get("description", ""),
+            max_latency_ms=data.get("maxLatencyMs", 10000),
+            min_success_rate=data.get("minSuccessRate", 95.0),
+            min_volume=data.get("minVolume", 1),
+            bid_deadline=data.get("bidDeadline"),
+            auto_select=data.get("autoSelect", False),
+            min_reputation=data.get("minReputation", 0.0),
+            max_counter_rounds=data.get("maxCounterRounds", 3),
+            scoring_weights=weights,
+            winning_bid_id=data.get("winningBidId"),
+            contract_id=data.get("contractId"),
+            bid_count=data.get("bidCount", 0),
+            cancel_reason=data.get("cancelReason"),
+            awarded_at=data.get("awardedAt"),
+            created_at=data.get("createdAt"),
+            updated_at=data.get("updatedAt"),
+        )
+
+
+@dataclass
+class Bid:
+    """A seller's offer on an RFP."""
+
+    id: str
+    rfp_id: str
+    seller_addr: str
+    price_per_call: str
+    total_budget: str
+    duration: str
+    status: str
+    max_latency_ms: int = 10000
+    success_rate: float = 95.0
+    seller_penalty: str = "0"
+    score: float = 0.0
+    counter_round: int = 0
+    parent_bid_id: Optional[str] = None
+    countered_by_id: Optional[str] = None
+    message: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Bid":
+        return cls(
+            id=data.get("id", ""),
+            rfp_id=data.get("rfpId", ""),
+            seller_addr=data.get("sellerAddr", ""),
+            price_per_call=data.get("pricePerCall", "0"),
+            total_budget=data.get("totalBudget", "0"),
+            duration=data.get("duration", ""),
+            status=data.get("status", ""),
+            max_latency_ms=data.get("maxLatencyMs", 10000),
+            success_rate=data.get("successRate", 95.0),
+            seller_penalty=data.get("sellerPenalty", "0"),
+            score=data.get("score", 0.0),
+            counter_round=data.get("counterRound", 0),
+            parent_bid_id=data.get("parentBidId"),
+            countered_by_id=data.get("counteredById"),
+            message=data.get("message"),
+            created_at=data.get("createdAt"),
+            updated_at=data.get("updatedAt"),
+        )

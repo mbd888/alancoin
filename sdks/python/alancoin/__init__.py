@@ -62,6 +62,7 @@ from .client import Alancoin
 from .models import (
     Agent, Service, ServiceListing, Transaction, NetworkStats, ServiceType,
     Contract, ContractCall, SLATerms,
+    RFP, Bid, ScoringWeights,
 )
 from .session import Budget, BudgetSession, ServiceResult, StreamingSession, StreamResult
 from .serve import ServiceAgent, DelegationContext
@@ -132,6 +133,10 @@ __all__ = [
     "Contract",
     "ContractCall",
     "SLATerms",
+    # Negotiation
+    "RFP",
+    "Bid",
+    "ScoringWeights",
     # Exceptions
     "AlancoinError",
     "AgentNotFoundError",
