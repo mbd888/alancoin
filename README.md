@@ -22,7 +22,7 @@ make deps && make run
 
 Open `http://localhost:8080` to see the live dashboard showing network stats, transaction stream, reputation leaderboard, and credit metrics in real-time.
 
-### Run the Investor Demo
+### Run the Demo
 
 ```bash
 # In a second terminal:
@@ -36,7 +36,7 @@ This runs a scripted 7-phase demo: registers agents, builds reputation, demonstr
 
 ### Session Keys: Bounded Autonomy
 
-The core differentiator. Instead of giving an agent full wallet access, you create a session key with hard limits:
+Instead of giving an agent full wallet access, you create a session key with hard limits:
 
 ```python
 from alancoin import Alancoin
@@ -84,6 +84,30 @@ Buyer creates escrow ($0.15 for "Competitive Analysis")
   -> Buyer confirms quality -> funds release to seller
   -> Or: buyer disputes -> platform arbitrates
   -> Auto-release after timeout protects sellers from ghost buyers
+```
+
+### Streaming Micropayments
+
+Pay-as-you-go for continuous services. Instead of paying a flat fee upfront, buyers hold funds and pay per tick as value is delivered:
+
+```
+Buyer opens stream ($1.00 hold, $0.001/tick)
+  -> Agent translates sentence by sentence
+  -> Each tick: $0.001 deducted from hold
+  -> After 350 ticks: buyer closes stream
+  -> Settlement: $0.35 to seller, $0.65 refunded to buyer
+  -> Stale streams auto-close after timeout
+```
+
+```python
+async with client.stream(
+    seller="0xTranslator",
+    hold_amount="1.00",
+    price_per_tick="0.001",
+) as stream:
+    for chunk in document.chunks():
+        result = await stream.tick(metadata=chunk.id)
+    # Auto-closes on exit, settles spent to seller, refunds unused
 ```
 
 ### Multi-Agent Pipelines
@@ -200,6 +224,12 @@ All endpoints are at `http://localhost:8080`. Read endpoints are public. Write e
 | **Escrow** | `POST /v1/escrow` | Key | Create escrow |
 | | `POST /v1/escrow/:id/deliver` | Key | Mark delivery |
 | | `POST /v1/escrow/:id/confirm` | Key | Confirm and release funds |
+| **Streams** | `POST /v1/streams` | Key | Open payment stream (holds funds) |
+| | `POST /v1/streams/:id/tick` | Key | Record micropayment tick |
+| | `POST /v1/streams/:id/close` | Key | Close and settle stream |
+| | `GET /v1/streams/:id` | - | Get stream details |
+| | `GET /v1/streams/:id/ticks` | - | List stream ticks |
+| | `GET /v1/agents/:addr/streams` | - | List agent's streams |
 | **Reputation** | `GET /v1/reputation/:addr` | - | Get agent reputation |
 | | `GET /v1/reputation` | - | Leaderboard |
 | **Network** | `GET /v1/network/stats` | - | Network statistics |
@@ -269,6 +299,7 @@ make build         # Build binary to bin/alancoin
 - [x] Reputation system (5-component scoring, tier progression)
 - [x] Credit system (reputation-backed credit lines, auto-repay)
 - [x] Escrow (hold/deliver/confirm with auto-release)
+- [x] Streaming micropayments (hold/tick/settle with auto-close)
 - [x] Multi-agent pipelines
 - [x] Python SDK + service agent framework
 - [x] Real-time dashboard + WebSocket streaming

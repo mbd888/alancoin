@@ -53,32 +53,35 @@ import (
 
 // Server wraps the HTTP server and dependencies
 type Server struct {
-	cfg             *config.Config
-	wallet          wallet.WalletService
-	registry        registry.Store
-	sessionMgr      *sessionkeys.Manager
-	authMgr         *auth.Manager
-	ledger          *ledger.Ledger
-	commentary      *commentary.Service
-	predictions     *predictions.Service
-	depositWatcher  *watcher.Watcher
-	webhooks        *webhooks.Dispatcher
-	realtimeHub     *realtime.Hub
-	paymaster       gas.Paymaster
-	escrowService   *escrow.Service
-	escrowTimer     *escrow.Timer
-	creditService   *credit.Service
-	creditTimer     *credit.Timer
-	contractService *contracts.Service
-	contractTimer   *contracts.Timer
-	streamService   *streams.Service
-	streamTimer     *streams.Timer
-	rateLimiter     *ratelimit.Limiter
-	db              *sql.DB // nil if using in-memory
-	router          *gin.Engine
-	httpSrv         *http.Server
-	logger          *slog.Logger
-	cancelRunCtx    context.CancelFunc // cancels background goroutines started in Run
+	cfg              *config.Config
+	wallet           wallet.WalletService
+	registry         registry.Store
+	sessionMgr       *sessionkeys.Manager
+	authMgr          *auth.Manager
+	ledger           *ledger.Ledger
+	commentary       *commentary.Service
+	predictions      *predictions.Service
+	depositWatcher   *watcher.Watcher
+	webhooks         *webhooks.Dispatcher
+	realtimeHub      *realtime.Hub
+	paymaster        gas.Paymaster
+	escrowService    *escrow.Service
+	escrowTimer      *escrow.Timer
+	creditService    *credit.Service
+	creditTimer      *credit.Timer
+	contractService  *contracts.Service
+	contractTimer    *contracts.Timer
+	streamService    *streams.Service
+	streamTimer      *streams.Timer
+	reputationStore  reputation.SnapshotStore
+	reputationWorker *reputation.Worker
+	reputationSigner *reputation.Signer
+	rateLimiter      *ratelimit.Limiter
+	db               *sql.DB // nil if using in-memory
+	router           *gin.Engine
+	httpSrv          *http.Server
+	logger           *slog.Logger
+	cancelRunCtx     context.CancelFunc // cancels background goroutines started in Run
 
 	// Health state
 	ready   atomic.Bool
@@ -199,6 +202,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.streamTimer = streams.NewTimer(s.streamService, streamStore, s.logger)
 		s.logger.Info("streams enabled (postgres)")
 
+		// Reputation snapshots (PostgreSQL)
+		s.reputationStore = reputation.NewPostgresSnapshotStore(db)
+		s.logger.Info("reputation snapshots enabled (postgres)")
+
 		// Credit system (spend on credit, repay from earnings)
 		creditStore := credit.NewPostgresStore(db)
 		if err := creditStore.Migrate(ctx); err != nil {
@@ -254,6 +261,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.streamService = streams.NewService(streamStore, &streamLedgerAdapter{s.ledger})
 		s.streamTimer = streams.NewTimer(s.streamService, streamStore, s.logger)
 		s.logger.Info("streams enabled (in-memory)")
+
+		// Reputation snapshots (in-memory)
+		s.reputationStore = reputation.NewMemorySnapshotStore()
+		s.logger.Info("reputation snapshots enabled (in-memory)")
 
 		// Credit system (in-memory) — use demo scorer with relaxed policies
 		creditStore := credit.NewMemoryStore()
@@ -625,7 +636,20 @@ func (s *Server) setupRoutes() {
 
 	// Reputation routes (the network moat - agents build reputation over time)
 	// reputationProvider is already created above for discovery enrichment
-	reputationHandler := reputation.NewHandler(reputationProvider)
+	//
+	// Create signer from config (nil if no secret set)
+	s.reputationSigner = reputation.NewSigner(s.cfg.ReputationHMACSecret)
+
+	// Create worker for periodic snapshots
+	if s.reputationStore != nil {
+		workerInterval := time.Hour
+		if s.db == nil {
+			workerInterval = 10 * time.Second // Fast in demo mode
+		}
+		s.reputationWorker = reputation.NewWorker(reputationProvider, s.reputationStore, workerInterval, s.logger)
+	}
+
+	reputationHandler := reputation.NewHandlerFull(reputationProvider, s.reputationStore, s.reputationSigner)
 	reputationHandler.RegisterRoutes(v1)
 
 	// Webhook routes (event notifications to external services)
@@ -1208,6 +1232,11 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.streamTimer.Start(runCtx)
 	}
 
+	// Start reputation snapshot worker
+	if s.reputationWorker != nil {
+		go s.reputationWorker.Start(runCtx)
+	}
+
 	// Mark as ready after brief delay for startup
 	go func() {
 		time.Sleep(100 * time.Millisecond)
@@ -1274,6 +1303,12 @@ func (s *Server) Shutdown() error {
 	if s.streamTimer != nil {
 		s.streamTimer.Stop()
 		s.logger.Info("stream timer stopped")
+	}
+
+	// Stop reputation worker
+	if s.reputationWorker != nil {
+		s.reputationWorker.Stop()
+		s.logger.Info("reputation worker stopped")
 	}
 
 	// Stop rate limiter cleanup goroutine

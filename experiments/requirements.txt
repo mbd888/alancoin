@@ -1,0 +1,20 @@
+# CBA Experiments Requirements
+# Install with: pip install -r requirements.txt
+
+# Core dependencies
+eth-account>=0.11.0
+eth-hash[pycryptodome]>=0.5.0
+requests>=2.31.0
+
+# Optional: Real LLM APIs for Experiment 2
+openai>=1.0.0
+anthropic>=0.18.0
+
+# Agent Sandbox
+fastapi>=0.104.0
+uvicorn>=0.24.0
+sse-starlette>=1.6.0
+pydantic>=2.0
+
+# Development
+pytest>=7.0.0

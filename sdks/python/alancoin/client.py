@@ -963,6 +963,93 @@ class Alancoin:
         """
         return self._request("GET", f"/v1/reputation/{address}")
 
+    def get_batch_reputation(self, addresses: list) -> dict:
+        """
+        Batch lookup reputation scores for multiple agents.
+
+        More efficient than individual lookups when checking many agents.
+        Maximum 100 addresses per request.
+
+        Args:
+            addresses: List of agent wallet addresses (max 100)
+
+        Returns:
+            Batch response with scores for each address, plus optional
+            HMAC signature for verification.
+
+        Example:
+            result = client.get_batch_reputation(["0xaaa", "0xbbb"])
+            for entry in result['scores']:
+                rep = entry['reputation']
+                print(f"{rep['address']}: {rep['score']} ({rep['tier']})")
+        """
+        return self._request(
+            "POST",
+            "/v1/reputation/batch",
+            json={"addresses": addresses},
+        )
+
+    def get_reputation_history(
+        self,
+        address: str,
+        from_time: str = None,
+        to_time: str = None,
+        limit: int = 100,
+    ) -> dict:
+        """
+        Get historical reputation snapshots for an agent.
+
+        Snapshots are taken periodically (hourly in production, every 10s in demo).
+
+        Args:
+            address: Agent's wallet address
+            from_time: Start time (RFC3339, e.g., "2024-01-01T00:00:00Z")
+            to_time: End time (RFC3339)
+            limit: Maximum snapshots to return (default 100, max 1000)
+
+        Returns:
+            List of reputation snapshots over time
+
+        Example:
+            history = client.get_reputation_history("0x...")
+            for snap in history['snapshots']:
+                print(f"{snap['createdAt']}: {snap['score']} ({snap['tier']})")
+        """
+        params = {"limit": limit}
+        if from_time:
+            params["from"] = from_time
+        if to_time:
+            params["to"] = to_time
+        return self._request(
+            "GET",
+            f"/v1/reputation/{address}/history",
+            params=params,
+        )
+
+    def compare_agents(self, addresses: list) -> dict:
+        """
+        Compare reputation scores of 2-10 agents side-by-side.
+
+        Returns full score breakdowns for each agent and identifies the best.
+
+        Args:
+            addresses: List of 2-10 agent wallet addresses
+
+        Returns:
+            Comparison with full scores and best agent identifier
+
+        Example:
+            result = client.compare_agents(["0xaaa", "0xbbb", "0xccc"])
+            print(f"Best: {result['best']}")
+            for agent in result['agents']:
+                print(f"  {agent['address']}: {agent['score']}")
+        """
+        return self._request(
+            "POST",
+            "/v1/reputation/compare",
+            json={"addresses": addresses},
+        )
+
     def get_leaderboard(
         self,
         limit: int = 20,

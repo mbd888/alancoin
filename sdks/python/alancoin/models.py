@@ -343,6 +343,45 @@ class Contract:
 
 
 @dataclass
+class ReputationSnapshot:
+    """A point-in-time reputation score from history."""
+
+    id: int
+    address: str
+    score: float
+    tier: str
+    volume_score: float = 0.0
+    activity_score: float = 0.0
+    success_score: float = 0.0
+    age_score: float = 0.0
+    diversity_score: float = 0.0
+    total_transactions: int = 0
+    total_volume: float = 0.0
+    success_rate: float = 0.0
+    unique_peers: int = 0
+    created_at: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ReputationSnapshot":
+        return cls(
+            id=data.get("id", 0),
+            address=data.get("address", ""),
+            score=data.get("score", 0.0),
+            tier=data.get("tier", "new"),
+            volume_score=data.get("volumeScore", 0.0),
+            activity_score=data.get("activityScore", 0.0),
+            success_score=data.get("successScore", 0.0),
+            age_score=data.get("ageScore", 0.0),
+            diversity_score=data.get("diversityScore", 0.0),
+            total_transactions=data.get("totalTransactions", 0),
+            total_volume=data.get("totalVolume", 0.0),
+            success_rate=data.get("successRate", 0.0),
+            unique_peers=data.get("uniquePeers", 0),
+            created_at=data.get("createdAt"),
+        )
+
+
+@dataclass
 class ContractCall:
     """An individual service call within a contract."""
 
