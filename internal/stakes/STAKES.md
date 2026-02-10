@@ -303,12 +303,27 @@ Distributor Timer (every 60s)
 
 ### Revenue Interception
 
-Revenue is intercepted at the ledger adapter layer. When any of these operations credit an agent's balance:
-- Session key payments (seller receives payment)
-- Escrow releases (seller receives escrowed funds)
-- Stream settlements (seller receives stream revenue)
+Revenue is intercepted via a `RevenueAccumulator` interface injected into each payment package. When any of these operations credit an agent's balance, `AccumulateRevenue()` is called automatically:
 
-The server's ledger adapter calls `stakesService.AccumulateRevenue()` after the credit succeeds, which calculates and escrows the revenue share portion.
+| Payment Path | File | Hook Location |
+|---|---|---|
+| Session key payments | `sessionkeys/handlers.go` | After `Deposit(seller)` in `Transact()` |
+| Escrow releases | `escrow/escrow.go` | After `ReleaseEscrow()` in `Confirm()` and `AutoRelease()` |
+| Stream settlements | `streams/service.go` | After `Deposit(seller)` in `settle()` (skipped for disputes) |
+
+The `revenueAccumulatorAdapter` in `server.go` bridges `stakes.Service` to all three packages.
+
+### Authentication
+
+All mutating handlers validate that the authenticated agent (`authAgentAddr`) matches the request body address:
+
+| Endpoint | Validated Field |
+|---|---|
+| `POST /stakes` | `agentAddr` |
+| `POST /stakes/:id/invest` | `investorAddr` |
+| `POST /stakes/orders` | `sellerAddr` |
+| `POST /stakes/orders/:id/fill` | `buyerAddr` |
+| `DELETE /stakes/orders/:id` | Validated in service via `callerAddr` |
 
 ### Secondary Market Settlement
 
@@ -318,10 +333,10 @@ Seller lists shares → Order created (status: open)
 Buyer fills order
         |
         v
-1. EscrowLock(buyer, totalCost)
-2. ReleaseEscrow(buyer → seller, totalCost)
+1. Spend(buyer, totalCost)
+2. Deposit(seller, totalCost)
 3. Reduce seller holding shares (or liquidate if 0)
-4. Create/augment buyer holding
+4. Create/augment buyer holding (immediately vested)
 5. Mark order filled
 ```
 
@@ -354,3 +369,30 @@ See `migrations/011_stakes.sql` for full schema with constraints and indexes.
 - **Escrow-backed distributions** — Revenue share is locked in escrow immediately on earn, preventing the agent from spending it before distribution
 - **NUMERIC(20,6) arithmetic** — All monetary calculations use PostgreSQL NUMERIC or Go `math/big`, never floats
 - **Per-stake mutex locking** — Prevents race conditions on concurrent operations
+- **Auth ownership validation** — All mutating handlers verify the caller owns the address they're acting on
+
+## Testing
+
+31 tests in `stakes_test.go` covering:
+- CreateStake validation (revenue share bounds, max cap, vesting period)
+- Invest lifecycle (valid, self-investment, insufficient shares/balance, closed stake)
+- AccumulateRevenue (with/without investors, unrelated agents)
+- Distribute (single/multiple investors, proportional payouts)
+- CloseStake (valid, refunds undistributed, idempotent)
+- Secondary market (vesting enforcement, ownership checks, fill/cancel, liquidation)
+- Portfolio aggregation
+- Full end-to-end lifecycle
+
+## File Layout
+
+```
+internal/stakes/
+├── stakes.go          # Types, interfaces, errors, helpers
+├── service.go         # Business logic (create, invest, accumulate, distribute, market)
+├── handlers.go        # HTTP handlers for all API endpoints
+├── distributor.go     # Background timer for revenue distribution (60s)
+├── postgres_store.go  # PostgreSQL store implementation
+├── memory_store.go    # In-memory store for demo/testing
+├── stakes_test.go     # 31 tests
+└── STAKES.md          # This file
+```

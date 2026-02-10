@@ -86,7 +86,7 @@ func (s *PostgresStore) ListByAgent(ctx context.Context, agentAddr string) ([]*S
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanStakes(rows)
 }
 
@@ -101,7 +101,7 @@ func (s *PostgresStore) ListOpen(ctx context.Context, limit int) ([]*Stake, erro
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanStakes(rows)
 }
 
@@ -121,7 +121,7 @@ func (s *PostgresStore) ListDueForDistribution(ctx context.Context, now time.Tim
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	all, err := scanStakes(rows)
 	if err != nil {
