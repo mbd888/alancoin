@@ -2,6 +2,7 @@ package negotiation
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -36,9 +37,18 @@ func (t *Timer) Start(ctx context.Context) {
 		case <-t.stop:
 			return
 		case <-ticker.C:
-			t.service.CheckExpired(ctx)
+			t.safeCheckExpired(ctx)
 		}
 	}
+}
+
+func (t *Timer) safeCheckExpired(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.logger.Error("panic in negotiation timer", "panic", fmt.Sprint(r))
+		}
+	}()
+	t.service.CheckExpired(ctx)
 }
 
 // Stop signals the timer to stop.

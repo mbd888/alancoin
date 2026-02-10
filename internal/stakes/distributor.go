@@ -2,6 +2,7 @@ package stakes
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -37,7 +38,7 @@ func (d *Distributor) Start(ctx context.Context) {
 		case <-d.stop:
 			return
 		case <-ticker.C:
-			d.checkAndDistribute(ctx)
+			d.safeCheckAndDistribute(ctx)
 		}
 	}
 }
@@ -48,6 +49,15 @@ func (d *Distributor) Stop() {
 	case d.stop <- struct{}{}:
 	default:
 	}
+}
+
+func (d *Distributor) safeCheckAndDistribute(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			d.logger.Error("panic in stakes distributor", "panic", fmt.Sprint(r))
+		}
+	}()
+	d.checkAndDistribute(ctx)
 }
 
 func (d *Distributor) checkAndDistribute(ctx context.Context) {

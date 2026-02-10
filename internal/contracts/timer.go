@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -38,7 +39,7 @@ func (t *Timer) Start(ctx context.Context) {
 		case <-t.stop:
 			return
 		case <-ticker.C:
-			t.checkExpired(ctx)
+			t.safeCheckExpired(ctx)
 		}
 	}
 }
@@ -49,6 +50,15 @@ func (t *Timer) Stop() {
 	case t.stop <- struct{}{}:
 	default:
 	}
+}
+
+func (t *Timer) safeCheckExpired(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.logger.Error("panic in contracts timer", "panic", fmt.Sprint(r))
+		}
+	}()
+	t.checkExpired(ctx)
 }
 
 func (t *Timer) checkExpired(ctx context.Context) {

@@ -2,6 +2,7 @@ package credit
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -38,7 +39,7 @@ func (t *Timer) Start(ctx context.Context) {
 		case <-t.stop:
 			return
 		case <-ticker.C:
-			t.checkDefaults(ctx)
+			t.safeCheckDefaults(ctx)
 		}
 	}
 }
@@ -46,6 +47,15 @@ func (t *Timer) Start(ctx context.Context) {
 // Stop signals the timer to stop. Safe to call multiple times.
 func (t *Timer) Stop() {
 	t.once.Do(func() { close(t.stop) })
+}
+
+func (t *Timer) safeCheckDefaults(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.logger.Error("panic in credit timer", "panic", fmt.Sprint(r))
+		}
+	}()
+	t.checkDefaults(ctx)
 }
 
 func (t *Timer) checkDefaults(ctx context.Context) {

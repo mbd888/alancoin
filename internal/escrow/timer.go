@@ -2,6 +2,7 @@ package escrow
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -38,7 +39,7 @@ func (t *Timer) Start(ctx context.Context) {
 		case <-t.stop:
 			return
 		case <-ticker.C:
-			t.releaseExpired(ctx)
+			t.safeReleaseExpired(ctx)
 		}
 	}
 }
@@ -49,6 +50,15 @@ func (t *Timer) Stop() {
 	case t.stop <- struct{}{}:
 	default:
 	}
+}
+
+func (t *Timer) safeReleaseExpired(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.logger.Error("panic in escrow timer", "panic", fmt.Sprint(r))
+		}
+	}()
+	t.releaseExpired(ctx)
 }
 
 func (t *Timer) releaseExpired(ctx context.Context) {
