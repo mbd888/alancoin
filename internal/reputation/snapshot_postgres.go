@@ -56,7 +56,7 @@ func (p *PostgresSnapshotStore) SaveBatch(ctx context.Context, snaps []*Snapshot
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, s := range snaps {
 		_, err := stmt.ExecContext(ctx, strings.ToLower(s.Address),
@@ -107,7 +107,7 @@ func (p *PostgresSnapshotStore) Query(ctx context.Context, q HistoryQuery) ([]*S
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return scanSnapshots(rows)
 }
