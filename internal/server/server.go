@@ -41,6 +41,7 @@ import (
 	"github.com/mbd888/alancoin/internal/reputation"
 	"github.com/mbd888/alancoin/internal/security"
 	"github.com/mbd888/alancoin/internal/sessionkeys"
+	"github.com/mbd888/alancoin/internal/stakes"
 	"github.com/mbd888/alancoin/internal/streams"
 	"github.com/mbd888/alancoin/internal/validation"
 	"github.com/mbd888/alancoin/internal/wallet"
@@ -76,6 +77,8 @@ type Server struct {
 	streamTimer        *streams.Timer
 	negotiationService *negotiation.Service
 	negotiationTimer   *negotiation.Timer
+	stakesService      *stakes.Service
+	stakesDistributor  *stakes.Distributor
 	reputationStore    reputation.SnapshotStore
 	reputationWorker   *reputation.Worker
 	reputationSigner   *reputation.Signer
@@ -213,6 +216,17 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.negotiationTimer = negotiation.NewTimer(s.negotiationService, s.logger)
 		s.logger.Info("negotiation enabled (postgres)")
 
+		// Stakes with PostgreSQL store (agent revenue staking)
+		stakesStore := stakes.NewPostgresStore(db)
+		s.stakesService = stakes.NewService(stakesStore, &stakesLedgerAdapter{s.ledger})
+		s.stakesDistributor = stakes.NewDistributor(s.stakesService, s.logger)
+		s.logger.Info("stakes enabled (postgres)")
+
+		// Wire revenue interception into payment flows
+		revenueAdapter := &revenueAccumulatorAdapter{s.stakesService}
+		s.escrowService.WithRevenueAccumulator(revenueAdapter)
+		s.streamService.WithRevenueAccumulator(revenueAdapter)
+
 		// Reputation snapshots (PostgreSQL)
 		s.reputationStore = reputation.NewPostgresSnapshotStore(db)
 		s.logger.Info("reputation snapshots enabled (postgres)")
@@ -280,6 +294,17 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			WithContractFormer(&contractFormerAdapter{s.contractService})
 		s.negotiationTimer = negotiation.NewTimer(s.negotiationService, s.logger)
 		s.logger.Info("negotiation enabled (in-memory)")
+
+		// Stakes with in-memory store (agent revenue staking)
+		stakesStore := stakes.NewMemoryStore()
+		s.stakesService = stakes.NewService(stakesStore, &stakesLedgerAdapter{s.ledger})
+		s.stakesDistributor = stakes.NewDistributor(s.stakesService, s.logger)
+		s.logger.Info("stakes enabled (in-memory)")
+
+		// Wire revenue interception into payment flows
+		revenueAdapter := &revenueAccumulatorAdapter{s.stakesService}
+		s.escrowService.WithRevenueAccumulator(revenueAdapter)
+		s.streamService.WithRevenueAccumulator(revenueAdapter)
 
 		// Reputation snapshots (in-memory)
 		s.reputationStore = reputation.NewMemorySnapshotStore()
@@ -607,6 +632,11 @@ func (s *Server) setupRoutes() {
 		sessionHandler = sessionHandler.WithEvents(&realtimeEventEmitter{s.realtimeHub})
 	}
 
+	// Add revenue accumulator for stakes interception
+	if s.stakesService != nil {
+		sessionHandler = sessionHandler.WithRevenueAccumulator(&revenueAccumulatorAdapter{s.stakesService})
+	}
+
 	protectedSessions := v1.Group("")
 	protectedSessions.Use(auth.Middleware(s.authMgr))
 	{
@@ -790,6 +820,19 @@ func (s *Server) setupRoutes() {
 		protectedPredictions := v1.Group("")
 		protectedPredictions.Use(auth.Middleware(s.authMgr))
 		predictionsHandler.RegisterProtectedRoutes(protectedPredictions)
+	}
+
+	// Stakes routes (agent revenue staking / investment)
+	if s.stakesService != nil {
+		stakesHandler := stakes.NewHandler(s.stakesService)
+
+		// Public routes - anyone can browse offerings and portfolios
+		stakesHandler.RegisterRoutes(v1)
+
+		// Protected routes - only authenticated agents can create/invest/trade
+		protectedStakes := v1.Group("")
+		protectedStakes.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		stakesHandler.RegisterProtectedRoutes(protectedStakes)
 	}
 
 	// Enhanced feed - transactions + commentary interleaved
@@ -1269,6 +1312,11 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.negotiationTimer.Start(runCtx)
 	}
 
+	// Start stakes distribution timer
+	if s.stakesDistributor != nil {
+		go s.stakesDistributor.Start(runCtx)
+	}
+
 	// Start reputation snapshot worker
 	if s.reputationWorker != nil {
 		go s.reputationWorker.Start(runCtx)
@@ -1346,6 +1394,12 @@ func (s *Server) Shutdown() error {
 	if s.negotiationTimer != nil {
 		s.negotiationTimer.Stop()
 		s.logger.Info("negotiation timer stopped")
+	}
+
+	// Stop stakes distributor
+	if s.stakesDistributor != nil {
+		s.stakesDistributor.Stop()
+		s.logger.Info("stakes distributor stopped")
 	}
 
 	// Stop reputation worker
@@ -1870,6 +1924,41 @@ func (p *registryMetricProvider) GetMarketMetric(ctx context.Context, metric str
 	default:
 		return 0, errors.New("unknown metric: " + metric)
 	}
+}
+
+// revenueAccumulatorAdapter adapts stakes.Service to the RevenueAccumulator
+// interface used by sessionkeys, escrow, and streams.
+type revenueAccumulatorAdapter struct {
+	stakes *stakes.Service
+}
+
+func (a *revenueAccumulatorAdapter) AccumulateRevenue(ctx context.Context, agentAddr, amount string) error {
+	return a.stakes.AccumulateRevenue(ctx, agentAddr, amount)
+}
+
+// stakesLedgerAdapter adapts ledger.Ledger to stakes.LedgerService
+type stakesLedgerAdapter struct {
+	l *ledger.Ledger
+}
+
+func (a *stakesLedgerAdapter) EscrowLock(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.EscrowLock(ctx, agentAddr, amount, reference)
+}
+
+func (a *stakesLedgerAdapter) ReleaseEscrow(ctx context.Context, fromAddr, toAddr, amount, reference string) error {
+	return a.l.ReleaseEscrow(ctx, fromAddr, toAddr, amount, reference)
+}
+
+func (a *stakesLedgerAdapter) RefundEscrow(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.RefundEscrow(ctx, agentAddr, amount, reference)
+}
+
+func (a *stakesLedgerAdapter) Deposit(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.Deposit(ctx, agentAddr, amount, reference)
+}
+
+func (a *stakesLedgerAdapter) Spend(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.Spend(ctx, agentAddr, amount, reference)
 }
 
 // contractFormerAdapter adapts contracts.Service to negotiation.ContractFormer

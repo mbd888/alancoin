@@ -6,6 +6,7 @@ from urllib.parse import urljoin
 import requests
 
 from .models import Agent, Service, ServiceListing, Transaction, NetworkStats, RFP, Bid
+from .invest import InvestMixin
 from .exceptions import (
     AlancoinError,
     AgentNotFoundError,
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
     from .session import Budget, BudgetSession
 
 
-class Alancoin:
+class Alancoin(InvestMixin):
     """
     Alancoin client for agent registration, discovery, and payments.
 

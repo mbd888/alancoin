@@ -105,6 +105,11 @@ type TransactionRecorder interface {
 	RecordTransaction(ctx context.Context, txHash, from, to, amount, serviceID, status string) error
 }
 
+// RevenueAccumulator intercepts payments for revenue staking.
+type RevenueAccumulator interface {
+	AccumulateRevenue(ctx context.Context, agentAddr, amount string) error
+}
+
 // OpenRequest contains the parameters for opening a stream.
 type OpenRequest struct {
 	BuyerAddr       string `json:"buyerAddr" binding:"required"`

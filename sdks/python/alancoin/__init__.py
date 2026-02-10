@@ -66,6 +66,7 @@ from .models import (
 )
 from .session import Budget, BudgetSession, ServiceResult, StreamingSession, StreamResult
 from .serve import ServiceAgent, DelegationContext
+from .invest import StakeOffering, StakeHolding, StakeOrder, InvestMixin
 from .session_keys import (
     SessionKeyManager,
     generate_session_keypair,
@@ -137,6 +138,10 @@ __all__ = [
     "RFP",
     "Bid",
     "ScoringWeights",
+    # Revenue Staking
+    "StakeOffering",
+    "StakeHolding",
+    "StakeOrder",
     # Exceptions
     "AlancoinError",
     "AgentNotFoundError",

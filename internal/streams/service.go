@@ -18,6 +18,7 @@ type Service struct {
 	store    Store
 	ledger   LedgerService
 	recorder TransactionRecorder
+	revenue  RevenueAccumulator
 	locks    sync.Map // per-stream ID locks to prevent race conditions
 }
 
@@ -38,6 +39,12 @@ func NewService(store Store, ledger LedgerService) *Service {
 // WithRecorder adds a transaction recorder for reputation integration.
 func (s *Service) WithRecorder(r TransactionRecorder) *Service {
 	s.recorder = r
+	return s
+}
+
+// WithRevenueAccumulator adds a revenue accumulator for stakes interception.
+func (s *Service) WithRevenueAccumulator(r RevenueAccumulator) *Service {
+	s.revenue = r
 	return s
 }
 
@@ -253,6 +260,11 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 			txStatus = "failed"
 		}
 		_ = s.recorder.RecordTransaction(ctx, stream.ID, stream.BuyerAddr, stream.SellerAddr, stream.SpentAmount, stream.ServiceID, txStatus)
+	}
+
+	// Intercept revenue for stakes (seller earned money)
+	if s.revenue != nil && spentBig.Sign() > 0 && status != StatusDisputed {
+		_ = s.revenue.AccumulateRevenue(ctx, stream.SellerAddr, stream.SpentAmount)
 	}
 
 	return stream, nil

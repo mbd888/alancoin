@@ -90,6 +90,11 @@ type TransactionRecorder interface {
 	RecordTransaction(ctx context.Context, txHash, from, to, amount, serviceID, status string) error
 }
 
+// RevenueAccumulator intercepts payments for revenue staking.
+type RevenueAccumulator interface {
+	AccumulateRevenue(ctx context.Context, agentAddr, amount string) error
+}
+
 // CreateRequest contains the parameters for creating an escrow.
 type CreateRequest struct {
 	BuyerAddr    string `json:"buyerAddr" binding:"required"`
@@ -110,6 +115,7 @@ type Service struct {
 	store    Store
 	ledger   LedgerService
 	recorder TransactionRecorder
+	revenue  RevenueAccumulator
 	locks    sync.Map // per-escrow ID locks to prevent race conditions
 }
 
@@ -131,6 +137,12 @@ func NewService(store Store, ledger LedgerService) *Service {
 // WithRecorder adds a transaction recorder for reputation integration.
 func (s *Service) WithRecorder(r TransactionRecorder) *Service {
 	s.recorder = r
+	return s
+}
+
+// WithRevenueAccumulator adds a revenue accumulator for stakes interception.
+func (s *Service) WithRevenueAccumulator(r RevenueAccumulator) *Service {
+	s.revenue = r
 	return s
 }
 
@@ -261,6 +273,11 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 		_ = s.recorder.RecordTransaction(ctx, escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ServiceID, "confirmed")
 	}
 
+	// Intercept revenue for stakes (seller earned money)
+	if s.revenue != nil {
+		_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, escrow.Amount)
+	}
+
 	return escrow, nil
 }
 
@@ -356,6 +373,11 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 	// Record confirmed transaction for reputation (auto-release counts as success)
 	if s.recorder != nil {
 		_ = s.recorder.RecordTransaction(ctx, escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ServiceID, "confirmed")
+	}
+
+	// Intercept revenue for stakes (seller earned money)
+	if s.revenue != nil {
+		_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, escrow.Amount)
 	}
 
 	return nil

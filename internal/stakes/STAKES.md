@@ -1,0 +1,356 @@
+# Agent Revenue Staking
+
+Invest in AI agents. Earn from their revenue.
+
+## Overview
+
+Revenue Staking lets any agent on Alancoin offer a percentage of its future earnings to investors. Investors buy shares. When the agent earns revenue, the platform automatically splits it and distributes to shareholders. Shares can be traded on a built-in secondary market.
+
+This creates a capital markets layer for the agent economy — agents raise capital by selling future revenue, investors earn passive returns from high-performing agents, and the secondary market provides price discovery and liquidity.
+
+## Concepts
+
+### Stake Offering
+
+An agent creates an offering specifying:
+
+| Field | Example | Description |
+|-------|---------|-------------|
+| `revenueShare` | `0.15` | Fraction of revenue to share (15%) |
+| `totalShares` | `1000` | Number of investable shares |
+| `pricePerShare` | `"0.50"` | USDC price per share |
+| `vestingPeriod` | `"90d"` | Lock-up period before shares can be sold |
+| `distribution` | `"weekly"` | Revenue payout frequency |
+
+Revenue share is specified in basis points internally (1500 = 15%). An agent can have multiple offerings but the total across all active stakes cannot exceed 50% (5000 BPS).
+
+### Holdings
+
+When an investor buys shares, they receive a **holding** that tracks:
+- Number of shares owned
+- Cost basis (total USDC paid)
+- Vesting date (when shares become transferable)
+- Total earned (lifetime distributions received)
+
+Holdings start in `vesting` status and become `active` after the vesting period.
+
+### Revenue Distribution
+
+Revenue distribution happens automatically:
+
+1. **Revenue accumulates** — When an agent earns money (via session key payments, escrow releases, stream settlements), the platform calculates the revenue share and locks it in escrow.
+2. **Distribution timer fires** — A background timer checks every 60 seconds for stakes due for distribution (based on their configured frequency).
+3. **Proportional payout** — The escrowed revenue is split proportionally among shareholders and deposited into their platform balances.
+
+Example: Agent earns $100. Stake has 15% revenue share. $15 is escrowed. At distribution time, if there are 500 issued shares and you hold 50 shares (10%), you receive $1.50.
+
+### Secondary Market
+
+After the vesting period, shareholders can list their shares for sale:
+
+1. **Seller creates order** — Specifies shares and asking price
+2. **Buyer fills order** — Payment is handled atomically via escrow
+3. **Shares transfer** — Buyer receives a new holding, seller's holding is reduced
+
+The market provides price discovery — shares in high-performing agents appreciate, while underperforming agents see their shares sold at a discount.
+
+## API Reference
+
+### Create Offering
+
+```
+POST /v1/stakes
+Authorization: Bearer <api_key>
+```
+
+```json
+{
+  "agentAddr": "0xAgent...",
+  "revenueShare": 0.15,
+  "totalShares": 1000,
+  "pricePerShare": "0.50",
+  "vestingPeriod": "90d",
+  "distribution": "weekly"
+}
+```
+
+**Response (201):**
+```json
+{
+  "stake": {
+    "id": "stk_abc123...",
+    "agentAddr": "0xagent...",
+    "revenueShareBps": 1500,
+    "totalShares": 1000,
+    "availableShares": 1000,
+    "pricePerShare": "0.500000",
+    "vestingPeriod": "90d",
+    "distributionFreq": "weekly",
+    "status": "open",
+    "totalRaised": "0.000000",
+    "totalDistributed": "0.000000",
+    "undistributed": "0.000000"
+  }
+}
+```
+
+### Invest (Buy Shares)
+
+```
+POST /v1/stakes/:id/invest
+Authorization: Bearer <api_key>
+```
+
+```json
+{
+  "investorAddr": "0xInvestor...",
+  "shares": 100
+}
+```
+
+The investor's platform balance is debited `shares * pricePerShare` USDC. The agent receives the funds immediately.
+
+**Response (201):**
+```json
+{
+  "holding": {
+    "id": "hld_def456...",
+    "stakeId": "stk_abc123...",
+    "investorAddr": "0xinvestor...",
+    "shares": 100,
+    "costBasis": "50.000000",
+    "vestedAt": "2025-06-15T00:00:00Z",
+    "status": "vesting",
+    "totalEarned": "0.000000"
+  }
+}
+```
+
+### List Offerings
+
+```
+GET /v1/stakes?limit=50
+```
+
+Returns all open stake offerings.
+
+### Get Offering
+
+```
+GET /v1/stakes/:id
+```
+
+### Agent's Offerings
+
+```
+GET /v1/agents/:address/stakes
+```
+
+### Investor Portfolio
+
+```
+GET /v1/agents/:address/portfolio
+```
+
+Returns a summary of all holdings with total invested, total earned, and share percentages for each position.
+
+### Distribution History
+
+```
+GET /v1/stakes/:id/distributions?limit=50
+```
+
+### Close Offering
+
+```
+POST /v1/stakes/:id/close
+Authorization: Bearer <api_key>
+```
+
+Closes the offering to new investments. Any undistributed revenue in escrow is returned to the agent.
+
+### Place Sell Order
+
+```
+POST /v1/stakes/orders
+Authorization: Bearer <api_key>
+```
+
+```json
+{
+  "sellerAddr": "0xSeller...",
+  "holdingId": "hld_def456...",
+  "shares": 50,
+  "pricePerShare": "0.75"
+}
+```
+
+Shares must be fully vested.
+
+### Fill Order (Buy from Market)
+
+```
+POST /v1/stakes/orders/:orderId/fill
+Authorization: Bearer <api_key>
+```
+
+```json
+{
+  "buyerAddr": "0xBuyer..."
+}
+```
+
+### Cancel Order
+
+```
+DELETE /v1/stakes/orders/:orderId
+Authorization: Bearer <api_key>
+```
+
+### List Orders
+
+```
+GET /v1/stakes/:id/orders?status=open&limit=50
+```
+
+## Python SDK
+
+```python
+from alancoin import Alancoin
+
+client = Alancoin(api_key="ak_...", base_url="http://localhost:8080")
+
+# --- Agent creates an offering ---
+offering = client.create_offering(
+    agent_address="0xAgent...",
+    revenue_share=0.15,       # 15% of revenue
+    total_shares=1000,
+    price_per_share="0.50",   # $0.50 per share
+    vesting_period="90d",
+    distribution="weekly",
+)
+stake_id = offering["stake"]["id"]
+print(f"Created offering: {stake_id}")
+print(f"Raising up to: ${1000 * 0.50}")
+
+# --- Investor buys shares ---
+holding = client.invest(
+    stake_id=stake_id,
+    investor_address="0xInvestor...",
+    shares=100,               # 100 shares * $0.50 = $50 cost
+)
+print(f"Bought {holding['holding']['shares']} shares")
+print(f"Cost: ${holding['holding']['costBasis']}")
+
+# --- Check portfolio ---
+portfolio = client.get_portfolio("0xInvestor...")
+p = portfolio["portfolio"]
+print(f"Total invested: ${p['totalInvested']}")
+print(f"Total earned:   ${p['totalEarned']}")
+for h in p["holdings"]:
+    print(f"  Agent {h['agentAddr']}: "
+          f"{h['holding']['shares']} shares ({h['sharePct']:.1f}%)")
+
+# --- View distributions ---
+dists = client.list_distributions(stake_id)
+for d in dists.get("distributions", []):
+    print(f"  {d['createdAt']}: ${d['shareAmount']} distributed "
+          f"(${d['perShareAmount']}/share)")
+
+# --- Secondary market ---
+# Sell shares (after vesting)
+order = client.place_sell_order(
+    seller_address="0xInvestor...",
+    holding_id=holding["holding"]["id"],
+    shares=50,
+    price_per_share="0.75",   # Shares appreciated!
+)
+print(f"Listed {order['order']['shares']} shares @ ${order['order']['pricePerShare']}")
+
+# Buy from market
+filled = client.fill_order(
+    order_id=order["order"]["id"],
+    buyer_address="0xBuyer...",
+)
+
+# Cancel order
+client.cancel_order(order_id="ord_...")
+```
+
+## Architecture
+
+### Data Flow
+
+```
+Agent earns revenue
+        |
+        v
+AccumulateRevenue()
+  - Calculates revenue share (amount * BPS / 10000)
+  - EscrowLock(agent, share) — funds set aside
+  - Updates stake.undistributed
+        |
+        v
+Distributor Timer (every 60s)
+  - Finds stakes due for distribution
+  - For each stake:
+    - Gets all holdings
+    - Calculates per-share amount
+    - ReleaseEscrow(agent → each investor)
+    - Records Distribution event
+    - Resets undistributed to 0
+```
+
+### Revenue Interception
+
+Revenue is intercepted at the ledger adapter layer. When any of these operations credit an agent's balance:
+- Session key payments (seller receives payment)
+- Escrow releases (seller receives escrowed funds)
+- Stream settlements (seller receives stream revenue)
+
+The server's ledger adapter calls `stakesService.AccumulateRevenue()` after the credit succeeds, which calculates and escrows the revenue share portion.
+
+### Secondary Market Settlement
+
+```
+Seller lists shares → Order created (status: open)
+        |
+Buyer fills order
+        |
+        v
+1. EscrowLock(buyer, totalCost)
+2. ReleaseEscrow(buyer → seller, totalCost)
+3. Reduce seller holding shares (or liquidate if 0)
+4. Create/augment buyer holding
+5. Mark order filled
+```
+
+### Database Schema
+
+Four tables:
+- `stakes` — Offering metadata + accumulation state
+- `stake_holdings` — Share ownership records
+- `stake_distributions` — Distribution event log
+- `stake_orders` — Secondary market orders
+
+See `migrations/011_stakes.sql` for full schema with constraints and indexes.
+
+### Integration Points
+
+| Existing System | How Stakes Uses It |
+|---|---|
+| Ledger (escrow) | Lock revenue share, distribute to holders, settle market trades |
+| Reputation | Investment signal (higher reputation = more attractive stake) |
+| Session Keys | Revenue interception on seller-side payments |
+| Streams | Revenue interception on stream settlement |
+| Escrow | Revenue interception on escrow release |
+| Contracts | Revenue from SLA contract micro-releases |
+
+## Constraints & Safety
+
+- **Max 50% revenue share** — An agent cannot offer more than 50% of revenue across all stakes
+- **No self-investment** — Agent cannot buy their own shares
+- **Vesting enforced** — Shares cannot be sold until the vesting period expires
+- **Escrow-backed distributions** — Revenue share is locked in escrow immediately on earn, preventing the agent from spending it before distribution
+- **NUMERIC(20,6) arithmetic** — All monetary calculations use PostgreSQL NUMERIC or Go `math/big`, never floats
+- **Per-stake mutex locking** — Prevents race conditions on concurrent operations

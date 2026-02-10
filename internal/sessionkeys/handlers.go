@@ -49,6 +49,11 @@ type BalanceService interface {
 	ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error
 }
 
+// RevenueAccumulator intercepts payments for revenue staking.
+type RevenueAccumulator interface {
+	AccumulateRevenue(ctx context.Context, agentAddr, amount string) error
+}
+
 // EventEmitter broadcasts events to real-time subscribers
 type EventEmitter interface {
 	EmitTransaction(tx map[string]interface{})
@@ -62,6 +67,7 @@ type Handler struct {
 	recorder TransactionRecorder // For recording txs (optional)
 	balance  BalanceService      // For checking/debiting balances (optional)
 	events   EventEmitter        // For broadcasting events (optional)
+	revenue  RevenueAccumulator  // For revenue staking interception (optional)
 	logger   *slog.Logger
 	demoMode bool // Skip on-chain transfers, use ledger only
 }
@@ -85,6 +91,12 @@ func NewHandlerWithExecution(manager *Manager, wallet WalletService, recorder Tr
 // WithEvents adds an event emitter to the handler
 func (h *Handler) WithEvents(events EventEmitter) *Handler {
 	h.events = events
+	return h
+}
+
+// WithRevenueAccumulator adds a revenue accumulator for stakes interception.
+func (h *Handler) WithRevenueAccumulator(r RevenueAccumulator) *Handler {
+	h.revenue = r
 	return h
 }
 
@@ -423,6 +435,14 @@ func (h *Handler) Transact(c *gin.Context) {
 			if recErr := h.recorder.RecordTransaction(c.Request.Context(), txHash, address, req.To, req.Amount, req.ServiceID); recErr != nil {
 				h.logger.Warn("RecordTransaction failed: transaction executed but not recorded in registry",
 					"txHash", txHash, "from", address, "to", req.To, "amount", req.Amount, "error", recErr)
+			}
+		}
+
+		// Intercept revenue for stakes (seller earned money)
+		if h.revenue != nil {
+			if revErr := h.revenue.AccumulateRevenue(c.Request.Context(), req.To, req.Amount); revErr != nil {
+				h.logger.Warn("AccumulateRevenue failed: payment succeeded but revenue not escrowed for stakes",
+					"seller", req.To, "amount", req.Amount, "error", revErr)
 			}
 		}
 	}
