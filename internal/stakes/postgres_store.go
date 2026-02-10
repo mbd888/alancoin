@@ -350,7 +350,7 @@ func (s *PostgresStore) ListOrdersByStake(ctx context.Context, stakeID string, s
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanOrders(rows)
 }
 
@@ -364,7 +364,7 @@ func (s *PostgresStore) ListOrdersBySeller(ctx context.Context, sellerAddr strin
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanOrders(rows)
 }
 
