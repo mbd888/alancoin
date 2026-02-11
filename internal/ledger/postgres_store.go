@@ -60,7 +60,7 @@ func (p *PostgresStore) Migrate(ctx context.Context) error {
 
 		-- Prevent double-crediting of the same deposit (TOCTOU defense)
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_deposit_unique
-			ON ledger_entries(tx_hash) WHERE type = 'deposit' AND tx_hash IS NOT NULL;
+			ON ledger_entries(tx_hash) WHERE type = 'deposit' AND tx_hash IS NOT NULL AND tx_hash != '';
 	`)
 	return err
 }
