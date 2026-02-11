@@ -57,6 +57,11 @@ func (m *MemoryStore) Credit(ctx context.Context, agentAddr, amount, txHash, des
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Atomic duplicate check under write lock (prevents TOCTOU with HasDeposit)
+	if txHash != "" && m.deposits[txHash] {
+		return ErrDuplicateDeposit
+	}
+
 	bal, ok := m.balances[agentAddr]
 	if !ok {
 		bal = &Balance{
@@ -177,6 +182,66 @@ func (m *MemoryStore) Debit(ctx context.Context, agentAddr, amount, reference, d
 		Description: description,
 		CreatedAt:   time.Now(),
 	})
+
+	return nil
+}
+
+// Transfer atomically debits sender and credits receiver under a single lock.
+func (m *MemoryStore) Transfer(ctx context.Context, fromAddr, toAddr, amount, reference string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	fromBal, ok := m.balances[fromAddr]
+	if !ok {
+		return ErrAgentNotFound
+	}
+
+	sub, _ := usdc.Parse(amount)
+	fromAvail, _ := usdc.Parse(fromBal.Available)
+	fromTotalOut, _ := usdc.Parse(fromBal.TotalOut)
+
+	if fromAvail.Cmp(sub) >= 0 {
+		fromAvail.Sub(fromAvail, sub)
+		fromBal.Available = usdc.Format(fromAvail)
+	} else {
+		creditLimit, _ := usdc.Parse(fromBal.CreditLimit)
+		creditUsed, _ := usdc.Parse(fromBal.CreditUsed)
+		creditAvailable := new(big.Int).Sub(creditLimit, creditUsed)
+		gap := new(big.Int).Sub(sub, fromAvail)
+		if creditAvailable.Cmp(gap) < 0 {
+			return ErrInsufficientBalance
+		}
+		creditUsed.Add(creditUsed, gap)
+		fromAvail.SetInt64(0)
+		fromBal.Available = usdc.Format(fromAvail)
+		fromBal.CreditUsed = usdc.Format(creditUsed)
+	}
+	fromTotalOut.Add(fromTotalOut, sub)
+	fromBal.TotalOut = usdc.Format(fromTotalOut)
+	fromBal.UpdatedAt = time.Now()
+
+	// Credit receiver (create balance if needed)
+	toBal, ok := m.balances[toAddr]
+	if !ok {
+		toBal = &Balance{
+			AgentAddr: toAddr, Available: "0", Pending: "0", Escrowed: "0",
+			CreditLimit: "0", CreditUsed: "0", TotalIn: "0", TotalOut: "0",
+		}
+		m.balances[toAddr] = toBal
+	}
+	toAvail, _ := usdc.Parse(toBal.Available)
+	toTotalIn, _ := usdc.Parse(toBal.TotalIn)
+	toAvail.Add(toAvail, sub)
+	toTotalIn.Add(toTotalIn, sub)
+	toBal.Available = usdc.Format(toAvail)
+	toBal.TotalIn = usdc.Format(toTotalIn)
+	toBal.UpdatedAt = time.Now()
+
+	now := time.Now()
+	m.entries = append(m.entries,
+		&Entry{ID: idgen.WithPrefix("entry_"), AgentAddr: fromAddr, Type: "transfer_out", Amount: amount, Reference: reference, Description: "transfer_out", CreatedAt: now},
+		&Entry{ID: idgen.WithPrefix("entry_"), AgentAddr: toAddr, Type: "transfer_in", Amount: amount, Reference: reference, Description: "transfer_in", CreatedAt: now},
+	)
 
 	return nil
 }

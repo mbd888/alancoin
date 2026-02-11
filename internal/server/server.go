@@ -840,7 +840,9 @@ func (s *Server) setupRoutes() {
 		protectedLedger.POST("/admin/deposits", auth.RequireAdmin(), ledgerHandler.RecordDeposit)
 
 		// Admin routes for reconciliation, audit, reversals, batch ops
-		ledgerHandler.RegisterAdminRoutes(protectedLedger)
+		adminLedger := v1.Group("")
+		adminLedger.Use(auth.Middleware(s.authMgr), auth.RequireAdmin())
+		ledgerHandler.RegisterAdminRoutes(adminLedger)
 
 		// Alert routes (per-agent)
 		ledgerHandler.RegisterAlertRoutes(v1)

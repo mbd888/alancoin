@@ -220,15 +220,11 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			continue
 		}
 
-		// Payment: confirm hold from buyer for total cost (base + premium)
+		// Payment: deposit to seller. The buyer's budget is already held (pending).
+		// Settlement (ConfirmHold for spent + ReleaseHold for unused) happens on session close,
+		// using the original hold reference (session.ID) to avoid cross-hold interference.
 		ref := fmt.Sprintf("%s:req:%d:%s", session.ID, session.RequestCount+1, candidate.ServiceID)
 		totalCostStr := usdc.Format(totalCostBig)
-
-		if err := s.ledger.ConfirmHold(ctx, session.AgentAddr, totalCostStr, ref); err != nil {
-			s.logger.Warn("confirm hold failed", "session", sessionID, "error", err)
-			lastErr = err
-			continue
-		}
 
 		// Deposit base price to seller
 		if err := s.ledger.Deposit(ctx, candidate.AgentAddress, candidate.Price, ref); err != nil {
@@ -357,10 +353,19 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 		return nil, ErrSessionClosed
 	}
 
-	// Release unspent hold
+	// Settle the hold: confirm the spent portion, release the unused portion.
+	// Both use the original hold reference (session.ID) to ensure we only affect
+	// this session's hold and don't consume pending from other holds/streams.
 	spentBig, _ := usdc.Parse(session.TotalSpent)
 	holdBig, _ := usdc.Parse(session.MaxTotal)
 	unused := new(big.Int).Sub(holdBig, spentBig)
+
+	if spentBig.Sign() > 0 {
+		spentStr := usdc.Format(spentBig)
+		if err := s.ledger.ConfirmHold(ctx, session.AgentAddr, spentStr, session.ID); err != nil {
+			return nil, fmt.Errorf("failed to confirm spent hold: %w", err)
+		}
+	}
 
 	if unused.Sign() > 0 {
 		unusedStr := usdc.Format(unused)
@@ -373,7 +378,7 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 	session.UpdatedAt = time.Now()
 
 	if err := s.store.UpdateSession(ctx, session); err != nil {
-		s.logger.Error("CRITICAL: gateway session funds released but status update failed",
+		s.logger.Error("CRITICAL: gateway session funds settled but status update failed",
 			"session", sessionID, "error", err)
 		return nil, fmt.Errorf("failed to update session after close: %w", err)
 	}
@@ -436,10 +441,17 @@ func (s *Service) AutoCloseExpired(ctx context.Context, session *Session) error 
 		return ErrSessionClosed
 	}
 
-	// Release unspent hold
+	// Settle the hold: confirm spent, release unused (same as CloseSession)
 	spentBig, _ := usdc.Parse(fresh.TotalSpent)
 	holdBig, _ := usdc.Parse(fresh.MaxTotal)
 	unused := new(big.Int).Sub(holdBig, spentBig)
+
+	if spentBig.Sign() > 0 {
+		spentStr := usdc.Format(spentBig)
+		if err := s.ledger.ConfirmHold(ctx, fresh.AgentAddr, spentStr, fresh.ID); err != nil {
+			return fmt.Errorf("failed to confirm spent hold: %w", err)
+		}
+	}
 
 	if unused.Sign() > 0 {
 		unusedStr := usdc.Format(unused)

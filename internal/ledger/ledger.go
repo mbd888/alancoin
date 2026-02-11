@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
 	"go.opentelemetry.io/otel/attribute"
@@ -98,6 +99,10 @@ type Store interface {
 
 	// SumAllBalances returns the sum of all agent balances.
 	SumAllBalances(ctx context.Context) (available, pending, escrowed string, err error)
+
+	// Atomic transfer: debit sender + credit receiver in a single transaction.
+	// Prevents fund loss if the process crashes between debit and credit.
+	Transfer(ctx context.Context, fromAddr, toAddr, amount, reference string) error
 
 	// Reversal operations.
 	GetEntry(ctx context.Context, entryID string) (*Entry, error)
@@ -203,6 +208,9 @@ func (l *Ledger) Deposit(ctx context.Context, agentAddr, amount, txHash string) 
 		return ErrInvalidAmount
 	}
 
+	// Fast-path: check for known duplicate before starting a transaction.
+	// The real protection is the UNIQUE index on ledger_entries(tx_hash)
+	// WHERE type='deposit', which prevents the TOCTOU race between check and insert.
 	exists, err := l.store.HasDeposit(ctx, txHash)
 	if err != nil {
 		span.RecordError(err)
@@ -220,6 +228,12 @@ func (l *Ledger) Deposit(ctx context.Context, agentAddr, amount, txHash string) 
 	before, _ := l.store.GetBalance(ctx, addr)
 
 	if err := l.store.Credit(ctx, addr, amount, txHash, "deposit"); err != nil {
+		// Catch unique constraint violation from the DB (concurrent duplicate deposit)
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+			span.SetStatus(codes.Error, "duplicate deposit (constraint)")
+			return ErrDuplicateDeposit
+		}
 		return err
 	}
 
@@ -260,7 +274,7 @@ func (l *Ledger) Spend(ctx context.Context, agentAddr, amount, sessionKeyID stri
 	return nil
 }
 
-// Transfer moves funds between two agents with full event sourcing, audit, and alerts.
+// Transfer moves funds between two agents atomically with full event sourcing, audit, and alerts.
 // Used for internal transfers like settlement netting.
 func (l *Ledger) Transfer(ctx context.Context, from, to, amount, reference string) error {
 	amountBig, ok := usdc.Parse(amount)
@@ -274,24 +288,25 @@ func (l *Ledger) Transfer(ctx context.Context, from, to, amount, reference strin
 	done := observeOp("transfer")
 	defer done()
 
-	// Debit sender
 	fromBefore, _ := l.store.GetBalance(ctx, fromAddr)
-	if err := l.store.Debit(ctx, fromAddr, amount, reference, "transfer_out"); err != nil {
-		return fmt.Errorf("transfer debit %s failed: %w", fromAddr, err)
-	}
-	l.appendEvent(ctx, fromAddr, "transfer_out", amount, reference, toAddr)
-	fromAfter, _ := l.store.GetBalance(ctx, fromAddr)
-	l.logAudit(ctx, fromAddr, "transfer_out", amount, reference, fromBefore, fromAfter)
-	l.checkAlerts(ctx, fromAddr, fromAfter, "transfer_out", amount)
-
-	// Credit receiver
 	toBefore, _ := l.store.GetBalance(ctx, toAddr)
-	if err := l.store.Credit(ctx, toAddr, amount, reference, "transfer_in"); err != nil {
-		return fmt.Errorf("transfer credit %s failed: %w", toAddr, err)
+
+	// Atomic debit+credit in a single database transaction.
+	// Prevents fund loss if the process crashes between debit and credit.
+	if err := l.store.Transfer(ctx, fromAddr, toAddr, amount, reference); err != nil {
+		return fmt.Errorf("transfer %s→%s failed: %w", fromAddr, toAddr, err)
 	}
+
+	// Event sourcing, audit, alerts (non-critical — transfer already committed)
+	l.appendEvent(ctx, fromAddr, "transfer_out", amount, reference, toAddr)
 	l.appendEvent(ctx, toAddr, "transfer_in", amount, reference, fromAddr)
+
+	fromAfter, _ := l.store.GetBalance(ctx, fromAddr)
 	toAfter, _ := l.store.GetBalance(ctx, toAddr)
+
+	l.logAudit(ctx, fromAddr, "transfer_out", amount, reference, fromBefore, fromAfter)
 	l.logAudit(ctx, toAddr, "transfer_in", amount, reference, toBefore, toAfter)
+	l.checkAlerts(ctx, fromAddr, fromAfter, "transfer_out", amount)
 	l.checkAlerts(ctx, toAddr, toAfter, "transfer_in", amount)
 
 	return nil

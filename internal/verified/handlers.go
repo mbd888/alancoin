@@ -106,13 +106,13 @@ func (h *Handler) Revoke(c *gin.Context) {
 
 	v, err := h.service.Revoke(c.Request.Context(), address)
 	if err != nil {
-		switch {
-		case err == ErrNotVerified:
+		switch err {
+		case ErrNotVerified:
 			c.JSON(http.StatusNotFound, gin.H{
 				"error":   "not_verified",
 				"message": "Agent is not verified",
 			})
-		case err == ErrInvalidStatus:
+		case ErrInvalidStatus:
 			c.JSON(http.StatusConflict, gin.H{
 				"error":   "invalid_status",
 				"message": "Verification is already in a terminal state",
@@ -135,13 +135,13 @@ func (h *Handler) Reinstate(c *gin.Context) {
 
 	v, err := h.service.Reinstate(c.Request.Context(), address)
 	if err != nil {
-		switch {
-		case err == ErrNotVerified:
+		switch err {
+		case ErrNotVerified:
 			c.JSON(http.StatusNotFound, gin.H{
 				"error":   "not_verified",
 				"message": "Agent is not verified",
 			})
-		case err == ErrInvalidStatus:
+		case ErrInvalidStatus:
 			c.JSON(http.StatusConflict, gin.H{
 				"error":   "invalid_status",
 				"message": "Only suspended verifications can be reinstated",

@@ -43,12 +43,6 @@ func (m *mockReputationProvider) setScore(score float64, tier string) {
 	m.tier = tier
 }
 
-func (m *mockReputationProvider) setError(err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.err = err
-}
-
 // mockMetricsProvider returns fixed metrics data.
 type mockMetricsProvider struct {
 	mu             sync.Mutex
@@ -84,12 +78,6 @@ func (m *mockMetricsProvider) setMetrics(totalTxns int, successRate float64, day
 	m.successRate = successRate
 	m.daysOnNetwork = daysOnNetwork
 	m.totalVolumeUSD = totalVolumeUSD
-}
-
-func (m *mockMetricsProvider) setError(err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.err = err
 }
 
 // mockLedger records ledger operations.
@@ -164,13 +152,6 @@ func (m *mockContractCallProvider) GetRecentCallsByAgent(_ context.Context, agen
 		return 0, 0, m.err
 	}
 	return m.successCount, m.totalCount, nil
-}
-
-func (m *mockContractCallProvider) setCalls(successCount, totalCount int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.successCount = successCount
-	m.totalCount = totalCount
 }
 
 // ---------------------------------------------------------------------------

@@ -57,6 +57,10 @@ func (p *PostgresStore) Migrate(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_ledger_agent ON ledger_entries(agent_address);
 		CREATE INDEX IF NOT EXISTS idx_ledger_tx ON ledger_entries(tx_hash);
 		CREATE INDEX IF NOT EXISTS idx_ledger_created ON ledger_entries(created_at DESC);
+
+		-- Prevent double-crediting of the same deposit (TOCTOU defense)
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_deposit_unique
+			ON ledger_entries(tx_hash) WHERE type = 'deposit' AND tx_hash IS NOT NULL;
 	`)
 	return err
 }
@@ -274,6 +278,79 @@ func (p *PostgresStore) Withdraw(ctx context.Context, agentAddr, amount, txHash 
 	`, idgen.New(), agentAddr, amount, txHash)
 	if err != nil {
 		return fmt.Errorf("failed to record entry: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// Transfer atomically debits sender and credits receiver in a single transaction.
+// Prevents fund loss from crashes between separate Debit and Credit calls.
+func (p *PostgresStore) Transfer(ctx context.Context, fromAddr, toAddr, amount, reference string) error {
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Debit sender (credit-aware: draw from credit if available is insufficient)
+	result, err := tx.ExecContext(ctx, `
+		UPDATE agent_balances SET
+			credit_used = COALESCE(credit_used, 0)
+			            + GREATEST(0, $2::NUMERIC(20,6) - available),
+			available   = GREATEST(0, available - $2::NUMERIC(20,6)),
+			total_out   = total_out + $2::NUMERIC(20,6),
+			updated_at  = NOW()
+		WHERE agent_address = $1
+		  AND available + (COALESCE(credit_limit, 0) - COALESCE(credit_used, 0)) >= $2::NUMERIC(20,6)
+	`, fromAddr, amount)
+	if err != nil {
+		return fmt.Errorf("transfer debit failed: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if rows == 0 {
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, fromAddr).Scan(&exists)
+		if !exists {
+			return ErrAgentNotFound
+		}
+		return ErrInsufficientBalance
+	}
+
+	// Credit receiver (auto-repay credit, upsert balance)
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO agent_balances (agent_address, available, total_in, updated_at)
+		VALUES ($1, $2::NUMERIC(20,6), $2::NUMERIC(20,6), NOW())
+		ON CONFLICT (agent_address) DO UPDATE SET
+			available    = agent_balances.available
+			             + ($2::NUMERIC(20,6) - LEAST($2::NUMERIC(20,6), COALESCE(agent_balances.credit_used, 0))),
+			credit_used  = COALESCE(agent_balances.credit_used, 0)
+			             - LEAST($2::NUMERIC(20,6), COALESCE(agent_balances.credit_used, 0)),
+			total_in     = agent_balances.total_in + $2::NUMERIC(20,6),
+			updated_at   = NOW()
+	`, toAddr, amount)
+	if err != nil {
+		return fmt.Errorf("transfer credit failed: %w", err)
+	}
+
+	// Record both ledger entries
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
+		VALUES ($1, $2, 'transfer_out', $3::NUMERIC(20,6), $4, 'transfer_out', NOW())
+	`, idgen.New(), fromAddr, amount, reference)
+	if err != nil {
+		return fmt.Errorf("failed to record transfer_out entry: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
+		VALUES ($1, $2, 'transfer_in', $3::NUMERIC(20,6), $4, 'transfer_in', NOW())
+	`, idgen.New(), toAddr, amount, reference)
+	if err != nil {
+		return fmt.Errorf("failed to record transfer_in entry: %w", err)
 	}
 
 	return tx.Commit()
