@@ -36,8 +36,14 @@ func (m *MemoryStore) Get(ctx context.Context, id string) (*Escrow, error) {
 	if !ok {
 		return nil, ErrEscrowNotFound
 	}
-	// Return a copy to prevent races on the shared pointer
+	// Return a deep copy to prevent races on the shared pointer.
+	// Shallow copy shares slice backing arrays (e.g. DisputeEvidence),
+	// so an append on the copy can mutate the stored escrow.
 	cp := *escrow
+	if escrow.DisputeEvidence != nil {
+		cp.DisputeEvidence = make([]EvidenceEntry, len(escrow.DisputeEvidence))
+		copy(cp.DisputeEvidence, escrow.DisputeEvidence)
+	}
 	return &cp, nil
 }
 

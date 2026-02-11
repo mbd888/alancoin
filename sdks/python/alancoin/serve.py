@@ -425,9 +425,10 @@ class ServiceAgent:
                     self._json(400, {"error": "invalid_json"})
                     return
 
-                # Check payment proof
+                # Check payment proof: either a direct tx hash or a gateway reference
                 tx_hash = self.headers.get("X-Payment-TxHash", "").strip()
-                if not tx_hash:
+                payment_ref = self.headers.get("X-Payment-Ref", "").strip()
+                if not tx_hash and not payment_ref:
                     self._json(
                         402,
                         {
@@ -439,32 +440,33 @@ class ServiceAgent:
                     )
                     return
 
-                # Validate tx_hash format (must look like a hex hash, not arbitrary string)
-                stripped = tx_hash.removeprefix("0x")
-                if not stripped or not all(c in "0123456789abcdefABCDEF" for c in stripped):
-                    self._json(400, {"error": "invalid_tx_hash", "message": "Invalid transaction hash format"})
-                    return
+                if tx_hash:
+                    # Direct SDK payment: validate hex tx hash format
+                    stripped = tx_hash.removeprefix("0x")
+                    if not stripped or not all(c in "0123456789abcdefABCDEF" for c in stripped):
+                        self._json(400, {"error": "invalid_tx_hash", "message": "Invalid transaction hash format"})
+                        return
 
-                # Verify the payment against the platform if a client is available
-                if agent._client:
-                    try:
-                        txns = agent._client.transactions(agent._address, limit=50)
-                        if not any(t.tx_hash == tx_hash for t in txns):
-                            self._json(402, {
-                                "error": "payment_not_found",
-                                "message": "Transaction not found on platform",
-                                "price": svc.price,
-                                "currency": "USDC",
-                                "recipient": agent._address,
+                    # Verify the payment against the platform if a client is available
+                    if agent._client:
+                        try:
+                            txns = agent._client.transactions(agent._address, limit=50)
+                            if not any(t.tx_hash == tx_hash for t in txns):
+                                self._json(402, {
+                                    "error": "payment_not_found",
+                                    "message": "Transaction not found on platform",
+                                    "price": svc.price,
+                                    "currency": "USDC",
+                                    "recipient": agent._address,
+                                })
+                                return
+                        except Exception as e:
+                            logger.warning("Payment verification failed for tx %s: %s", tx_hash[:16], e)
+                            self._json(503, {
+                                "error": "verification_unavailable",
+                                "message": "Payment verification service is unavailable. Please retry.",
                             })
                             return
-                    except Exception as e:
-                        logger.warning("Payment verification failed for tx %s: %s", tx_hash[:16], e)
-                        self._json(503, {
-                            "error": "verification_unavailable",
-                            "message": "Payment verification service is unavailable. Please retry.",
-                        })
-                        return
 
                 # Build delegation context if enabled and present in body
                 delegation_ctx = None

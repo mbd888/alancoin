@@ -298,6 +298,20 @@ func TestProxy_RetryOnForwardFailure(t *testing.T) {
 	if result.Retries != 1 {
 		t.Errorf("expected 1 retry, got %d", result.Retries)
 	}
+
+	// Payment was made to both the failed and successful service
+	if len(ml.deposits) != 2 {
+		t.Errorf("expected 2 deposits (failed + successful), got %d", len(ml.deposits))
+	}
+
+	// Session spend reflects both payments (0.10 failed + 0.10 success)
+	updated, _ := svc.GetSession(context.Background(), session.ID)
+	if updated.TotalSpent != "0.200000" {
+		t.Errorf("expected 0.200000 total spent (two payments), got %s", updated.TotalSpent)
+	}
+	if updated.RequestCount != 2 {
+		t.Errorf("expected 2 request count (failed + success), got %d", updated.RequestCount)
+	}
 }
 
 func TestProxy_AllowedTypes(t *testing.T) {

@@ -413,11 +413,6 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 		_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, escrow.Amount, "escrow_confirm:"+escrow.ID)
 	}
 
-	// Record successful outcome for seller reputation
-	if s.reputation != nil {
-		_ = s.reputation.RecordDispute(ctx, escrow.SellerAddr, "confirmed", escrow.Amount)
-	}
-
 	metrics.EscrowConfirmedTotal.Inc()
 	metrics.EscrowDuration.Observe(time.Since(escrow.CreatedAt).Seconds())
 
@@ -686,6 +681,9 @@ func (s *Service) ResolveArbitration(ctx context.Context, id, callerAddr string,
 		}
 		escrow.Status = StatusRefunded
 		escrow.Resolution = "arbitration_refund"
+		if s.reputation != nil {
+			_ = s.reputation.RecordDispute(ctx, escrow.SellerAddr, "refunded", escrow.Amount)
+		}
 
 	case "partial":
 		// Split: releaseAmount to seller, remainder to buyer
@@ -693,16 +691,9 @@ func (s *Service) ResolveArbitration(ctx context.Context, id, callerAddr string,
 			return nil, fmt.Errorf("invalid releaseAmount: %w", err)
 		}
 
-		releaseAmtBig, _ := new(big.Int).SetString(req.ReleaseAmount, 10)
-		if releaseAmtBig == nil {
-			// Try parsing as decimal
-			var ok bool
-			releaseAmtBig, ok = usdc.Parse(req.ReleaseAmount)
-			if !ok {
-				return nil, fmt.Errorf("%w: cannot parse releaseAmount", ErrInvalidAmount)
-			}
-		} else {
-			releaseAmtBig, _ = usdc.Parse(req.ReleaseAmount)
+		releaseAmtBig, ok := usdc.Parse(req.ReleaseAmount)
+		if !ok {
+			return nil, fmt.Errorf("%w: cannot parse releaseAmount", ErrInvalidAmount)
 		}
 
 		totalBig, _ := usdc.Parse(escrow.Amount)
@@ -734,6 +725,9 @@ func (s *Service) ResolveArbitration(ctx context.Context, id, callerAddr string,
 
 		if s.revenue != nil {
 			_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, releaseStr, "escrow_arb_partial:"+escrow.ID)
+		}
+		if s.reputation != nil {
+			_ = s.reputation.RecordDispute(ctx, escrow.SellerAddr, "partial", releaseStr)
 		}
 
 	default:

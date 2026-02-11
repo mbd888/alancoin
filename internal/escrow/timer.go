@@ -82,14 +82,19 @@ func (t *Timer) releaseExpired(ctx context.Context) {
 	}
 
 	for _, escrow := range expired {
-		// If delivered and past dispute window, auto-release
-		if escrow.Status == StatusDelivered && escrow.DisputeWindowUntil != nil && now.After(*escrow.DisputeWindowUntil) {
-			if err := t.service.AutoRelease(ctx, escrow); err != nil {
-				t.logger.Warn("failed to auto-release escrow after dispute window",
-					"escrowId", escrow.ID, "error", err)
+		// Delivered escrows must wait for the dispute window to pass before auto-release.
+		if escrow.Status == StatusDelivered {
+			if escrow.DisputeWindowUntil != nil && now.After(*escrow.DisputeWindowUntil) {
+				if err := t.service.AutoRelease(ctx, escrow); err != nil {
+					t.logger.Warn("failed to auto-release escrow after dispute window",
+						"escrowId", escrow.ID, "error", err)
+				} else {
+					t.logger.Info("auto-released escrow (dispute window expired)",
+						"escrowId", escrow.ID, "seller", escrow.SellerAddr, "amount", escrow.Amount)
+				}
 			} else {
-				t.logger.Info("auto-released escrow (dispute window expired)",
-					"escrowId", escrow.ID, "seller", escrow.SellerAddr, "amount", escrow.Amount)
+				t.logger.Debug("skipping delivered escrow, dispute window still open",
+					"escrowId", escrow.ID, "disputeWindowUntil", escrow.DisputeWindowUntil)
 			}
 			continue
 		}
