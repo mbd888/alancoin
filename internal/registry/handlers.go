@@ -20,11 +20,18 @@ type ReputationProvider interface {
 	GetScore(ctx context.Context, address string) (score float64, tier string, err error)
 }
 
+// VerificationProvider supplies verified agent status for discovery enrichment.
+type VerificationProvider interface {
+	IsVerified(ctx context.Context, agentAddr string) (bool, error)
+	GetGuarantee(ctx context.Context, agentAddr string) (guaranteedSuccessRate float64, premiumRate float64, err error)
+}
+
 // Handler provides HTTP handlers for the registry API
 type Handler struct {
-	store      Store
-	verifier   TxVerifier         // optional on-chain verifier
-	reputation ReputationProvider // optional reputation enrichment
+	store        Store
+	verifier     TxVerifier           // optional on-chain verifier
+	reputation   ReputationProvider   // optional reputation enrichment
+	verification VerificationProvider // optional verified agent enrichment
 }
 
 // NewHandler creates a new registry handler
@@ -35,6 +42,11 @@ func NewHandler(store Store) *Handler {
 // SetReputation attaches a reputation provider for discovery enrichment
 func (h *Handler) SetReputation(r ReputationProvider) {
 	h.reputation = r
+}
+
+// SetVerification attaches a verification provider for discovery enrichment
+func (h *Handler) SetVerification(v VerificationProvider) {
+	h.verification = v
 }
 
 // RegisterRoutes sets up the registry routes
@@ -511,6 +523,21 @@ func (h *Handler) DiscoverServices(c *gin.Context) {
 	// Enrich with reputation data
 	h.enrichWithReputation(ctx, services)
 
+	// Enrich with verification data
+	h.enrichWithVerification(ctx, services)
+
+	// Filter to verified only if requested
+	verifiedOnly := c.Query("verifiedOnly") == "true"
+	if verifiedOnly {
+		filtered := services[:0]
+		for _, svc := range services {
+			if svc.Verified {
+				filtered = append(filtered, svc)
+			}
+		}
+		services = filtered
+	}
+
 	// Sort by requested strategy
 	sortBy := c.DefaultQuery("sortBy", "price")
 	h.sortServices(services, sortBy)
@@ -519,10 +546,11 @@ func (h *Handler) DiscoverServices(c *gin.Context) {
 		"services": services,
 		"count":    len(services),
 		"query": gin.H{
-			"type":     query.ServiceType,
-			"minPrice": query.MinPrice,
-			"maxPrice": query.MaxPrice,
-			"sortBy":   sortBy,
+			"type":         query.ServiceType,
+			"minPrice":     query.MinPrice,
+			"maxPrice":     query.MaxPrice,
+			"sortBy":       sortBy,
+			"verifiedOnly": verifiedOnly,
 		},
 	})
 }
@@ -569,23 +597,70 @@ func (h *Handler) enrichWithReputation(ctx context.Context, services []ServiceLi
 	}
 }
 
+// enrichWithVerification adds verification data to service listings.
+func (h *Handler) enrichWithVerification(ctx context.Context, services []ServiceListing) {
+	if h.verification == nil {
+		return
+	}
+
+	// Cache by address to avoid duplicate lookups
+	type verData struct {
+		verified    bool
+		successRate float64
+		premiumRate float64
+	}
+	cache := make(map[string]*verData)
+
+	for i := range services {
+		addr := services[i].AgentAddress
+		if _, ok := cache[addr]; !ok {
+			isVerified, err := h.verification.IsVerified(ctx, addr)
+			if err != nil {
+				cache[addr] = &verData{}
+				continue
+			}
+			vd := &verData{verified: isVerified}
+			if isVerified {
+				vd.successRate, vd.premiumRate, _ = h.verification.GetGuarantee(ctx, addr)
+			}
+			cache[addr] = vd
+		}
+		vd := cache[addr]
+		services[i].Verified = vd.verified
+		services[i].GuaranteedSuccessRate = vd.successRate
+		services[i].GuaranteePremiumRate = vd.premiumRate
+	}
+}
+
 // sortServices sorts listings by the requested strategy.
 func (h *Handler) sortServices(services []ServiceListing, sortBy string) {
 	switch sortBy {
 	case "reputation":
 		sort.Slice(services, func(i, j int) bool {
-			return services[i].ReputationScore > services[j].ReputationScore
+			// Verified agents get a 10-point boost in reputation sort
+			si := services[i].ReputationScore
+			sj := services[j].ReputationScore
+			if services[i].Verified {
+				si += 10
+			}
+			if services[j].Verified {
+				sj += 10
+			}
+			return si > sj
 		})
 	case "value":
 		// Compute value score: reputation / price (higher = better deal)
 		for i := range services {
 			var priceF float64
 			if p, err := fmt.Sscanf(services[i].Price, "%f", &priceF); p != 1 || err != nil || priceF <= 0 {
-				// Unparseable price gets zero value score (not inflated)
 				services[i].ValueScore = 0
 				continue
 			}
-			services[i].ValueScore = services[i].ReputationScore / priceF
+			score := services[i].ReputationScore
+			if services[i].Verified {
+				score += 10 // Verified agents get a boost
+			}
+			services[i].ValueScore = score / priceF
 		}
 		sort.Slice(services, func(i, j int) bool {
 			return services[i].ValueScore > services[j].ValueScore

@@ -123,13 +123,16 @@ type ServiceFilter struct {
 // ServiceListing is a service with its agent info (for discovery)
 type ServiceListing struct {
 	Service
-	AgentAddress    string  `json:"agentAddress"`
-	AgentName       string  `json:"agentName"`
-	ReputationScore float64 `json:"reputationScore"`      // 0-100
-	ReputationTier  string  `json:"reputationTier"`       // new/emerging/established/trusted/elite
-	SuccessRate     float64 `json:"successRate"`          // 0-1
-	TxCount         int64   `json:"transactionCount"`     // Total transactions for this agent
-	ValueScore      float64 `json:"valueScore,omitempty"` // Composite: reputation vs price
+	AgentAddress          string  `json:"agentAddress"`
+	AgentName             string  `json:"agentName"`
+	ReputationScore       float64 `json:"reputationScore"`                 // 0-100
+	ReputationTier        string  `json:"reputationTier"`                  // new/emerging/established/trusted/elite
+	SuccessRate           float64 `json:"successRate"`                     // 0-1
+	TxCount               int64   `json:"transactionCount"`                // Total transactions for this agent
+	ValueScore            float64 `json:"valueScore,omitempty"`            // Composite: reputation vs price
+	Verified              bool    `json:"verified"`                        // Has active performance guarantee
+	GuaranteedSuccessRate float64 `json:"guaranteedSuccessRate,omitempty"` // Guaranteed success rate (e.g. 95.0)
+	GuaranteePremiumRate  float64 `json:"guaranteePremiumRate,omitempty"`  // Premium rate charged (e.g. 0.05)
 }
 
 // -----------------------------------------------------------------------------

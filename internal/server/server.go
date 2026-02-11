@@ -49,6 +49,7 @@ import (
 	"github.com/mbd888/alancoin/internal/streams"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/validation"
+	"github.com/mbd888/alancoin/internal/verified"
 	"github.com/mbd888/alancoin/internal/wallet"
 	"github.com/mbd888/alancoin/internal/watcher"
 	"github.com/mbd888/alancoin/internal/webhooks"
@@ -92,6 +93,8 @@ type Server struct {
 	matviewRefresher   *registry.MatviewRefresher
 	partitionMaint     *registry.PartitionMaintainer
 	riskEngine         *risk.Engine
+	verifiedService    *verified.Service
+	verifiedEnforcer   *verified.Enforcer
 	rateLimiter        *ratelimit.Limiter
 	db                 *sql.DB // nil if using in-memory
 	router             *gin.Engine
@@ -297,6 +300,25 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		}
 		s.riskEngine = risk.NewEngine(riskStore)
 		s.logger.Info("risk scoring enabled (postgres)")
+
+		// Verified agents (performance-guaranteed agents with bonds)
+		verifiedStore := verified.NewMemoryStore() // TODO: PostgresStore when migration is added
+		verifiedReputationProv := reputation.NewRegistryProvider(s.registry)
+		verifiedScorer := verified.NewScorer()
+		s.verifiedService = verified.NewService(
+			verifiedStore,
+			verifiedScorer,
+			verifiedReputationProv,
+			&creditMetricsAdapter{verifiedReputationProv},
+			&verifiedLedgerAdapter{s.ledger},
+		)
+		s.verifiedEnforcer = verified.NewEnforcer(
+			s.verifiedService,
+			&contractCallAdapter{s.contractService},
+			s.wallet.Address(), // platform address receives forfeited bonds
+			s.logger,
+		)
+		s.logger.Info("verified agents enabled (postgres)")
 	} else {
 		s.registry = registry.NewMemoryStore()
 		s.logger.Info("using in-memory storage (data will not persist)")
@@ -396,6 +418,19 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		// Risk scoring engine (in-memory)
 		s.riskEngine = risk.NewEngine(risk.NewMemoryStore())
 		s.logger.Info("risk scoring enabled (in-memory)")
+
+		// Verified agents (in-memory) — use demo scorer with relaxed policies
+		verifiedStore := verified.NewMemoryStore()
+		verifiedReputationProv := reputation.NewRegistryProvider(s.registry)
+		verifiedScorer := verified.NewDemoScorer()
+		s.verifiedService = verified.NewService(
+			verifiedStore,
+			verifiedScorer,
+			verifiedReputationProv,
+			&creditMetricsAdapter{verifiedReputationProv},
+			&verifiedLedgerAdapter{s.ledger},
+		)
+		s.logger.Info("verified agents enabled (in-memory)")
 	}
 
 	// Create wallet if not injected
@@ -627,6 +662,11 @@ func (s *Server) setupRoutes() {
 	// Wire reputation into discovery so agents see trust scores when searching
 	reputationProvider := reputation.NewRegistryProvider(s.registry)
 	registryHandler.SetReputation(reputationProvider)
+
+	// Wire verified agent status into discovery so buyers see guaranteed services
+	if s.verifiedService != nil {
+		registryHandler.SetVerification(s.verifiedService)
+	}
 
 	// Wire reputation impact tracking into escrow (dispute/confirm outcomes)
 	s.escrowService.WithReputationImpactor(reputationProvider)
@@ -880,6 +920,22 @@ func (s *Server) setupRoutes() {
 		adminCredit := v1.Group("/admin")
 		adminCredit.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
 		creditHandler.RegisterAdminRoutes(adminCredit)
+	}
+
+	// Verified agent routes (performance-guaranteed agents with bonds)
+	if s.verifiedService != nil {
+		verifiedHandler := verified.NewHandler(s.verifiedService)
+
+		// Public routes - anyone can view verified status
+		v1.GET("/verified", verifiedHandler.List)
+		v1.GET("/verified/:address", verifiedHandler.GetByAgent)
+
+		// Protected routes - only authenticated agents can apply/revoke/reinstate
+		protectedVerified := v1.Group("")
+		protectedVerified.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		protectedVerified.POST("/verified/apply", verifiedHandler.Apply)
+		protectedVerified.POST("/verified/:address/revoke", auth.RequireOwnership(s.authMgr, "address"), verifiedHandler.Revoke)
+		protectedVerified.POST("/verified/:address/reinstate", auth.RequireOwnership(s.authMgr, "address"), verifiedHandler.Reinstate)
 	}
 
 	// Contract routes (service agreements with SLA enforcement)
@@ -1490,6 +1546,11 @@ func (s *Server) Run(ctx context.Context) error {
 	// Start reputation snapshot worker
 	if s.reputationWorker != nil {
 		go s.reputationWorker.Start(runCtx)
+	}
+
+	// Start verified agent guarantee enforcer
+	if s.verifiedEnforcer != nil {
+		go s.verifiedEnforcer.Start(runCtx)
 	}
 
 	// Start materialized view refresher for service discovery
@@ -2402,4 +2463,60 @@ func (n *webhookAlertNotifier) NotifyAlert(ctx context.Context, alert sessionkey
 			"expiresIn":  alert.ExpiresIn,
 		},
 	})
+}
+
+// verifiedLedgerAdapter adapts ledger.Ledger to verified.LedgerService
+type verifiedLedgerAdapter struct {
+	l *ledger.Ledger
+}
+
+func (a *verifiedLedgerAdapter) Hold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.Hold(ctx, agentAddr, amount, reference)
+}
+
+func (a *verifiedLedgerAdapter) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.ConfirmHold(ctx, agentAddr, amount, reference)
+}
+
+func (a *verifiedLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
+}
+
+func (a *verifiedLedgerAdapter) Deposit(ctx context.Context, agentAddr, amount, txHash string) error {
+	return a.l.Deposit(ctx, agentAddr, amount, txHash)
+}
+
+// contractCallAdapter adapts contracts.Service to verified.ContractCallProvider
+type contractCallAdapter struct {
+	svc *contracts.Service
+}
+
+func (a *contractCallAdapter) GetRecentCallsByAgent(ctx context.Context, agentAddr string, windowSize int) (int, int, error) {
+	// Get all active contracts where this agent is the seller
+	allContracts, err := a.svc.ListByAgent(ctx, agentAddr, "active", 100)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	successCount := 0
+	totalCount := 0
+	for _, c := range allContracts {
+		if c.SellerAddr != agentAddr {
+			continue
+		}
+		calls, err := a.svc.ListCalls(ctx, c.ID, windowSize)
+		if err != nil {
+			continue
+		}
+		for _, call := range calls {
+			totalCount++
+			if call.Status == "success" {
+				successCount++
+			}
+			if totalCount >= windowSize {
+				return successCount, totalCount, nil
+			}
+		}
+	}
+	return successCount, totalCount, nil
 }
