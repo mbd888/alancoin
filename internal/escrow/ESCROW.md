@@ -239,3 +239,74 @@ internal/escrow/
 ├── integration_test.go # End-to-end tests with real ledger
 └── ESCROW.md           # This file
 ```
+
+---
+
+## Not Yet Built
+
+### P0 — Arbitration / Dispute Resolution
+
+Currently disputes auto-refund the buyer with no recourse for the seller. The buyer always wins. This is a liability:
+
+- **Arbitration service** — When both parties disagree, a third-party arbitrator (admin, DAO, or algorithmic) reviews evidence and decides the outcome. The escrow should support a `StatusArbitrating` state between dispute and resolution.
+- **Evidence submission** — Both buyer and seller should be able to attach evidence (hashes, logs, screenshots) to a dispute. Currently `dispute_reason` is just a string.
+- **Partial resolution** — "80% of the work was delivered, refund 20%." Currently it's all-or-nothing. `PartialRelease(ctx, escrowID, buyerRefundAmount, sellerReleaseAmount)` should split the escrowed funds.
+- **Dispute window** — After delivery is marked, the buyer should have a configurable window (e.g., 24h) to dispute before auto-release. Currently auto-release fires on the original timeout regardless of delivery status.
+
+**Schema additions needed:**
+```sql
+ALTER TABLE escrows ADD COLUMN dispute_evidence JSONB DEFAULT '[]';
+ALTER TABLE escrows ADD COLUMN arbitrator_addr VARCHAR(42);
+ALTER TABLE escrows ADD COLUMN arbitration_deadline TIMESTAMPTZ;
+ALTER TABLE escrows ADD COLUMN partial_release_amount NUMERIC(20,6);
+ALTER TABLE escrows ADD COLUMN partial_refund_amount NUMERIC(20,6);
+```
+
+### P0 — Reputation Impact from Disputes
+
+Disputes currently have zero effect on seller reputation. A seller can fail to deliver, get disputed, lose the funds, and their reputation score doesn't change. This needs to be wired:
+
+- `ReputationImpactor` interface — On dispute resolution, call `RecordDispute(sellerAddr, outcome, amount)` which feeds into the reputation scoring.
+- Dispute rate should be a component of reputation score (e.g., >10% dispute rate = score penalty).
+- Buyers who abuse disputes (>20% dispute rate) should also be flagged.
+
+### P0 — Distributed Tracing (OpenTelemetry)
+
+No tracing on any escrow operation. The full lifecycle — create → lock funds → deliver → confirm/dispute → settle — should be a single trace with child spans. When a `ConfirmHold` fails after `ReleaseEscrow` succeeds (the CRITICAL log case), the trace is the only way to debug it in production.
+
+- Span per state transition with escrow ID, buyer, seller, amount
+- Metrics: `escrow_created_total`, `escrow_confirmed_total`, `escrow_disputed_total`, `escrow_auto_released_total`, `escrow_duration_seconds` histogram
+
+### P1 — Escrow Templates / Recurring Escrows
+
+For ongoing service relationships (e.g., agent A always buys from agent B):
+
+- **Escrow templates** — Pre-configured escrow parameters (amount, auto-release time, parties) that can be instantiated with one call.
+- **Recurring escrows** — Auto-create a new escrow on a schedule (daily, weekly) for subscription-style agent relationships.
+- **Linked escrows** — Chain escrows together for multi-step pipelines (summarize → translate → extract). If step 2 fails, refund step 3's escrow too.
+
+### P1 — Conditional Release
+
+Currently release is binary: buyer confirms or disputes. For more sophisticated service delivery:
+
+- **Milestone-based release** — Split escrow into milestones. Each milestone releases a portion. `CreateEscrow(..., milestones: [{description: "Draft", amount: "0.50"}, {description: "Final", amount: "1.00"}])`.
+- **Oracle-based release** — Integrate with external verification (e.g., an LLM quality scorer). If quality score > threshold, auto-release. If below, auto-dispute.
+- **Time-locked partial release** — Release 50% immediately on delivery, hold 50% for a satisfaction period.
+
+### P1 — Escrow Analytics
+
+No visibility into escrow health:
+
+- Average time to delivery per seller
+- Dispute rate by seller, by service type, by amount range
+- Auto-release rate (high rate means sellers aren't confirming delivery — process issue)
+- Funds currently locked in escrow (platform-wide liquidity metric)
+- Endpoint: `GET /v1/admin/escrow/analytics`
+
+### P2 — Multi-Party Escrow
+
+Current escrow is strictly buyer-seller. For pipelines involving multiple agents:
+
+- **N-party escrow** — Lock funds once, release to multiple sellers as each completes their step.
+- **Escrow splits** — Single escrow, multiple beneficiaries with pre-agreed split percentages.
+- This ties into the pipeline API in the SDK — currently each pipeline step creates a separate escrow, which is gas-inefficient and doesn't handle cross-step failures gracefully.

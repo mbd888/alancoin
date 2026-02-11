@@ -659,6 +659,116 @@ func (s *Service) ListBidsBySeller(ctx context.Context, sellerAddr string, limit
 	return s.store.ListBidsBySeller(ctx, strings.ToLower(sellerAddr), limit)
 }
 
+// GetAnalytics returns marketplace health metrics.
+func (s *Service) GetAnalytics(ctx context.Context) (*Analytics, error) {
+	return s.store.GetAnalytics(ctx)
+}
+
+// CreateTemplate saves an RFP template for reuse.
+func (s *Service) CreateTemplate(ctx context.Context, ownerAddr string, req CreateTemplateRequest) (*RFPTemplate, error) {
+	tmpl := &RFPTemplate{
+		ID:               generateTemplateID(),
+		OwnerAddr:        strings.ToLower(ownerAddr),
+		Name:             req.Name,
+		ServiceType:      req.ServiceType,
+		Description:      req.Description,
+		MinBudget:        req.MinBudget,
+		MaxBudget:        req.MaxBudget,
+		MaxLatencyMs:     req.MaxLatencyMs,
+		MinSuccessRate:   req.MinSuccessRate,
+		Duration:         req.Duration,
+		MinVolume:        req.MinVolume,
+		BidDeadline:      req.BidDeadline,
+		AutoSelect:       req.AutoSelect,
+		MinReputation:    req.MinReputation,
+		MaxCounterRounds: req.MaxCounterRounds,
+		RequiredBondPct:  req.RequiredBondPct,
+		NoWithdrawWindow: req.NoWithdrawWindow,
+		ScoringWeights:   req.ScoringWeights,
+		CreatedAt:        time.Now(),
+	}
+
+	if err := s.store.CreateTemplate(ctx, tmpl); err != nil {
+		return nil, fmt.Errorf("failed to create template: %w", err)
+	}
+	return tmpl, nil
+}
+
+// GetTemplate returns a template by ID.
+func (s *Service) GetTemplate(ctx context.Context, id string) (*RFPTemplate, error) {
+	return s.store.GetTemplate(ctx, id)
+}
+
+// ListTemplates returns templates visible to the given owner (their own + system templates).
+func (s *Service) ListTemplates(ctx context.Context, ownerAddr string, limit int) ([]*RFPTemplate, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	return s.store.ListTemplates(ctx, strings.ToLower(ownerAddr), limit)
+}
+
+// DeleteTemplate deletes a template by ID.
+func (s *Service) DeleteTemplate(ctx context.Context, id, callerAddr string) error {
+	tmpl, err := s.store.GetTemplate(ctx, id)
+	if err != nil {
+		return err
+	}
+	caller := strings.ToLower(callerAddr)
+	if tmpl.OwnerAddr != "" && tmpl.OwnerAddr != caller {
+		return ErrUnauthorized
+	}
+	return s.store.DeleteTemplate(ctx, id)
+}
+
+// PublishFromTemplate creates an RFP from a saved template with optional overrides.
+func (s *Service) PublishFromTemplate(ctx context.Context, templateID string, req PublishFromTemplateRequest) (*RFP, error) {
+	tmpl, err := s.store.GetTemplate(ctx, templateID)
+	if err != nil {
+		return nil, err
+	}
+
+	rfpReq := PublishRFPRequest{
+		BuyerAddr:        req.BuyerAddr,
+		ServiceType:      tmpl.ServiceType,
+		Description:      tmpl.Description,
+		MinBudget:        tmpl.MinBudget,
+		MaxBudget:        tmpl.MaxBudget,
+		MaxLatencyMs:     tmpl.MaxLatencyMs,
+		MinSuccessRate:   tmpl.MinSuccessRate,
+		Duration:         tmpl.Duration,
+		MinVolume:        tmpl.MinVolume,
+		BidDeadline:      tmpl.BidDeadline,
+		AutoSelect:       tmpl.AutoSelect,
+		MinReputation:    tmpl.MinReputation,
+		MaxCounterRounds: tmpl.MaxCounterRounds,
+		RequiredBondPct:  tmpl.RequiredBondPct,
+		NoWithdrawWindow: tmpl.NoWithdrawWindow,
+		ScoringWeights:   tmpl.ScoringWeights,
+	}
+
+	// Apply overrides
+	if req.MinBudget != "" {
+		rfpReq.MinBudget = req.MinBudget
+	}
+	if req.MaxBudget != "" {
+		rfpReq.MaxBudget = req.MaxBudget
+	}
+	if req.Duration != "" {
+		rfpReq.Duration = req.Duration
+	}
+	if req.BidDeadline != "" {
+		rfpReq.BidDeadline = req.BidDeadline
+	}
+	if req.Description != "" {
+		rfpReq.Description = req.Description
+	}
+	if req.MinReputation > 0 {
+		rfpReq.MinReputation = req.MinReputation
+	}
+
+	return s.PublishRFP(ctx, rfpReq)
+}
+
 // --- helpers ---
 
 // parseDeadline parses a deadline string: either a duration ("24h", "7d") or RFC3339.

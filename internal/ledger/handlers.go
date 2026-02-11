@@ -568,7 +568,7 @@ func (h *Handler) BatchSettle(c *gin.Context) {
 
 	settlements := ComputeNetSettlements(req.Transfers)
 
-	if err := ExecuteSettlement(c.Request.Context(), h.ledger.store, settlements); err != nil {
+	if err := ExecuteSettlement(c.Request.Context(), h.ledger, settlements); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "settlement_error", "message": err.Error()})
 		return
 	}

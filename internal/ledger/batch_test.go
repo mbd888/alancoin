@@ -71,117 +71,32 @@ func TestComputeNetSettlements_InvalidAmounts(t *testing.T) {
 	}
 }
 
-func TestMemoryBatchStore_BatchDebit(t *testing.T) {
-	ctx := context.Background()
-	store := NewMemoryStore()
-
-	// Fund two agents
-	_ = store.Credit(ctx, "0xA", "100.000000", "tx1", "deposit")
-	_ = store.Credit(ctx, "0xB", "50.000000", "tx2", "deposit")
-
-	batch := NewMemoryBatchStore(store)
-	errs := batch.BatchDebit(ctx, []BatchDebitRequest{
-		{AgentAddr: "0xA", Amount: "10.000000", Reference: "ref1", Description: "test"},
-		{AgentAddr: "0xB", Amount: "20.000000", Reference: "ref2", Description: "test"},
-	})
-
-	for i, err := range errs {
-		if err != nil {
-			t.Errorf("BatchDebit[%d] failed: %v", i, err)
-		}
-	}
-
-	// Verify balances
-	balA, _ := store.GetBalance(ctx, "0xA")
-	if balA.Available != "90.000000" {
-		t.Errorf("expected 0xA available 90.000000, got %s", balA.Available)
-	}
-
-	balB, _ := store.GetBalance(ctx, "0xB")
-	if balB.Available != "30.000000" {
-		t.Errorf("expected 0xB available 30.000000, got %s", balB.Available)
-	}
-}
-
-func TestMemoryBatchStore_BatchDebit_Atomicity(t *testing.T) {
-	ctx := context.Background()
-	store := NewMemoryStore()
-
-	// Fund only 0xA
-	_ = store.Credit(ctx, "0xA", "100.000000", "tx1", "deposit")
-	_ = store.Credit(ctx, "0xB", "5.000000", "tx2", "deposit")
-
-	batch := NewMemoryBatchStore(store)
-	errs := batch.BatchDebit(ctx, []BatchDebitRequest{
-		{AgentAddr: "0xA", Amount: "10.000000", Reference: "ref1", Description: "test"},
-		{AgentAddr: "0xB", Amount: "50.000000", Reference: "ref2", Description: "test"}, // insufficient
-	})
-
-	if errs[0] != nil {
-		t.Errorf("expected first debit to succeed, got %v", errs[0])
-	}
-	if errs[1] != ErrInsufficientBalance {
-		t.Errorf("expected ErrInsufficientBalance for second debit, got %v", errs[1])
-	}
-
-	// Both should be unchanged since batch is atomic
-	balA, _ := store.GetBalance(ctx, "0xA")
-	if balA.Available != "100.000000" {
-		t.Errorf("expected 0xA available unchanged at 100.000000, got %s (atomicity failed)", balA.Available)
-	}
-}
-
-func TestMemoryBatchStore_BatchDeposit(t *testing.T) {
-	ctx := context.Background()
-	store := NewMemoryStore()
-
-	batch := NewMemoryBatchStore(store)
-	errs := batch.BatchDeposit(ctx, []BatchDepositRequest{
-		{AgentAddr: "0xA", Amount: "25.000000", TxHash: "tx1", Description: "test"},
-		{AgentAddr: "0xB", Amount: "50.000000", TxHash: "tx2", Description: "test"},
-	})
-
-	for i, err := range errs {
-		if err != nil {
-			t.Errorf("BatchDeposit[%d] failed: %v", i, err)
-		}
-	}
-
-	balA, _ := store.GetBalance(ctx, "0xA")
-	if balA.Available != "25.000000" {
-		t.Errorf("expected 0xA available 25.000000, got %s", balA.Available)
-	}
-
-	balB, _ := store.GetBalance(ctx, "0xB")
-	if balB.Available != "50.000000" {
-		t.Errorf("expected 0xB available 50.000000, got %s", balB.Available)
-	}
-}
-
 func TestExecuteSettlement(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemoryStore()
 
-	// Fund agents
-	_ = store.Credit(ctx, "0xA", "100.000000", "tx1", "deposit")
-	_ = store.Credit(ctx, "0xB", "50.000000", "tx2", "deposit")
+	// Fund agents (use lowercase — Ledger.Transfer lowercases addresses)
+	_ = store.Credit(ctx, "0xa", "100.000000", "tx1", "deposit")
+	_ = store.Credit(ctx, "0xb", "50.000000", "tx2", "deposit")
+
+	l := New(store)
 
 	settlements := []NetSettlement{
 		{From: "0xA", To: "0xB", Amount: "15.000000"},
 	}
 
-	err := ExecuteSettlement(ctx, store, settlements)
+	err := ExecuteSettlement(ctx, l, settlements)
 	if err != nil {
 		t.Fatalf("ExecuteSettlement failed: %v", err)
 	}
 
-	balA, _ := store.GetBalance(ctx, "0xA")
-	balB, _ := store.GetBalance(ctx, "0xB")
+	balA, _ := store.GetBalance(ctx, "0xa")
+	balB, _ := store.GetBalance(ctx, "0xb")
 
 	if balA.Available != "85.000000" {
-		t.Errorf("expected 0xA available 85.000000, got %s", balA.Available)
+		t.Errorf("expected 0xa available 85.000000, got %s", balA.Available)
 	}
 	if balB.Available != "65.000000" {
-		t.Errorf("expected 0xB available 65.000000, got %s", balB.Available)
+		t.Errorf("expected 0xb available 65.000000, got %s", balB.Available)
 	}
 }

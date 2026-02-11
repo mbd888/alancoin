@@ -425,3 +425,101 @@ internal/stakes/
 ├── stakes_test.go     # 40 tests
 └── STAKES.md          # This file
 ```
+
+---
+
+## Not Yet Built
+
+### P0 — Cross-Stake Revenue Cap Enforcement (Bug)
+
+`MaxRevenueShareBPS = 5000` (50%) is documented as a constraint, and it's checked when creating a single stake. But it is **not enforced across multiple active stakes for the same agent**. An agent could create 4 stakes at 15% each (60% total) if they're created separately, because each creation only checks whether that individual stake exceeds 50%.
+
+**Fix required:**
+- On `CreateStake()`, query all active stakes for the agent, sum their `revenueShareBps`, and reject if `sum + newStake.revenueShareBps > 5000`.
+- On `AccumulateRevenue()`, the split calculation already handles multiple stakes correctly (iterates all active stakes). The bug is only at creation time.
+
+### P0 — Compliance / KYC for Revenue Staking
+
+Revenue staking is effectively a securities offering. Investors buy shares in exchange for future revenue. In most jurisdictions this requires:
+
+- **Accredited investor verification** — At minimum, flag whether the investor has self-certified as accredited. Without this, the platform is potentially facilitating unregistered securities sales.
+- **KYC/AML checks** — Before allowing investment above a threshold (e.g., $10k total portfolio), require identity verification.
+- **Investment limits** — Non-accredited investors capped at $X per year (Reg CF style).
+- **Offering disclosure** — Each stake offering should have a standardized disclosure: agent's historical revenue, volatility, risk factors.
+- **Tax reporting** — Distribution history export in a format compatible with tax reporting (1099-equivalent for US, local equivalents elsewhere). Each distribution is a taxable event.
+
+This is not optional if the platform handles real money. Without it, the first legal challenge shuts down the staking feature entirely.
+
+### P0 — Interest / Time-Value on Stakes
+
+Distributions are currently purely revenue-based. The investment has no guaranteed return — if the agent earns nothing, investors get nothing. This is fine conceptually but the system doesn't account for:
+
+- **Minimum guaranteed return** — Some stakes could offer a floor (e.g., "at least 2% annualized"). Requires the agent to escrow enough to cover the guarantee.
+- **Dilution protection** — If the agent creates a new stake offering, existing investors' share of revenue decreases. No anti-dilution mechanism exists.
+- **Performance fees** — The platform takes no cut of distributions. A performance fee (e.g., 5% of distributions) is a revenue model.
+
+### P0 — Distributed Tracing
+
+The revenue accumulation → distribution pipeline crosses multiple packages (session keys → stakes → ledger → escrow) with zero tracing. When a distribution fails for one holder out of 500, there's no way to find which holder, why, or what the downstream effect was.
+
+- Trace per `AccumulateRevenue()` call with source tx, agent, amount, stake IDs
+- Trace per `Distribute()` cycle with stake ID, holder count, total distributed, failures
+- Metrics: `stakes_revenue_accumulated_total`, `stakes_distributions_total`, `stakes_distribution_failures_total`, `stakes_undistributed_balance` gauge
+
+### P1 — Portfolio Analytics
+
+Investors have no tools to evaluate their positions:
+
+- **ROI calculation** — `(totalEarned - costBasis) / costBasis` per holding
+- **Annualized return** — ROI normalized to yearly rate
+- **Revenue yield** — Current agent revenue × share percentage → projected annual return
+- **Portfolio diversification** — Across how many agents, service types, risk tiers
+- **Unrealized gains** — Current market price (from secondary market) vs cost basis
+- **Historical performance** — Revenue per share over time (chart data)
+- **Endpoints:** `GET /v1/agents/:address/portfolio/analytics`, `GET /v1/stakes/:id/performance`
+
+### P1 — Stake Valuation (NAV)
+
+No net asset value calculation exists. For the secondary market to function efficiently:
+
+- **NAV per share** — `(undistributed revenue + projected future revenue) / total shares`
+- **Projected revenue** — Based on agent's trailing 30-day revenue × revenue share percentage × (remaining stake duration / total duration)
+- **Price-to-NAV ratio** — Secondary market price relative to NAV. Overvalued (>1.0) or undervalued (<1.0).
+- This enables automated market-making and fair price discovery.
+
+### P1 — Order Book and Market Depth
+
+The secondary market is currently simple: list shares → fill order (full fill only). For a real market:
+
+- **Partial fills** — Buyer wants 30 shares, seller has 50. Fill 30, leave 20 on the book.
+- **Bid/ask spread** — Show current best bid and ask for each stake.
+- **Market depth** — How many shares available at each price level.
+- **Order types** — Limit orders (current), market orders (fill at best available price), stop-loss orders.
+- **Price history** — Track every fill with timestamp and price for charting.
+
+### P1 — Revenue Forecasting
+
+The staking system has unique data that enables prediction:
+
+- **Agent revenue trend** — Is this agent's revenue growing, stable, or declining? Based on the last N distributions.
+- **Revenue volatility** — Standard deviation of distribution amounts. High volatility = higher risk.
+- **Seasonality** — Some service types may have cyclical demand.
+- **Comparable analysis** — "Agents in the translation category with similar reputation earn $X/month on average."
+
+### P2 — Structured Products
+
+Beyond simple revenue shares:
+
+- **Tranched stakes** — Senior tranche gets paid first (lower return, lower risk), junior tranche gets the remainder (higher return, higher risk).
+- **Revenue bonds** — Fixed-duration, fixed-return instruments backed by agent revenue. The agent commits to paying X% over Y months.
+- **Index stakes** — Invest in a basket of agents (e.g., "Top 10 translation agents") instead of individual ones. Diversified exposure.
+- **Options** — Right to buy/sell shares at a specific price by a specific date. Enables hedging.
+
+### P2 — Automated Market Maker (AMM)
+
+The secondary market depends on human-placed orders for liquidity. An AMM would provide always-on liquidity:
+
+- **Bonding curve pricing** — Price determined by a formula based on supply/demand, not order matching.
+- **Liquidity pools** — Agents or investors can deposit USDC + shares into a pool and earn fees from trades.
+- **Instant execution** — No waiting for a counterparty. Trade against the pool at the curve price.
+- This is how DeFi protocols (Uniswap, Curve) solved the liquidity problem for long-tail tokens.

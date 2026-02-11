@@ -396,5 +396,222 @@ func nullTime(t *time.Time) sql.NullTime {
 	return sql.NullTime{Time: *t, Valid: true}
 }
 
+func (p *PostgresStore) GetAnalytics(ctx context.Context) (*Analytics, error) {
+	a := &Analytics{}
+
+	// RFP status counts
+	row := p.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*),
+			COUNT(*) FILTER (WHERE status = 'open'),
+			COUNT(*) FILTER (WHERE status = 'awarded'),
+			COUNT(*) FILTER (WHERE status = 'expired'),
+			COUNT(*) FILTER (WHERE status = 'cancelled')
+		FROM rfps`)
+	if err := row.Scan(&a.TotalRFPs, &a.OpenRFPs, &a.AwardedRFPs, &a.ExpiredRFPs, &a.CancelledRFPs); err != nil {
+		return nil, err
+	}
+
+	// Average bids per RFP
+	row = p.db.QueryRowContext(ctx, `
+		SELECT COALESCE(AVG(cnt), 0) FROM (
+			SELECT COUNT(*) AS cnt FROM bids GROUP BY rfp_id
+		) sub`)
+	_ = row.Scan(&a.AvgBidsPerRFP)
+
+	// Average bid-to-ask spread: avg((bid_budget - min_budget) / max_budget) across all bids
+	row = p.db.QueryRowContext(ctx, `
+		SELECT COALESCE(AVG((b.total_budget - r.min_budget) / NULLIF(r.max_budget, 0)), 0)
+		FROM bids b JOIN rfps r ON b.rfp_id = r.id
+		WHERE r.max_budget > 0`)
+	_ = row.Scan(&a.AvgBidToAskSpread)
+
+	// Average time to award (seconds)
+	row = p.db.QueryRowContext(ctx, `
+		SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (awarded_at - created_at))), 0)
+		FROM rfps WHERE status = 'awarded' AND awarded_at IS NOT NULL`)
+	_ = row.Scan(&a.AvgTimeToAwardSecs)
+
+	// Abandonment rate: expired with 0 bids / (expired + awarded)
+	terminal := a.ExpiredRFPs + a.AwardedRFPs
+	if terminal > 0 {
+		var zeroBidExpired int
+		row = p.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM rfps WHERE status = 'expired' AND bid_count = 0`)
+		_ = row.Scan(&zeroBidExpired)
+		a.AbandonmentRate = float64(zeroBidExpired) / float64(terminal)
+	}
+
+	// Counter-offer efficiency: % of RFPs with countered bids that ended in award
+	row = p.db.QueryRowContext(ctx, `
+		SELECT CASE
+			WHEN COUNT(DISTINCT b.rfp_id) = 0 THEN 0
+			ELSE COUNT(DISTINCT CASE WHEN r.status = 'awarded' THEN b.rfp_id END)::float /
+			     COUNT(DISTINCT b.rfp_id)::float
+		END
+		FROM bids b JOIN rfps r ON b.rfp_id = r.id
+		WHERE b.status = 'countered'`)
+	_ = row.Scan(&a.CounterEfficiency)
+
+	// Top sellers by win rate (top 10)
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT seller_addr,
+			COUNT(*) AS total_bids,
+			COUNT(*) FILTER (WHERE status = 'accepted') AS wins
+		FROM bids
+		GROUP BY seller_addr
+		HAVING COUNT(*) >= 1
+		ORDER BY COUNT(*) FILTER (WHERE status = 'accepted') DESC, COUNT(*) DESC
+		LIMIT 10`)
+	if err == nil {
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var s SellerWinSummary
+			if err := rows.Scan(&s.SellerAddr, &s.TotalBids, &s.Wins); err != nil {
+				break
+			}
+			if s.TotalBids > 0 {
+				s.WinRate = float64(s.Wins) / float64(s.TotalBids)
+			}
+			a.TopSellers = append(a.TopSellers, s)
+		}
+	}
+	if a.TopSellers == nil {
+		a.TopSellers = []SellerWinSummary{}
+	}
+
+	return a, nil
+}
+
+// --- Template operations ---
+
+const templateColumns = `id, owner_addr, name, service_type, description,
+	min_budget, max_budget, max_latency_ms, min_success_rate,
+	duration, min_volume, bid_deadline, auto_select,
+	min_reputation, max_counter_rounds, required_bond_pct, no_withdraw_window,
+	scoring_weight_price, scoring_weight_reputation, scoring_weight_sla,
+	created_at`
+
+func (p *PostgresStore) CreateTemplate(ctx context.Context, tmpl *RFPTemplate) error {
+	var swPrice, swRep, swSLA sql.NullFloat64
+	if tmpl.ScoringWeights != nil {
+		swPrice = sql.NullFloat64{Float64: tmpl.ScoringWeights.Price, Valid: true}
+		swRep = sql.NullFloat64{Float64: tmpl.ScoringWeights.Reputation, Valid: true}
+		swSLA = sql.NullFloat64{Float64: tmpl.ScoringWeights.SLA, Valid: true}
+	}
+	_, err := p.db.ExecContext(ctx, `
+		INSERT INTO rfp_templates (
+			id, owner_addr, name, service_type, description,
+			min_budget, max_budget, max_latency_ms, min_success_rate,
+			duration, min_volume, bid_deadline, auto_select,
+			min_reputation, max_counter_rounds, required_bond_pct, no_withdraw_window,
+			scoring_weight_price, scoring_weight_reputation, scoring_weight_sla,
+			created_at
+		) VALUES (
+			$1, $2, $3, $4, $5,
+			$6::NUMERIC(20,6), $7::NUMERIC(20,6), $8, $9,
+			$10, $11, $12, $13,
+			$14, $15, $16, $17,
+			$18, $19, $20,
+			$21
+		)`,
+		tmpl.ID, nullStr(tmpl.OwnerAddr), tmpl.Name, tmpl.ServiceType, nullStr(tmpl.Description),
+		tmpl.MinBudget, tmpl.MaxBudget, tmpl.MaxLatencyMs, tmpl.MinSuccessRate,
+		tmpl.Duration, tmpl.MinVolume, tmpl.BidDeadline, tmpl.AutoSelect,
+		tmpl.MinReputation, tmpl.MaxCounterRounds, tmpl.RequiredBondPct, nullStr(tmpl.NoWithdrawWindow),
+		swPrice, swRep, swSLA,
+		tmpl.CreatedAt,
+	)
+	return err
+}
+
+func (p *PostgresStore) GetTemplate(ctx context.Context, id string) (*RFPTemplate, error) {
+	row := p.db.QueryRowContext(ctx,
+		`SELECT `+templateColumns+` FROM rfp_templates WHERE id = $1`, id)
+
+	tmpl, err := scanTemplate(row)
+	if err == sql.ErrNoRows {
+		return nil, ErrTemplateNotFound
+	}
+	return tmpl, err
+}
+
+func (p *PostgresStore) ListTemplates(ctx context.Context, ownerAddr string, limit int) ([]*RFPTemplate, error) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT `+templateColumns+` FROM rfp_templates
+		WHERE owner_addr IS NULL OR owner_addr = '' OR owner_addr = $1
+		ORDER BY created_at DESC LIMIT $2`,
+		ownerAddr, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	return scanTemplates(rows)
+}
+
+func (p *PostgresStore) DeleteTemplate(ctx context.Context, id string) error {
+	result, err := p.db.ExecContext(ctx, `DELETE FROM rfp_templates WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrTemplateNotFound
+	}
+	return nil
+}
+
+func scanTemplate(sc scanner) (*RFPTemplate, error) {
+	tmpl := &RFPTemplate{}
+	var (
+		ownerAddr        sql.NullString
+		description      sql.NullString
+		noWithdrawWindow sql.NullString
+		swPrice          sql.NullFloat64
+		swRep            sql.NullFloat64
+		swSLA            sql.NullFloat64
+	)
+
+	err := sc.Scan(
+		&tmpl.ID, &ownerAddr, &tmpl.Name, &tmpl.ServiceType, &description,
+		&tmpl.MinBudget, &tmpl.MaxBudget, &tmpl.MaxLatencyMs, &tmpl.MinSuccessRate,
+		&tmpl.Duration, &tmpl.MinVolume, &tmpl.BidDeadline, &tmpl.AutoSelect,
+		&tmpl.MinReputation, &tmpl.MaxCounterRounds, &tmpl.RequiredBondPct, &noWithdrawWindow,
+		&swPrice, &swRep, &swSLA,
+		&tmpl.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	tmpl.OwnerAddr = ownerAddr.String
+	tmpl.Description = description.String
+	tmpl.NoWithdrawWindow = noWithdrawWindow.String
+	if swPrice.Valid {
+		tmpl.ScoringWeights = &ScoringWeights{
+			Price:      swPrice.Float64,
+			Reputation: swRep.Float64,
+			SLA:        swSLA.Float64,
+		}
+	}
+
+	return tmpl, nil
+}
+
+func scanTemplates(rows *sql.Rows) ([]*RFPTemplate, error) {
+	var result []*RFPTemplate
+	for rows.Next() {
+		t, err := scanTemplate(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, t)
+	}
+	return result, rows.Err()
+}
+
 // Compile-time assertion that PostgresStore implements Store.
 var _ Store = (*PostgresStore)(nil)

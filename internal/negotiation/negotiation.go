@@ -35,6 +35,7 @@ var (
 	ErrInsufficientBond    = errors.New("insufficient balance for bid bond")
 	ErrWithdrawalBlocked   = errors.New("withdrawals blocked during no-withdrawal window")
 	ErrBidAlreadyWithdrawn = errors.New("bid already withdrawn")
+	ErrTemplateNotFound    = errors.New("template not found")
 )
 
 // RFPStatus represents the state of an RFP.
@@ -195,6 +196,83 @@ type CancelRequest struct {
 	Reason string `json:"reason"`
 }
 
+// RFPTemplate is a reusable RFP configuration saved by buyers.
+type RFPTemplate struct {
+	ID               string          `json:"id"`
+	OwnerAddr        string          `json:"ownerAddr"` // empty = system template
+	Name             string          `json:"name"`
+	ServiceType      string          `json:"serviceType"`
+	Description      string          `json:"description,omitempty"`
+	MinBudget        string          `json:"minBudget"`
+	MaxBudget        string          `json:"maxBudget"`
+	MaxLatencyMs     int             `json:"maxLatencyMs"`
+	MinSuccessRate   float64         `json:"minSuccessRate"`
+	Duration         string          `json:"duration"`
+	MinVolume        int             `json:"minVolume"`
+	BidDeadline      string          `json:"bidDeadline"`
+	AutoSelect       bool            `json:"autoSelect"`
+	MinReputation    float64         `json:"minReputation"`
+	MaxCounterRounds int             `json:"maxCounterRounds"`
+	RequiredBondPct  float64         `json:"requiredBondPct"`
+	NoWithdrawWindow string          `json:"noWithdrawWindow,omitempty"`
+	ScoringWeights   *ScoringWeights `json:"scoringWeights,omitempty"`
+	CreatedAt        time.Time       `json:"createdAt"`
+}
+
+// CreateTemplateRequest contains parameters for saving an RFP template.
+type CreateTemplateRequest struct {
+	Name             string          `json:"name" binding:"required"`
+	ServiceType      string          `json:"serviceType" binding:"required"`
+	Description      string          `json:"description"`
+	MinBudget        string          `json:"minBudget" binding:"required"`
+	MaxBudget        string          `json:"maxBudget" binding:"required"`
+	MaxLatencyMs     int             `json:"maxLatencyMs"`
+	MinSuccessRate   float64         `json:"minSuccessRate"`
+	Duration         string          `json:"duration" binding:"required"`
+	MinVolume        int             `json:"minVolume"`
+	BidDeadline      string          `json:"bidDeadline" binding:"required"`
+	AutoSelect       bool            `json:"autoSelect"`
+	MinReputation    float64         `json:"minReputation"`
+	MaxCounterRounds int             `json:"maxCounterRounds"`
+	RequiredBondPct  float64         `json:"requiredBondPct"`
+	NoWithdrawWindow string          `json:"noWithdrawWindow"`
+	ScoringWeights   *ScoringWeights `json:"scoringWeights"`
+}
+
+// PublishFromTemplateRequest contains overrides when creating an RFP from a template.
+type PublishFromTemplateRequest struct {
+	BuyerAddr     string  `json:"buyerAddr" binding:"required"`
+	MinBudget     string  `json:"minBudget"`     // override
+	MaxBudget     string  `json:"maxBudget"`     // override
+	Duration      string  `json:"duration"`      // override
+	BidDeadline   string  `json:"bidDeadline"`   // override
+	Description   string  `json:"description"`   // override
+	MinReputation float64 `json:"minReputation"` // override (0 = use template)
+}
+
+// Analytics contains marketplace health metrics.
+type Analytics struct {
+	TotalRFPs          int                `json:"totalRfps"`
+	OpenRFPs           int                `json:"openRfps"`
+	AwardedRFPs        int                `json:"awardedRfps"`
+	ExpiredRFPs        int                `json:"expiredRfps"`
+	CancelledRFPs      int                `json:"cancelledRfps"`
+	AvgBidsPerRFP      float64            `json:"avgBidsPerRfp"`
+	AvgBidToAskSpread  float64            `json:"avgBidToAskSpread"`  // avg (bidBudget - rfpMinBudget) / rfpMaxBudget
+	AvgTimeToAwardSecs float64            `json:"avgTimeToAwardSecs"` // avg seconds from publish to award
+	AbandonmentRate    float64            `json:"abandonmentRate"`    // expired with 0 bids / (expired + awarded)
+	CounterEfficiency  float64            `json:"counterEfficiency"`  // % of countered bids that led to awards
+	TopSellers         []SellerWinSummary `json:"topSellers"`
+}
+
+// SellerWinSummary tracks a seller's win rate.
+type SellerWinSummary struct {
+	SellerAddr string  `json:"sellerAddr"`
+	TotalBids  int     `json:"totalBids"`
+	Wins       int     `json:"wins"`
+	WinRate    float64 `json:"winRate"`
+}
+
 // Store persists negotiation data.
 type Store interface {
 	// RFP operations
@@ -215,6 +293,15 @@ type Store interface {
 	ListActiveBidsByRFP(ctx context.Context, rfpID string) ([]*Bid, error)
 	GetBidBySellerAndRFP(ctx context.Context, sellerAddr, rfpID string) (*Bid, error)
 	ListBidsBySeller(ctx context.Context, sellerAddr string, limit int) ([]*Bid, error)
+
+	// Analytics
+	GetAnalytics(ctx context.Context) (*Analytics, error)
+
+	// Templates
+	CreateTemplate(ctx context.Context, tmpl *RFPTemplate) error
+	GetTemplate(ctx context.Context, id string) (*RFPTemplate, error)
+	ListTemplates(ctx context.Context, ownerAddr string, limit int) ([]*RFPTemplate, error)
+	DeleteTemplate(ctx context.Context, id string) error
 }
 
 // ReputationProvider fetches reputation scores for bid scoring.
@@ -267,6 +354,14 @@ func generateRFPID() string {
 		panic("crypto/rand failed: " + err.Error())
 	}
 	return fmt.Sprintf("rfp_%x", b)
+}
+
+func generateTemplateID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
+	return fmt.Sprintf("tmpl_%x", b)
 }
 
 func generateBidID() string {

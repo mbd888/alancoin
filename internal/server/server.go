@@ -846,6 +846,11 @@ func (s *Server) setupRoutes() {
 		protectedNeg := v1.Group("")
 		protectedNeg.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
 		negotiationHandler.RegisterProtectedRoutes(protectedNeg)
+
+		// Admin routes - analytics
+		adminNeg := v1.Group("")
+		adminNeg.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr), auth.RequireAdmin())
+		negotiationHandler.RegisterAdminRoutes(adminNeg)
 	}
 
 	// Predictions routes (verifiable predictions with reputation stakes)

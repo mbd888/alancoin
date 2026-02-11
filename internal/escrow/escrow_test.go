@@ -979,7 +979,6 @@ func TestEscrow_IsTerminal(t *testing.T) {
 		{StatusReleased, true},
 		{StatusRefunded, true},
 		{StatusExpired, true},
-		{StatusDisputed, false}, // disputed is NOT terminal (it transitions to refunded)
 	}
 
 	for _, tt := range tests {

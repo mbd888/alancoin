@@ -27,14 +27,26 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/agents/:address/rfps", h.ListAgentRFPs)
 }
 
+// RegisterAdminRoutes sets up admin-only negotiation routes.
+func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
+	r.GET("/negotiation/analytics", h.GetAnalytics)
+}
+
 // RegisterProtectedRoutes sets up protected (auth-required) negotiation routes.
 func (h *Handler) RegisterProtectedRoutes(r *gin.RouterGroup) {
 	r.POST("/rfps", h.PublishRFP)
+	r.POST("/rfps/from-template/:templateId", h.PublishFromTemplate)
 	r.POST("/rfps/:id/bids", h.PlaceBid)
 	r.POST("/rfps/:id/bids/:bidId/counter", h.CounterBid)
 	r.POST("/rfps/:id/bids/:bidId/withdraw", h.WithdrawBid)
 	r.POST("/rfps/:id/select", h.SelectWinner)
 	r.POST("/rfps/:id/cancel", h.CancelRFP)
+
+	// Templates
+	r.POST("/rfp-templates", h.CreateTemplate)
+	r.GET("/rfp-templates", h.ListTemplates)
+	r.GET("/rfp-templates/:templateId", h.GetTemplate)
+	r.DELETE("/rfp-templates/:templateId", h.DeleteTemplate)
 }
 
 // PublishRFP handles POST /v1/rfps
@@ -394,6 +406,123 @@ func (h *Handler) CancelRFP(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"rfp": rfp})
+}
+
+// --- Template handlers ---
+
+// CreateTemplate handles POST /v1/rfp-templates
+func (h *Handler) CreateTemplate(c *gin.Context) {
+	var req CreateTemplateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "Invalid request body"})
+		return
+	}
+
+	callerAddr := c.GetString("authAgentAddr")
+	tmpl, err := h.service.CreateTemplate(c.Request.Context(), callerAddr, req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "template_failed", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"template": tmpl})
+}
+
+// GetTemplate handles GET /v1/rfp-templates/:templateId
+func (h *Handler) GetTemplate(c *gin.Context) {
+	id := c.Param("templateId")
+
+	tmpl, err := h.service.GetTemplate(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, ErrTemplateNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Template not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"template": tmpl})
+}
+
+// ListTemplates handles GET /v1/rfp-templates
+func (h *Handler) ListTemplates(c *gin.Context) {
+	callerAddr := c.GetString("authAgentAddr")
+	limit := parseLimit(c.Query("limit"), 50, 200)
+
+	templates, err := h.service.ListTemplates(c.Request.Context(), callerAddr, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"templates": templates, "count": len(templates)})
+}
+
+// DeleteTemplate handles DELETE /v1/rfp-templates/:templateId
+func (h *Handler) DeleteTemplate(c *gin.Context) {
+	id := c.Param("templateId")
+	callerAddr := c.GetString("authAgentAddr")
+
+	err := h.service.DeleteTemplate(c.Request.Context(), id, callerAddr)
+	if err != nil {
+		if errors.Is(err, ErrTemplateNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Template not found"})
+			return
+		}
+		if errors.Is(err, ErrUnauthorized) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "unauthorized", "message": "Not authorized to delete this template"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"deleted": true})
+}
+
+// PublishFromTemplate handles POST /v1/rfps/from-template/:templateId
+func (h *Handler) PublishFromTemplate(c *gin.Context) {
+	templateID := c.Param("templateId")
+
+	var req PublishFromTemplateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "Invalid request body"})
+		return
+	}
+
+	callerAddr := c.GetString("authAgentAddr")
+	if !strings.EqualFold(callerAddr, req.BuyerAddr) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "unauthorized", "message": "Authenticated agent must be the buyer"})
+		return
+	}
+
+	rfp, err := h.service.PublishFromTemplate(c.Request.Context(), templateID, req)
+	if err != nil {
+		status := http.StatusBadRequest
+		code := "rfp_from_template_failed"
+		if errors.Is(err, ErrTemplateNotFound) {
+			status = http.StatusNotFound
+			code = "template_not_found"
+		}
+		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"rfp": rfp})
+}
+
+// GetAnalytics handles GET /v1/admin/negotiation/analytics
+func (h *Handler) GetAnalytics(c *gin.Context) {
+	analytics, err := h.service.GetAnalytics(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "analytics_failed",
+			"message": err.Error(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, analytics)
 }
 
 func parseLimit(s string, defaultVal, maxVal int) int {

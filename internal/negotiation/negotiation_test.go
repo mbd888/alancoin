@@ -1611,3 +1611,268 @@ func TestPublishRFP_InvalidNoWithdrawWindow(t *testing.T) {
 		t.Error("expected error for invalid no-withdraw window")
 	}
 }
+
+// --- Analytics tests ---
+
+func TestGetAnalytics_Empty(t *testing.T) {
+	svc, _, _ := newTestService()
+
+	a, err := svc.GetAnalytics(context.Background())
+	if err != nil {
+		t.Fatalf("analytics failed: %v", err)
+	}
+	if a.TotalRFPs != 0 {
+		t.Errorf("expected 0 total RFPs, got %d", a.TotalRFPs)
+	}
+	if len(a.TopSellers) != 0 {
+		t.Errorf("expected 0 top sellers, got %d", len(a.TopSellers))
+	}
+}
+
+func TestGetAnalytics_WithData(t *testing.T) {
+	svc, _, _ := newTestService()
+	ctx := context.Background()
+
+	// Publish 3 RFPs: 2 will be awarded, 1 will expire with no bids
+	rfp1 := publishTestRFP(t, svc) // awarded
+	rfp2, _ := svc.PublishRFP(ctx, PublishRFPRequest{
+		BuyerAddr:   "0xBuyer2",
+		ServiceType: "inference",
+		MinBudget:   "1.00",
+		MaxBudget:   "2.00",
+		Duration:    "7d",
+		BidDeadline: "24h",
+	})
+
+	// Place bids on rfp1
+	bid1, _ := svc.PlaceBid(ctx, rfp1.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+	svc.PlaceBid(ctx, rfp1.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller2",
+		PricePerCall: "0.006",
+		TotalBudget:  "0.80",
+		Duration:     "7d",
+	})
+
+	// Place bid on rfp2
+	bid3, _ := svc.PlaceBid(ctx, rfp2.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.010",
+		TotalBudget:  "1.50",
+		Duration:     "7d",
+	})
+
+	// Award both
+	svc.SelectWinner(ctx, rfp1.ID, bid1.ID, "0xBuyer")
+	svc.SelectWinner(ctx, rfp2.ID, bid3.ID, "0xBuyer2")
+
+	// Third RFP: expire with no bids
+	rfp3, _ := svc.PublishRFP(ctx, PublishRFPRequest{
+		BuyerAddr:   "0xBuyer3",
+		ServiceType: "review",
+		MinBudget:   "0.50",
+		MaxBudget:   "1.00",
+		Duration:    "7d",
+		BidDeadline: "24h",
+	})
+	// Manually expire it
+	svc.CancelRFP(ctx, rfp3.ID, "0xBuyer3", "no interest")
+
+	a, err := svc.GetAnalytics(ctx)
+	if err != nil {
+		t.Fatalf("analytics failed: %v", err)
+	}
+
+	if a.TotalRFPs != 3 {
+		t.Errorf("expected 3 total RFPs, got %d", a.TotalRFPs)
+	}
+	if a.AwardedRFPs != 2 {
+		t.Errorf("expected 2 awarded RFPs, got %d", a.AwardedRFPs)
+	}
+	if a.AvgBidsPerRFP < 1.0 {
+		t.Errorf("expected avg bids per RFP >= 1, got %f", a.AvgBidsPerRFP)
+	}
+	if a.AvgTimeToAwardSecs < 0 {
+		t.Errorf("expected avg time to award >= 0, got %f", a.AvgTimeToAwardSecs)
+	}
+	if len(a.TopSellers) == 0 {
+		t.Error("expected at least 1 top seller")
+	}
+
+	// Seller1 won 2 bids
+	found := false
+	for _, s := range a.TopSellers {
+		if s.SellerAddr == "0xseller1" {
+			found = true
+			if s.Wins != 2 {
+				t.Errorf("expected seller1 wins=2, got %d", s.Wins)
+			}
+			if s.WinRate < 0.5 {
+				t.Errorf("expected seller1 win rate >= 0.5, got %f", s.WinRate)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected seller1 in top sellers")
+	}
+}
+
+// --- Template tests ---
+
+func TestCreateTemplate(t *testing.T) {
+	svc, _, _ := newTestService()
+	ctx := context.Background()
+
+	tmpl, err := svc.CreateTemplate(ctx, "0xBuyer", CreateTemplateRequest{
+		Name:        "Standard Translation",
+		ServiceType: "translation",
+		MinBudget:   "0.50",
+		MaxBudget:   "1.00",
+		Duration:    "7d",
+		BidDeadline: "24h",
+	})
+	if err != nil {
+		t.Fatalf("failed to create template: %v", err)
+	}
+
+	if !strings.HasPrefix(tmpl.ID, "tmpl_") {
+		t.Errorf("expected template ID prefix tmpl_, got %s", tmpl.ID)
+	}
+	if tmpl.OwnerAddr != "0xbuyer" {
+		t.Errorf("expected lowercase owner, got %s", tmpl.OwnerAddr)
+	}
+	if tmpl.Name != "Standard Translation" {
+		t.Errorf("expected name 'Standard Translation', got %s", tmpl.Name)
+	}
+}
+
+func TestListTemplates(t *testing.T) {
+	svc, _, _ := newTestService()
+	ctx := context.Background()
+
+	svc.CreateTemplate(ctx, "0xBuyer1", CreateTemplateRequest{
+		Name:        "Buyer1 Template",
+		ServiceType: "translation",
+		MinBudget:   "0.50",
+		MaxBudget:   "1.00",
+		Duration:    "7d",
+		BidDeadline: "24h",
+	})
+	svc.CreateTemplate(ctx, "0xBuyer2", CreateTemplateRequest{
+		Name:        "Buyer2 Template",
+		ServiceType: "inference",
+		MinBudget:   "1.00",
+		MaxBudget:   "2.00",
+		Duration:    "7d",
+		BidDeadline: "24h",
+	})
+
+	// Buyer1 should see only their own template
+	templates, err := svc.ListTemplates(ctx, "0xBuyer1", 50)
+	if err != nil {
+		t.Fatalf("list templates failed: %v", err)
+	}
+	if len(templates) != 1 {
+		t.Errorf("expected 1 template for buyer1, got %d", len(templates))
+	}
+}
+
+func TestPublishFromTemplate(t *testing.T) {
+	svc, _, _ := newTestService()
+	ctx := context.Background()
+
+	tmpl, _ := svc.CreateTemplate(ctx, "0xBuyer", CreateTemplateRequest{
+		Name:          "Quick Translation",
+		ServiceType:   "translation",
+		Description:   "Standard translation job",
+		MinBudget:     "0.50",
+		MaxBudget:     "1.00",
+		Duration:      "7d",
+		BidDeadline:   "24h",
+		AutoSelect:    true,
+		MinReputation: 50,
+	})
+
+	// Publish from template with budget override
+	rfp, err := svc.PublishFromTemplate(ctx, tmpl.ID, PublishFromTemplateRequest{
+		BuyerAddr: "0xBuyer",
+		MaxBudget: "2.00", // override
+	})
+	if err != nil {
+		t.Fatalf("publish from template failed: %v", err)
+	}
+
+	if rfp.ServiceType != "translation" {
+		t.Errorf("expected service type from template, got %s", rfp.ServiceType)
+	}
+	if rfp.MaxBudget != "2.00" {
+		t.Errorf("expected overridden max budget 2.00, got %s", rfp.MaxBudget)
+	}
+	if rfp.MinBudget != "0.50" {
+		t.Errorf("expected template min budget 0.50, got %s", rfp.MinBudget)
+	}
+	if !rfp.AutoSelect {
+		t.Error("expected auto select from template")
+	}
+	if rfp.MinReputation != 50 {
+		t.Errorf("expected min reputation from template, got %f", rfp.MinReputation)
+	}
+}
+
+func TestPublishFromTemplate_NotFound(t *testing.T) {
+	svc, _, _ := newTestService()
+
+	_, err := svc.PublishFromTemplate(context.Background(), "tmpl_nonexistent", PublishFromTemplateRequest{
+		BuyerAddr: "0xBuyer",
+	})
+	if !errors.Is(err, ErrTemplateNotFound) {
+		t.Errorf("expected ErrTemplateNotFound, got %v", err)
+	}
+}
+
+func TestDeleteTemplate(t *testing.T) {
+	svc, _, _ := newTestService()
+	ctx := context.Background()
+
+	tmpl, _ := svc.CreateTemplate(ctx, "0xBuyer", CreateTemplateRequest{
+		Name:        "To Delete",
+		ServiceType: "translation",
+		MinBudget:   "0.50",
+		MaxBudget:   "1.00",
+		Duration:    "7d",
+		BidDeadline: "24h",
+	})
+
+	err := svc.DeleteTemplate(ctx, tmpl.ID, "0xBuyer")
+	if err != nil {
+		t.Fatalf("delete template failed: %v", err)
+	}
+
+	_, err = svc.GetTemplate(ctx, tmpl.ID)
+	if !errors.Is(err, ErrTemplateNotFound) {
+		t.Errorf("expected template not found after delete, got %v", err)
+	}
+}
+
+func TestDeleteTemplate_Unauthorized(t *testing.T) {
+	svc, _, _ := newTestService()
+	ctx := context.Background()
+
+	tmpl, _ := svc.CreateTemplate(ctx, "0xBuyer", CreateTemplateRequest{
+		Name:        "Private Template",
+		ServiceType: "translation",
+		MinBudget:   "0.50",
+		MaxBudget:   "1.00",
+		Duration:    "7d",
+		BidDeadline: "24h",
+	})
+
+	err := svc.DeleteTemplate(ctx, tmpl.ID, "0xOtherBuyer")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized, got %v", err)
+	}
+}

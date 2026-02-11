@@ -349,3 +349,105 @@ internal/sessionkeys/
 ├── delegation_test.go# Delegation tree tests
 └── SESSIONKEYS.md    # This file
 ```
+
+---
+
+## Not Yet Built
+
+### P0 — Policy Engine (Replace Hardcoded Constraints)
+
+Session key permissions are a fixed set of fields (`MaxPerTransaction`, `MaxPerDay`, `AllowedRecipients`, etc.). This works for simple cases but enterprises need **arbitrary, composable spending rules**. The current model should evolve into a policy engine:
+
+- **Rule-based policies** — Instead of flat fields, define policies as a list of rules: `[{condition: "amount > 100", action: "deny"}, {condition: "time.hour < 6 || time.hour > 22", action: "require_approval"}, {condition: "recipient.reputation < 30", action: "deny"}]`.
+- **Policy templates** — Pre-built policy sets: "Conservative" (low limits, known recipients only), "Aggressive" (high limits, any recipient), "Compliance" (travel rule enforcement above $3k).
+- **Dynamic policy evaluation** — Policies can reference external data: recipient reputation score, current gas prices, historical spending patterns.
+- **Policy versioning** — When a policy is updated, existing session keys can either inherit the new policy or be pinned to the old one.
+
+This is the enterprise killer feature. Companies don't buy "you can set a $10 daily limit." They buy "you can write any rule you want about how your agents spend money."
+
+**Interface sketch:**
+```go
+type PolicyEngine interface {
+    Evaluate(ctx context.Context, tx TransactionRequest, key *SessionKey) (*PolicyDecision, error)
+}
+
+type PolicyDecision struct {
+    Action     string // "allow", "deny", "require_approval", "alert"
+    Reason     string
+    MatchedRule string
+}
+```
+
+### P0 — Anomaly Detection / Real-Time Risk Scoring
+
+Session keys have no intelligence about whether a transaction is suspicious. An agent with a $10k daily limit could drain the entire budget in one burst of 100 transactions and nothing would flag it until the budget is gone.
+
+**What needs to exist:**
+
+- **Velocity checks** — If an agent's spending rate in the last 5 minutes is >10x its 24-hour average, flag or block.
+- **Recipient anomaly** — First-time recipient + large amount = elevated risk score.
+- **Time-of-day patterns** — Agent normally transacts 9am-6pm, sudden 3am burst = flag.
+- **Budget burn rate** — If the agent will exhaust its daily/total budget within the next hour at current pace, emit a warning event.
+- **Risk score per transaction** — 0.0-1.0 score computed before execution. Above threshold → block or require human approval.
+
+This feeds into a broader `internal/risk/` package that doesn't exist yet. Session keys would call `riskEngine.Score(tx)` during `ValidateSigned()`.
+
+### P0 — Key Rotation Without Identity Loss
+
+Currently there's no way to rotate a session key. If a key is compromised, you revoke it and create a new one — but the new key has zero usage history, fresh nonces, and no connection to the old key. For enterprise:
+
+- **Key rotation** — `RotateKey(oldKeyID) → newKey` that transfers remaining budget, inherits delegation tree, and maintains the usage lineage.
+- **Grace period** — Both old and new key are valid during a rotation window (e.g., 5 minutes) so in-flight transactions don't fail.
+- **Rotation audit** — Rotation events logged with reason, old/new key IDs, and who initiated it.
+
+### P0 — Budget Alerts and Notifications
+
+No alerting when keys approach limits:
+
+- **Threshold webhooks** — When a key hits 50%, 75%, 90% of its `MaxTotal`, emit a webhook to the owner.
+- **Daily spend alerts** — When `SpentToday` exceeds a configurable percentage of `MaxPerDay`.
+- **Expiration warnings** — 24h, 1h before expiry, notify the owner so they can renew.
+- **Delegation budget alerts** — When a child key's spending approaches the parent's remaining budget.
+
+### P1 — Spend Analytics Dashboard
+
+No visibility into how session keys are being used:
+
+- **Per-key analytics** — Spending over time, top recipients, average transaction size, usage patterns.
+- **Per-owner analytics** — Across all keys: total delegated, total spent, top spenders in the delegation tree.
+- **Delegation tree visualization** — Which branches of the tree are consuming the most budget?
+- **Endpoints:** `GET /v1/agents/:address/sessions/analytics`, `GET /v1/sessions/:keyId/analytics`
+
+### P1 — Delegation Audit Log
+
+Delegation events (create child, revoke child, cascade revocation) are not recorded in a queryable audit log. The `delegation_log` table exists but it only records creation, not revocations or budget cascade events.
+
+- Record every delegation event: create, revoke, cascade_revoke, budget_exceeded
+- Include the full ancestor chain at time of event
+- Queryable by root owner, time range, event type
+- Required for compliance: "show me every delegation action taken by keys I own in the last 30 days"
+
+### P1 — Session Key Scopes (Read vs Write)
+
+Current keys are all-or-nothing for spending. But agents may need keys with different permission levels:
+
+- **Read-only keys** — Can query balances, list transactions, discover services. Cannot spend.
+- **Approval keys** — Can approve pending transactions but not initiate them.
+- **Scoped keys** — Can only call specific API endpoints (e.g., only `/v1/streams`, not `/v1/escrow`).
+
+### P2 — Hardware Security Module (HSM) Integration
+
+Session key private keys are held in software. For enterprise deployments handling large budgets:
+
+- HSM-backed key generation and signing (AWS CloudHSM, Azure Key Vault, YubiKey)
+- Key material never leaves the HSM
+- Signature requests go through the HSM API
+- This is table stakes for any financial platform handling >$1M in agent transactions
+
+### P2 — Cross-Platform Session Keys
+
+Session keys only work within the Alancoin platform. For agents operating across multiple platforms:
+
+- **Portable credentials** — A session key signed by Alancoin that can be verified by external platforms.
+- **DID integration** — Session keys as Verifiable Credentials linked to the agent's DID.
+- This connects to the broader agent identity system that doesn't exist yet.
