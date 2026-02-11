@@ -1606,7 +1606,9 @@ func gzipMiddleware() gin.HandlerFunc {
 		c.Header("Vary", "Accept-Encoding")
 		c.Writer = &gzipWriter{ResponseWriter: c.Writer, writer: gz}
 		defer func() {
-			gz.Close()
+			if err := gz.Close(); err != nil {
+				_ = c.Error(err)
+			}
 			c.Header("Content-Length", "")
 		}()
 		c.Next()

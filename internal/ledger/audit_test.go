@@ -77,7 +77,7 @@ func TestAuditLogger_BeforeAfterState(t *testing.T) {
 	e := entries[0]
 
 	if e.BeforeState == "" || e.BeforeState == "{}" {
-		// Before state should show the initial zero balance
+		t.Fatalf("expected beforeState to show initial zero balance, got %q", e.BeforeState)
 	}
 	if e.AfterState == "" {
 		t.Error("expected non-empty afterState")

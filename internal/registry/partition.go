@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -14,6 +16,12 @@ type PartitionMaintainer struct {
 	interval time.Duration
 	logger   *slog.Logger
 	stop     chan struct{}
+}
+
+var partitionNameRe = regexp.MustCompile(`\A[a-z0-9_]+\z`)
+
+func quoteIdentifier(ident string) string {
+	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
 }
 
 // NewPartitionMaintainer creates a maintainer that ensures future partitions exist.
@@ -63,9 +71,17 @@ func (m *PartitionMaintainer) ensurePartitions(ctx context.Context) {
 		end := start.AddDate(0, 1, 0)
 		name := fmt.Sprintf("transactions_%04d_%02d", start.Year(), start.Month())
 
+		if !partitionNameRe.MatchString(name) {
+			m.logger.Warn("invalid partition name", "partition", name)
+			continue
+		}
+
+		// Identifiers (table names) can't be parameterized. We generate `name` ourselves,
+		// validate it strictly, and quote it as a SQL identifier.
+		// #nosec G201
 		query := fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS %s PARTITION OF transactions FOR VALUES FROM ('%s') TO ('%s')`,
-			name,
+			quoteIdentifier(name),
 			start.Format("2006-01-02"),
 			end.Format("2006-01-02"),
 		)
