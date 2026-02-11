@@ -12,11 +12,12 @@ import (
 
 // Service implements verified agent business logic.
 type Service struct {
-	store      Store
-	scorer     *Scorer
-	reputation ReputationProvider
-	metrics    MetricsProvider
-	ledger     LedgerService
+	store         Store
+	scorer        *Scorer
+	reputation    ReputationProvider
+	metrics       MetricsProvider
+	ledger        LedgerService
+	buyerPayments BuyerPaymentProvider
 }
 
 // NewService creates a new verification service.
@@ -28,6 +29,12 @@ func NewService(store Store, scorer *Scorer, reputation ReputationProvider, metr
 		metrics:    metrics,
 		ledger:     ledger,
 	}
+}
+
+// WithBuyerPayments adds a buyer payment provider for refund distribution.
+func (s *Service) WithBuyerPayments(p BuyerPaymentProvider) *Service {
+	s.buyerPayments = p
+	return s
 }
 
 // Apply evaluates an agent for verification and creates a verified status if eligible.
@@ -201,12 +208,17 @@ func (s *Service) RecordViolation(ctx context.Context, agentAddr string, windowS
 		return nil, fmt.Errorf("failed to confirm bond forfeiture: %w", err)
 	}
 
-	// Deposit forfeited amount into guarantee fund
-	if guaranteeFundAddr != "" {
-		if err := s.ledger.Deposit(ctx, guaranteeFundAddr, forfeitStr, "vforfeit_"+v.ID); err != nil {
-			// Non-fatal: the bond was already confirmed, log but continue
-			_ = err
+	// Distribute forfeited amount to affected buyers (proportional to spend)
+	// Falls back to guarantee fund if no buyer payment provider or no buyers found
+	distributed := false
+	if s.buyerPayments != nil {
+		if n, dErr := s.distributeRefunds(ctx, agentAddr, v, forfeitStr); dErr == nil && n > 0 {
+			distributed = true
 		}
+	}
+	if !distributed && guaranteeFundAddr != "" {
+		// Fallback: deposit to guarantee fund for manual distribution
+		_ = s.ledger.Deposit(ctx, guaranteeFundAddr, forfeitStr, "vforfeit_"+v.ID)
 	}
 
 	// Update remaining bond
@@ -354,4 +366,41 @@ func (s *Service) ListAll(ctx context.Context, limit int) ([]*Verification, erro
 		limit = 50
 	}
 	return s.store.ListAll(ctx, limit)
+}
+
+// distributeRefunds distributes forfeited bond proportionally to affected buyers.
+// Returns the number of buyers refunded and any error.
+func (s *Service) distributeRefunds(ctx context.Context, sellerAddr string, v *Verification, forfeitStr string) (int, error) {
+	payments, err := s.buyerPayments.GetRecentBuyerPayments(ctx, sellerAddr, v.SLAWindowSize)
+	if err != nil || len(payments) == 0 {
+		return 0, err
+	}
+
+	// Calculate total buyer spend to determine proportional shares
+	var totalSpend float64
+	for _, p := range payments {
+		totalSpend += p.Amount
+	}
+	if totalSpend <= 0 {
+		return 0, nil
+	}
+
+	forfeitBig, ok := new(big.Float).SetString(forfeitStr)
+	if !ok {
+		return 0, fmt.Errorf("invalid forfeit amount: %s", forfeitStr)
+	}
+
+	refunded := 0
+	for _, p := range payments {
+		share := p.Amount / totalSpend
+		refundBig := new(big.Float).Mul(forfeitBig, new(big.Float).SetFloat64(share))
+		refundStr := refundBig.Text('f', 6)
+
+		ref := fmt.Sprintf("vrefund_%s_%s", v.ID, p.BuyerAddr)
+		if err := s.ledger.Deposit(ctx, p.BuyerAddr, refundStr, ref); err != nil {
+			continue // Best effort — skip this buyer, try others
+		}
+		refunded++
+	}
+	return refunded, nil
 }

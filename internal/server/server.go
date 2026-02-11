@@ -278,6 +278,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Credit system (spend on credit, repay from earnings)
 		creditStore := credit.NewPostgresStore(db)
+		// Note: gateway verification/contracts wired after verifiedService is created (below)
 		if err := creditStore.Migrate(ctx); err != nil {
 			s.logger.Warn("failed to migrate credit store", "error", err)
 		}
@@ -315,6 +316,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			&creditMetricsAdapter{verifiedReputationProv},
 			&verifiedLedgerAdapter{s.ledger},
 		)
+		s.verifiedService.WithBuyerPayments(&buyerPaymentAdapter{s.contractService})
 		s.verifiedEnforcer = verified.NewEnforcer(
 			s.verifiedService,
 			&contractCallAdapter{s.contractService},
@@ -322,6 +324,12 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			s.logger,
 		)
 		s.logger.Info("verified agents enabled (postgres)")
+
+		// Wire verification and contracts into gateway for premium handling
+		s.gatewayService.
+			WithVerification(&gatewayVerificationAdapter{s.verifiedService}).
+			WithContracts(&gatewayContractAdapter{s.contractService}).
+			WithGuaranteeFundAddr(s.wallet.Address())
 	} else {
 		s.registry = registry.NewMemoryStore()
 		s.logger.Info("using in-memory storage (data will not persist)")
@@ -433,7 +441,14 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			&creditMetricsAdapter{verifiedReputationProv},
 			&verifiedLedgerAdapter{s.ledger},
 		)
+		s.verifiedService.WithBuyerPayments(&buyerPaymentAdapter{s.contractService})
 		s.logger.Info("verified agents enabled (in-memory)")
+
+		// Wire verification and contracts into gateway for premium handling
+		s.gatewayService.
+			WithVerification(&gatewayVerificationAdapter{s.verifiedService}).
+			WithContracts(&gatewayContractAdapter{s.contractService})
+		// guaranteeFundAddr set after wallet is created (below)
 	}
 
 	// Create wallet if not injected
@@ -448,6 +463,11 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			return nil, fmt.Errorf("failed to create wallet: %w", err)
 		}
 		s.wallet = w
+	}
+
+	// Wire gateway guarantee fund address now that wallet is available
+	if s.gatewayService != nil && s.wallet != nil && s.db == nil {
+		s.gatewayService.WithGuaranteeFundAddr(s.wallet.Address())
 	}
 
 	// Create paymaster for gas abstraction
@@ -2522,4 +2542,114 @@ func (a *contractCallAdapter) GetRecentCallsByAgent(ctx context.Context, agentAd
 		}
 	}
 	return successCount, totalCount, nil
+}
+
+// buyerPaymentAdapter adapts contracts.Service to verified.BuyerPaymentProvider
+type buyerPaymentAdapter struct {
+	svc *contracts.Service
+}
+
+func (a *buyerPaymentAdapter) GetRecentBuyerPayments(ctx context.Context, sellerAddr string, windowSize int) ([]verified.BuyerPayment, error) {
+	allContracts, err := a.svc.ListByAgent(ctx, sellerAddr, "active", 100)
+	if err != nil {
+		return nil, err
+	}
+
+	// Aggregate payments per buyer across all contracts where this agent is seller
+	buyerTotals := make(map[string]float64)
+	for _, c := range allContracts {
+		if c.SellerAddr != strings.ToLower(sellerAddr) {
+			continue
+		}
+		calls, err := a.svc.ListCalls(ctx, c.ID, windowSize)
+		if err != nil {
+			continue
+		}
+		pricePerCall, _ := new(big.Float).SetString(c.PricePerCall)
+		if pricePerCall == nil {
+			continue
+		}
+		pf, _ := pricePerCall.Float64()
+		for _, call := range calls {
+			if call.Status == "success" {
+				buyerTotals[c.BuyerAddr] += pf
+			}
+		}
+	}
+
+	var result []verified.BuyerPayment
+	for addr, amount := range buyerTotals {
+		result = append(result, verified.BuyerPayment{
+			BuyerAddr: addr,
+			Amount:    amount,
+		})
+	}
+	return result, nil
+}
+
+// gatewayVerificationAdapter adapts verified.Service to gateway.VerificationChecker
+type gatewayVerificationAdapter struct {
+	svc *verified.Service
+}
+
+func (a *gatewayVerificationAdapter) IsVerified(ctx context.Context, agentAddr string) (bool, error) {
+	return a.svc.IsVerified(ctx, agentAddr)
+}
+
+func (a *gatewayVerificationAdapter) GetGuarantee(ctx context.Context, agentAddr string) (float64, float64, error) {
+	return a.svc.GetGuarantee(ctx, agentAddr)
+}
+
+// gatewayContractAdapter adapts contracts.Service to gateway.ContractManager
+type gatewayContractAdapter struct {
+	svc *contracts.Service
+}
+
+func (a *gatewayContractAdapter) EnsureContract(ctx context.Context, buyerAddr, sellerAddr, serviceType, pricePerCall string, guaranteedSuccessRate float64, slaWindowSize int) (string, error) {
+	// Look for an existing active contract between this buyer and seller for this service type
+	existing, err := a.svc.ListByAgent(ctx, sellerAddr, "active", 50)
+	if err == nil {
+		for _, c := range existing {
+			if c.BuyerAddr == strings.ToLower(buyerAddr) && c.ServiceType == serviceType {
+				return c.ID, nil
+			}
+		}
+	}
+
+	// No existing contract — create one with auto-accept
+	contract, err := a.svc.Propose(ctx, contracts.ProposeRequest{
+		BuyerAddr:      buyerAddr,
+		SellerAddr:     sellerAddr,
+		ServiceType:    serviceType,
+		PricePerCall:   pricePerCall,
+		BuyerBudget:    "100.000000", // default budget for auto-contracts
+		Duration:       "168h",       // 7 days
+		MinVolume:      1,
+		MinSuccessRate: guaranteedSuccessRate,
+		SLAWindowSize:  slaWindowSize,
+	})
+	if err != nil {
+		return "", fmt.Errorf("auto-propose contract: %w", err)
+	}
+
+	// Auto-accept on behalf of the seller (they agreed by being verified)
+	if _, err := a.svc.Accept(ctx, contract.ID, sellerAddr); err != nil {
+		return contract.ID, fmt.Errorf("auto-accept contract: %w", err)
+	}
+
+	return contract.ID, nil
+}
+
+func (a *gatewayContractAdapter) RecordCall(ctx context.Context, contractID string, status string, latencyMs int) error {
+	// Use the seller address as caller — the gateway acts on behalf of the buyer/seller pair
+	contract, err := a.svc.Get(ctx, contractID)
+	if err != nil {
+		return err
+	}
+
+	_, err = a.svc.RecordCall(ctx, contractID, contracts.RecordCallRequest{
+		Status:    status,
+		LatencyMs: latencyMs,
+	}, contract.BuyerAddr)
+	return err
 }

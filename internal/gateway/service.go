@@ -15,14 +15,17 @@ import (
 
 // Service implements gateway business logic.
 type Service struct {
-	store     Store
-	resolver  *Resolver
-	forwarder *Forwarder
-	ledger    LedgerService
-	recorder  TransactionRecorder
-	revenue   RevenueAccumulator
-	logger    *slog.Logger
-	locks     sync.Map // per-session mutex
+	store             Store
+	resolver          *Resolver
+	forwarder         *Forwarder
+	ledger            LedgerService
+	recorder          TransactionRecorder
+	revenue           RevenueAccumulator
+	verification      VerificationChecker
+	contracts         ContractManager
+	guaranteeFundAddr string // platform address receiving guarantee premiums
+	logger            *slog.Logger
+	locks             sync.Map // per-session mutex
 }
 
 // NewService creates a new gateway service.
@@ -45,6 +48,24 @@ func (s *Service) WithRecorder(r TransactionRecorder) *Service {
 // WithRevenueAccumulator adds a revenue accumulator for stakes interception.
 func (s *Service) WithRevenueAccumulator(r RevenueAccumulator) *Service {
 	s.revenue = r
+	return s
+}
+
+// WithVerification adds a verification checker for guarantee premium handling.
+func (s *Service) WithVerification(v VerificationChecker) *Service {
+	s.verification = v
+	return s
+}
+
+// WithContracts adds a contract manager for auto-contract creation.
+func (s *Service) WithContracts(c ContractManager) *Service {
+	s.contracts = c
+	return s
+}
+
+// WithGuaranteeFundAddr sets the platform address that receives guarantee premiums.
+func (s *Service) WithGuaranteeFundAddr(addr string) *Service {
+	s.guaranteeFundAddr = strings.ToLower(addr)
 	return s
 }
 
@@ -159,35 +180,75 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			continue
 		}
 
-		// Check per-request limit
-		if priceBig.Cmp(maxPerBig) > 0 {
+		// Check if candidate is verified → compute premium
+		var premiumBig *big.Int
+		var totalCostBig *big.Int
+		var isVerified bool
+		var guaranteedRate float64
+		var slaWindow int
+
+		if s.verification != nil {
+			if v, vErr := s.verification.IsVerified(ctx, candidate.AgentAddress); vErr == nil && v {
+				isVerified = true
+				gr, pr, _ := s.verification.GetGuarantee(ctx, candidate.AgentAddress)
+				guaranteedRate = gr
+				slaWindow = 20 // default SLA window
+				if pr > 0 {
+					// Premium = price * premiumRate (e.g. 0.05 = 5%)
+					premiumF := float64(priceBig.Int64()) * pr
+					premiumBig = big.NewInt(int64(premiumF))
+					if premiumBig.Sign() <= 0 {
+						premiumBig = big.NewInt(1) // minimum 1 micro-unit
+					}
+				}
+			}
+		}
+
+		if premiumBig == nil {
+			premiumBig = new(big.Int)
+		}
+		totalCostBig = new(big.Int).Add(priceBig, premiumBig)
+
+		// Check per-request limit (against total cost including premium)
+		if totalCostBig.Cmp(maxPerBig) > 0 {
 			continue
 		}
 
 		// Check remaining budget
-		if priceBig.Cmp(remaining) > 0 {
+		if totalCostBig.Cmp(remaining) > 0 {
 			lastErr = ErrBudgetExceeded
 			continue
 		}
 
-		// Payment: confirm hold from buyer + deposit to seller
+		// Payment: confirm hold from buyer for total cost (base + premium)
 		ref := fmt.Sprintf("%s:req:%d:%s", session.ID, session.RequestCount+1, candidate.ServiceID)
+		totalCostStr := usdc.Format(totalCostBig)
 
-		if err := s.ledger.ConfirmHold(ctx, session.AgentAddr, candidate.Price, ref); err != nil {
+		if err := s.ledger.ConfirmHold(ctx, session.AgentAddr, totalCostStr, ref); err != nil {
 			s.logger.Warn("confirm hold failed", "session", sessionID, "error", err)
 			lastErr = err
 			continue
 		}
 
+		// Deposit base price to seller
 		if err := s.ledger.Deposit(ctx, candidate.AgentAddress, candidate.Price, ref); err != nil {
 			s.logger.Error("deposit failed after confirm hold", "session", sessionID, "seller", candidate.AgentAddress, "error", err)
-			// Payment confirmed but deposit failed — log for manual resolution
 			lastErr = err
 			retries++
 			continue
 		}
 
+		// Deposit premium to guarantee fund (platform address)
+		if premiumBig.Sign() > 0 {
+			premiumStr := usdc.Format(premiumBig)
+			if err := s.ledger.Deposit(ctx, s.guaranteeFundAddr, premiumStr, "gpremium:"+ref); err != nil {
+				// Non-fatal: base payment succeeded, premium deposit is best-effort
+				s.logger.Warn("guarantee premium deposit failed", "session", sessionID, "premium", premiumStr, "error", err)
+			}
+		}
+
 		// Forward HTTP request
+		start := time.Now()
 		fwdResp, err := s.forwarder.Forward(ctx, ForwardRequest{
 			Endpoint:  candidate.Endpoint,
 			Params:    req.Params,
@@ -195,11 +256,28 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			Amount:    candidate.Price,
 			Reference: ref,
 		})
+		latencyMs := time.Since(start).Milliseconds()
+
+		// Determine call status for contract recording
+		callStatus := "success"
+		if err != nil {
+			callStatus = "failed"
+		}
+
+		// Auto-record into micro-contract if verified
+		if isVerified && s.contracts != nil {
+			contractID, cErr := s.contracts.EnsureContract(ctx,
+				session.AgentAddr, candidate.AgentAddress, req.ServiceType,
+				candidate.Price, guaranteedRate, slaWindow)
+			if cErr == nil && contractID != "" {
+				_ = s.contracts.RecordCall(ctx, contractID, callStatus, int(latencyMs))
+			}
+		}
 
 		if err != nil {
 			// Payment already happened. Service failed — reputation issue.
 			s.logger.Warn("forward failed after payment", "session", sessionID, "seller", candidate.AgentAddress, "error", err)
-			s.logRequest(ctx, session.ID, req.ServiceType, candidate.AgentAddress, candidate.Price, "forward_failed", 0, err.Error())
+			s.logRequest(ctx, session.ID, req.ServiceType, candidate.AgentAddress, totalCostStr, "forward_failed", 0, err.Error())
 
 			// Record failed transaction so seller's success rate drops
 			if s.recorder != nil {
@@ -208,7 +286,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			}
 
 			// Update session spend even though forward failed (payment was made)
-			newSpent := new(big.Int).Add(spentBig, priceBig)
+			newSpent := new(big.Int).Add(spentBig, totalCostBig)
 			session.TotalSpent = usdc.Format(newSpent)
 			session.RequestCount++
 			session.UpdatedAt = time.Now()
@@ -222,7 +300,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		}
 
 		// Success — update session
-		newSpent := new(big.Int).Add(spentBig, priceBig)
+		newSpent := new(big.Int).Add(spentBig, totalCostBig)
 		session.TotalSpent = usdc.Format(newSpent)
 		session.RequestCount++
 		session.UpdatedAt = time.Now()
@@ -231,7 +309,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			s.logger.Error("failed to update session after successful proxy", "session", sessionID, "error", err)
 		}
 
-		s.logRequest(ctx, session.ID, req.ServiceType, candidate.AgentAddress, candidate.Price, "success", fwdResp.LatencyMs, "")
+		s.logRequest(ctx, session.ID, req.ServiceType, candidate.AgentAddress, totalCostStr, "success", fwdResp.LatencyMs, "")
 
 		// Record successful transaction for reputation
 		if s.recorder != nil {
@@ -248,7 +326,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			Response:    fwdResp.Body,
 			ServiceUsed: candidate.AgentAddress,
 			ServiceName: candidate.ServiceName,
-			AmountPaid:  candidate.Price,
+			AmountPaid:  totalCostStr,
 			LatencyMs:   fwdResp.LatencyMs,
 			Retries:     retries,
 		}, nil

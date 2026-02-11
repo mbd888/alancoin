@@ -125,6 +125,20 @@ type RevenueAccumulator interface {
 	AccumulateRevenue(ctx context.Context, agentAddr, amount, txRef string) error
 }
 
+// VerificationChecker checks if a seller is verified and returns guarantee terms.
+type VerificationChecker interface {
+	IsVerified(ctx context.Context, agentAddr string) (bool, error)
+	GetGuarantee(ctx context.Context, agentAddr string) (guaranteedSuccessRate float64, premiumRate float64, err error)
+}
+
+// ContractManager creates and records calls for micro-contracts.
+type ContractManager interface {
+	// EnsureContract returns an existing active contract for buyer→seller or creates one.
+	EnsureContract(ctx context.Context, buyerAddr, sellerAddr, serviceType, pricePerCall string, guaranteedSuccessRate float64, slaWindowSize int) (contractID string, err error)
+	// RecordCall records a call result against a contract.
+	RecordCall(ctx context.Context, contractID string, status string, latencyMs int) error
+}
+
 // ServiceCandidate is a discovered service suitable for proxying.
 type ServiceCandidate struct {
 	AgentAddress    string  `json:"agentAddress"`

@@ -206,8 +206,8 @@ func TestProxy_Success(t *testing.T) {
 	if result.ServiceUsed != "0xseller" {
 		t.Errorf("expected seller 0xseller, got %s", result.ServiceUsed)
 	}
-	if result.AmountPaid != "0.50" {
-		t.Errorf("expected 0.50 paid, got %s", result.AmountPaid)
+	if result.AmountPaid != "0.500000" {
+		t.Errorf("expected 0.500000 paid, got %s", result.AmountPaid)
 	}
 
 	// Verify session updated

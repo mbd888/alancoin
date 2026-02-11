@@ -112,3 +112,15 @@ type LedgerService interface {
 	ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error
 	Deposit(ctx context.Context, agentAddr, amount, txHash string) error
 }
+
+// BuyerPayment represents a buyer's payment to a verified agent for refund calculation.
+type BuyerPayment struct {
+	BuyerAddr string
+	Amount    float64 // total paid
+}
+
+// BuyerPaymentProvider identifies buyers who paid a verified agent recently.
+type BuyerPaymentProvider interface {
+	// GetRecentBuyerPayments returns aggregated buyer payments to a seller within the SLA window.
+	GetRecentBuyerPayments(ctx context.Context, sellerAddr string, windowSize int) ([]BuyerPayment, error)
+}
