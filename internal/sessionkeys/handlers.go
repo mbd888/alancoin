@@ -6,12 +6,14 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/mbd888/alancoin/internal/metrics"
+	"github.com/mbd888/alancoin/internal/risk"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
 	"github.com/mbd888/alancoin/internal/validation"
@@ -64,17 +66,24 @@ type EventEmitter interface {
 	EmitSessionKeyUsed(keyID, agentAddr string, amount string)
 }
 
+// RiskScorer evaluates transaction risk in real time.
+type RiskScorer interface {
+	Score(ctx context.Context, tx *risk.TransactionContext) *risk.RiskAssessment
+	RecordTransaction(keyID, to, amount string)
+}
+
 // Handler provides HTTP handlers for session key operations
 type Handler struct {
-	manager  *Manager
-	wallet   WalletService       // For executing transfers (optional)
-	recorder TransactionRecorder // For recording txs (optional)
-	balance  BalanceService      // For checking/debiting balances (optional)
-	events   EventEmitter        // For broadcasting events (optional)
-	revenue  RevenueAccumulator  // For revenue staking interception (optional)
-	alerts   *AlertChecker       // For budget/expiration alerts (optional)
-	logger   *slog.Logger
-	demoMode bool // Skip on-chain transfers, use ledger only
+	manager    *Manager
+	wallet     WalletService       // For executing transfers (optional)
+	recorder   TransactionRecorder // For recording txs (optional)
+	balance    BalanceService      // For checking/debiting balances (optional)
+	events     EventEmitter        // For broadcasting events (optional)
+	revenue    RevenueAccumulator  // For revenue staking interception (optional)
+	alerts     *AlertChecker       // For budget/expiration alerts (optional)
+	riskScorer RiskScorer          // For real-time risk scoring (optional)
+	logger     *slog.Logger
+	demoMode   bool // Skip on-chain transfers, use ledger only
 }
 
 // NewHandler creates a new session key handler
@@ -108,6 +117,12 @@ func (h *Handler) WithRevenueAccumulator(r RevenueAccumulator) *Handler {
 // WithAlertChecker adds a budget/expiration alert checker.
 func (h *Handler) WithAlertChecker(a *AlertChecker) *Handler {
 	h.alerts = a
+	return h
+}
+
+// WithRiskScorer adds a risk scoring engine for real-time transaction evaluation.
+func (h *Handler) WithRiskScorer(rs RiskScorer) *Handler {
+	h.riskScorer = rs
 	return h
 }
 
@@ -356,6 +371,48 @@ func (h *Handler) Transact(c *gin.Context) {
 		return
 	}
 
+	// Risk scoring: evaluate transaction before moving funds
+	var riskAssessment *risk.RiskAssessment
+	if h.riskScorer != nil {
+		amountF := 0.0
+		if parsed, ok := usdc.Parse(req.Amount); ok {
+			amountF, _ = strconv.ParseFloat(usdc.Format(parsed), 64)
+		}
+		txCtx := &risk.TransactionContext{
+			KeyID:      keyID,
+			OwnerAddr:  address,
+			To:         req.To,
+			Amount:     req.Amount,
+			AmountUSDC: amountF,
+			MaxTotal:   key.Permission.MaxTotal,
+			TotalSpent: key.Usage.TotalSpent,
+			Nonce:      req.Nonce,
+			Timestamp:  req.Timestamp,
+		}
+		riskAssessment = h.riskScorer.Score(c.Request.Context(), txCtx)
+		metrics.SessionKeyRiskScore.Observe(riskAssessment.Score)
+
+		if riskAssessment.Decision == risk.DecisionBlock {
+			metrics.RiskBlocksTotal.Inc()
+			h.logger.Warn("transaction blocked by risk engine",
+				"keyId", keyID, "score", riskAssessment.Score, "factors", riskAssessment.Factors)
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "risk_blocked",
+				"message": "Transaction blocked by risk scoring engine",
+				"risk": gin.H{
+					"score":   riskAssessment.Score,
+					"factors": riskAssessment.Factors,
+				},
+			})
+			return
+		}
+
+		if riskAssessment.Decision == risk.DecisionWarn {
+			h.logger.Info("transaction risk warning",
+				"keyId", keyID, "score", riskAssessment.Score, "factors", riskAssessment.Factors)
+		}
+	}
+
 	// Execute the transfer if wallet is configured
 	var txHash string
 	var executed bool
@@ -498,6 +555,11 @@ func (h *Handler) Transact(c *gin.Context) {
 		return
 	}
 
+	// Record successful transaction in risk engine's sliding window
+	if h.riskScorer != nil {
+		h.riskScorer.RecordTransaction(keyID, req.To, req.Amount)
+	}
+
 	// Check budget thresholds and emit alerts
 	if h.alerts != nil {
 		h.alerts.CheckBudget(c.Request.Context(), key)
@@ -535,6 +597,15 @@ func (h *Handler) Transact(c *gin.Context) {
 			"spentToday":       key.Usage.SpentToday,
 			"lastNonce":        key.Usage.LastNonce,
 		},
+	}
+
+	// Add risk assessment if scorer is present
+	if riskAssessment != nil {
+		response["risk"] = gin.H{
+			"score":    riskAssessment.Score,
+			"decision": riskAssessment.Decision,
+			"factors":  riskAssessment.Factors,
+		}
 	}
 
 	// Add delegation info if this is a delegated key
@@ -709,6 +780,96 @@ func (h *Handler) buildTreeNode(ctx context.Context, key *SessionKey, maxDepth i
 	}
 
 	return node
+}
+
+// RotateSessionKey handles POST /agents/:address/sessions/:keyId/rotate
+// Replaces an active session key with a new one, transferring remaining budget
+// and re-parenting children. The old key remains active for a 5-minute grace period.
+func (h *Handler) RotateSessionKey(c *gin.Context) {
+	address := c.Param("address")
+	keyID := c.Param("keyId")
+
+	var req struct {
+		NewPublicKey string `json:"newPublicKey" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "Invalid request body",
+			"hint":    "Required: newPublicKey",
+		})
+		return
+	}
+
+	// Get the key to verify ownership
+	key, err := h.manager.Get(c.Request.Context(), keyID)
+	if err != nil {
+		if err == ErrKeyNotFound {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":   "not_found",
+				"message": "Session key not found",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Verify ownership
+	if !strings.EqualFold(key.OwnerAddr, address) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "Session key does not belong to this agent",
+		})
+		return
+	}
+
+	// Lock the key chain to prevent concurrent operations
+	var unlockKey func()
+	if key.ParentKeyID != "" {
+		unlockKey = h.manager.LockKeyChain(c.Request.Context(), keyID)
+	} else {
+		unlockKey = h.manager.LockKey(keyID)
+	}
+	defer unlockKey()
+
+	newKey, err := h.manager.RotateKey(c.Request.Context(), keyID, req.NewPublicKey)
+	if err != nil {
+		if ve, ok := err.(*ValidationError); ok {
+			status := http.StatusBadRequest
+			if ve.Code == "key_revoked" || ve.Code == "key_expired" || ve.Code == "key_already_rotated" {
+				status = http.StatusConflict
+			}
+			c.JSON(status, gin.H{
+				"error":   ve.Code,
+				"message": ve.Message,
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "rotation_failed",
+			"message": "Failed to rotate session key",
+		})
+		return
+	}
+
+	// Reload old key to get the grace period end time
+	oldKey, _ := h.manager.Get(c.Request.Context(), keyID)
+	var gracePeriodEnd *time.Time
+	if oldKey != nil {
+		gracePeriodEnd = oldKey.RotationGraceEnd
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"oldKeyId": keyID,
+		"newKey":   newKey,
+		"rotation": gin.H{
+			"oldKeyId":       keyID,
+			"newKeyId":       newKey.ID,
+			"remainingTotal": newKey.Permission.MaxTotal,
+			"gracePeriodEnd": gracePeriodEnd,
+		},
+	})
 }
 
 func calculateRemaining(limit string, spent string) string {

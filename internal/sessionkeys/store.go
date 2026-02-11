@@ -110,6 +110,19 @@ func (s *MemoryStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// ReParentChildren moves all children from oldParentID to newParentID
+func (s *MemoryStore) ReParentChildren(ctx context.Context, oldParentID, newParentID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, key := range s.keys {
+		if key.ParentKeyID == oldParentID {
+			key.ParentKeyID = newParentID
+		}
+	}
+	return nil
+}
+
 // CountActive returns the number of active (non-revoked, non-expired) session keys
 func (s *MemoryStore) CountActive(ctx context.Context) (int64, error) {
 	s.mu.RLock()

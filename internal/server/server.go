@@ -42,6 +42,7 @@ import (
 	"github.com/mbd888/alancoin/internal/realtime"
 	"github.com/mbd888/alancoin/internal/registry"
 	"github.com/mbd888/alancoin/internal/reputation"
+	"github.com/mbd888/alancoin/internal/risk"
 	"github.com/mbd888/alancoin/internal/security"
 	"github.com/mbd888/alancoin/internal/sessionkeys"
 	"github.com/mbd888/alancoin/internal/stakes"
@@ -90,6 +91,7 @@ type Server struct {
 	reputationSigner   *reputation.Signer
 	matviewRefresher   *registry.MatviewRefresher
 	partitionMaint     *registry.PartitionMaintainer
+	riskEngine         *risk.Engine
 	rateLimiter        *ratelimit.Limiter
 	db                 *sql.DB // nil if using in-memory
 	router             *gin.Engine
@@ -287,6 +289,14 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		)
 		s.creditTimer = credit.NewTimer(s.creditService, s.logger)
 		s.logger.Info("credit system enabled")
+
+		// Risk scoring engine (real-time anomaly detection for session key transactions)
+		riskStore := risk.NewPostgresStore(db)
+		if err := riskStore.Migrate(ctx); err != nil {
+			s.logger.Warn("failed to migrate risk store", "error", err)
+		}
+		s.riskEngine = risk.NewEngine(riskStore)
+		s.logger.Info("risk scoring enabled (postgres)")
 	} else {
 		s.registry = registry.NewMemoryStore()
 		s.logger.Info("using in-memory storage (data will not persist)")
@@ -382,6 +392,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		)
 		s.creditTimer = credit.NewTimer(s.creditService, s.logger)
 		s.logger.Info("credit system enabled (in-memory)")
+
+		// Risk scoring engine (in-memory)
+		s.riskEngine = risk.NewEngine(risk.NewMemoryStore())
+		s.logger.Info("risk scoring enabled (in-memory)")
 	}
 
 	// Create wallet if not injected
@@ -705,6 +719,11 @@ func (s *Server) setupRoutes() {
 		sessionHandler = sessionHandler.WithRevenueAccumulator(&revenueAccumulatorAdapter{s.stakesService})
 	}
 
+	// Add risk scoring engine for anomaly detection
+	if s.riskEngine != nil {
+		sessionHandler = sessionHandler.WithRiskScorer(s.riskEngine)
+	}
+
 	// Add budget/expiration alert checker backed by webhooks
 	if s.webhooks != nil {
 		alertChecker := sessionkeys.NewAlertChecker(&webhookAlertNotifier{d: s.webhooks})
@@ -719,6 +738,7 @@ func (s *Server) setupRoutes() {
 		protectedSessions.GET("/agents/:address/sessions/:keyId", auth.RequireOwnership(s.authMgr, "address"), sessionHandler.GetSessionKey)
 		protectedSessions.POST("/agents/:address/sessions", auth.RequireOwnership(s.authMgr, "address"), sessionHandler.CreateSessionKey)
 		protectedSessions.DELETE("/agents/:address/sessions/:keyId", auth.RequireOwnership(s.authMgr, "address"), sessionHandler.RevokeSessionKey)
+		protectedSessions.POST("/agents/:address/sessions/:keyId/rotate", auth.RequireOwnership(s.authMgr, "address"), sessionHandler.RotateSessionKey)
 	}
 
 	// Policy engine routes (CRUD + attach/detach, ownership required)

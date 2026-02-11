@@ -21,6 +21,7 @@ type Store interface {
 	Update(ctx context.Context, key *SessionKey) error
 	Delete(ctx context.Context, id string) error
 	CountActive(ctx context.Context) (int64, error) // Count non-revoked, non-expired keys
+	ReParentChildren(ctx context.Context, oldParentID, newParentID string) error
 }
 
 // ServiceResolver resolves service information for validation
@@ -228,6 +229,98 @@ func (m *Manager) Revoke(ctx context.Context, id string) error {
 	}
 
 	return nil
+}
+
+// RotationGracePeriod is how long the old key remains usable after rotation.
+const RotationGracePeriod = 5 * time.Minute
+
+// RotateKey replaces an active session key with a new one.
+// The new key inherits the remaining budget, same permissions, and the
+// old key's position in the delegation tree. Children are re-parented
+// atomically. The old key enters a grace period before becoming inactive.
+func (m *Manager) RotateKey(ctx context.Context, oldKeyID, newPublicKey string) (*SessionKey, error) {
+	oldKey, err := m.store.Get(ctx, oldKeyID)
+	if err != nil {
+		return nil, ErrKeyNotFound
+	}
+
+	if !oldKey.IsActive() {
+		if oldKey.RevokedAt != nil {
+			return nil, ErrKeyRevoked
+		}
+		return nil, ErrKeyExpired
+	}
+
+	if oldKey.RotatedToID != "" {
+		return nil, ErrKeyAlreadyRotated
+	}
+
+	// Validate new public key format
+	publicKey := strings.ToLower(newPublicKey)
+	if !strings.HasPrefix(publicKey, "0x") || len(publicKey) != 42 {
+		return nil, ErrInvalidPublicKey
+	}
+
+	// Compute remaining budget
+	remaining := ""
+	if oldKey.Permission.MaxTotal != "" {
+		maxTotal, _ := usdc.Parse(oldKey.Permission.MaxTotal)
+		spent, _ := usdc.Parse(oldKey.Usage.TotalSpent)
+		rem := new(big.Int).Sub(maxTotal, spent)
+		if rem.Sign() <= 0 {
+			return nil, &ValidationError{Code: "no_budget", Message: "No remaining budget to rotate"}
+		}
+		remaining = usdc.Format(rem)
+	}
+
+	// Create new key with same permissions but remaining budget
+	graceEnd := time.Now().Add(RotationGracePeriod)
+	newKey := &SessionKey{
+		ID:        idgen.WithPrefix("sk_"),
+		OwnerAddr: oldKey.OwnerAddr,
+		PublicKey: publicKey,
+		CreatedAt: time.Now(),
+		Permission: Permission{
+			MaxPerTransaction:   oldKey.Permission.MaxPerTransaction,
+			MaxPerDay:           oldKey.Permission.MaxPerDay,
+			MaxTotal:            remaining,
+			ExpiresAt:           oldKey.Permission.ExpiresAt,
+			ValidAfter:          oldKey.Permission.ValidAfter,
+			AllowedRecipients:   oldKey.Permission.AllowedRecipients,
+			AllowedServiceTypes: oldKey.Permission.AllowedServiceTypes,
+			AllowAny:            oldKey.Permission.AllowAny,
+			Label:               oldKey.Permission.Label,
+		},
+		Usage: SessionKeyUsage{
+			TotalSpent:   "0",
+			SpentToday:   "0",
+			LastResetDay: time.Now().Format("2006-01-02"),
+			LastNonce:    0,
+		},
+		ParentKeyID:     oldKey.ParentKeyID,
+		Depth:           oldKey.Depth,
+		RootKeyID:       oldKey.RootKeyID,
+		DelegationLabel: oldKey.DelegationLabel,
+		RotatedFromID:   oldKeyID,
+	}
+
+	if err := m.store.Create(ctx, newKey); err != nil {
+		return nil, fmt.Errorf("failed to create rotated key: %w", err)
+	}
+
+	// Update old key with rotation info
+	oldKey.RotatedToID = newKey.ID
+	oldKey.RotationGraceEnd = &graceEnd
+	if err := m.store.Update(ctx, oldKey); err != nil {
+		return nil, fmt.Errorf("failed to mark old key as rotated: %w", err)
+	}
+
+	// Re-parent children atomically
+	if err := m.store.ReParentChildren(ctx, oldKeyID, newKey.ID); err != nil {
+		return nil, fmt.Errorf("failed to re-parent children: %w", err)
+	}
+
+	return newKey, nil
 }
 
 // MaxDelegationDepth is the maximum allowed depth in a delegation chain

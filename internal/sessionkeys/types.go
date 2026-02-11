@@ -54,6 +54,11 @@ type SessionKey struct {
 	Depth           int    `json:"depth"`                     // 0 = root, increments per level
 	RootKeyID       string `json:"rootKeyId,omitempty"`       // Topmost key for fast tree queries
 	DelegationLabel string `json:"delegationLabel,omitempty"` // What task was delegated
+
+	// Key rotation — seamless key replacement without losing budget
+	RotatedFromID    string     `json:"rotatedFromId,omitempty"`    // ID of the key this was rotated from
+	RotatedToID      string     `json:"rotatedToId,omitempty"`      // ID of the key this was rotated to
+	RotationGraceEnd *time.Time `json:"rotationGraceEnd,omitempty"` // Grace period: old key remains active until this time
 }
 
 // SessionKeyUsage tracks how much the key has been used
@@ -169,6 +174,7 @@ var (
 	ErrParentNotActive        = &ValidationError{Code: "parent_not_active", Message: "Parent session key is not active"}
 	ErrChildServiceNotAllowed = &ValidationError{Code: "child_service_not_allowed", Message: "Child service types must be subset of parent's"}
 	ErrAncestorInvalid        = &ValidationError{Code: "ancestor_invalid", Message: "An ancestor key is no longer active"}
+	ErrKeyAlreadyRotated      = &ValidationError{Code: "key_already_rotated", Message: "Session key has already been rotated"}
 )
 
 // IsActive returns true if the session key is currently valid
@@ -187,6 +193,11 @@ func (sk *SessionKey) IsActive() bool {
 
 	// Check valid after
 	if !sk.Permission.ValidAfter.IsZero() && now.Before(sk.Permission.ValidAfter) {
+		return false
+	}
+
+	// Check rotation: if rotated and past grace period, key is inactive
+	if sk.RotatedToID != "" && sk.RotationGraceEnd != nil && now.After(*sk.RotationGraceEnd) {
 		return false
 	}
 

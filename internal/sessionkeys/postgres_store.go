@@ -29,8 +29,9 @@ func (p *PostgresStore) Create(ctx context.Context, key *SessionKey) error {
 			allowed_recipients, allowed_service_types, allow_any, label,
 			transaction_count, total_spent, spent_today, last_used, last_reset_day, last_nonce,
 			revoked_at, created_at,
-			parent_key_id, depth, root_key_id, delegation_label
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+			parent_key_id, depth, root_key_id, delegation_label,
+			rotated_from_id, rotated_to_id, rotation_grace_until
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
 	`,
 		key.ID,
 		strings.ToLower(key.OwnerAddr),
@@ -56,6 +57,9 @@ func (p *PostgresStore) Create(ctx context.Context, key *SessionKey) error {
 		key.Depth,
 		nullString(key.RootKeyID),
 		nullString(key.DelegationLabel),
+		nullString(key.RotatedFromID),
+		nullString(key.RotatedToID),
+		nullTime(timePtr(key.RotationGraceEnd)),
 	)
 
 	if err != nil {
@@ -66,10 +70,11 @@ func (p *PostgresStore) Create(ctx context.Context, key *SessionKey) error {
 
 func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error) {
 	var key SessionKey
-	var validAfter, lastUsed, revokedAt sql.NullTime
+	var validAfter, lastUsed, revokedAt, rotationGraceUntil sql.NullTime
 	var maxPerTx, maxPerDay, maxTotal, label sql.NullString
 	var lastResetDay sql.NullString
 	var parentKeyID, rootKeyID, delegationLabel sql.NullString
+	var rotatedFromID, rotatedToID sql.NullString
 
 	err := p.db.QueryRowContext(ctx, `
 		SELECT
@@ -79,7 +84,8 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error)
 			allowed_recipients, allowed_service_types, allow_any, label,
 			transaction_count, total_spent, spent_today, last_used, last_reset_day, COALESCE(last_nonce, 0),
 			revoked_at, created_at,
-			parent_key_id, COALESCE(depth, 0), root_key_id, delegation_label
+			parent_key_id, COALESCE(depth, 0), root_key_id, delegation_label,
+			rotated_from_id, rotated_to_id, rotation_grace_until
 		FROM session_keys WHERE id = $1
 		AND revoked_at IS NULL AND expires_at > NOW()
 	`, id).Scan(
@@ -107,6 +113,9 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error)
 		&key.Depth,
 		&rootKeyID,
 		&delegationLabel,
+		&rotatedFromID,
+		&rotatedToID,
+		&rotationGraceUntil,
 	)
 
 	if err == sql.ErrNoRows {
@@ -124,6 +133,8 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error)
 	key.ParentKeyID = parentKeyID.String
 	key.RootKeyID = rootKeyID.String
 	key.DelegationLabel = delegationLabel.String
+	key.RotatedFromID = rotatedFromID.String
+	key.RotatedToID = rotatedToID.String
 	if validAfter.Valid {
 		key.Permission.ValidAfter = validAfter.Time
 	}
@@ -135,6 +146,9 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error)
 	}
 	if revokedAt.Valid {
 		key.RevokedAt = &revokedAt.Time
+	}
+	if rotationGraceUntil.Valid {
+		key.RotationGraceEnd = &rotationGraceUntil.Time
 	}
 
 	return &key, nil
@@ -197,8 +211,11 @@ func (p *PostgresStore) Update(ctx context.Context, key *SessionKey) error {
 			last_used = $4,
 			last_reset_day = $5,
 			last_nonce = $6,
-			revoked_at = $7
-		WHERE id = $8
+			revoked_at = $7,
+			rotated_from_id = $8,
+			rotated_to_id = $9,
+			rotation_grace_until = $10
+		WHERE id = $11
 	`,
 		key.Usage.TransactionCount,
 		key.Usage.TotalSpent,
@@ -207,11 +224,25 @@ func (p *PostgresStore) Update(ctx context.Context, key *SessionKey) error {
 		key.Usage.LastResetDay,
 		key.Usage.LastNonce,
 		nullTime(timePtr(key.RevokedAt)),
+		nullString(key.RotatedFromID),
+		nullString(key.RotatedToID),
+		nullTime(timePtr(key.RotationGraceEnd)),
 		key.ID,
 	)
 
 	if err != nil {
 		return fmt.Errorf("failed to update session key: %w", err)
+	}
+	return nil
+}
+
+// ReParentChildren atomically moves all children from oldParentID to newParentID.
+func (p *PostgresStore) ReParentChildren(ctx context.Context, oldParentID, newParentID string) error {
+	_, err := p.db.ExecContext(ctx, `
+		UPDATE session_keys SET parent_key_id = $1 WHERE parent_key_id = $2
+	`, newParentID, oldParentID)
+	if err != nil {
+		return fmt.Errorf("failed to re-parent children: %w", err)
 	}
 	return nil
 }
