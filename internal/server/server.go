@@ -302,7 +302,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.logger.Info("risk scoring enabled (postgres)")
 
 		// Verified agents (performance-guaranteed agents with bonds)
-		verifiedStore := verified.NewMemoryStore() // TODO: PostgresStore when migration is added
+		verifiedStore := verified.NewPostgresStore(db)
+		if err := verifiedStore.Migrate(ctx); err != nil {
+			s.logger.Warn("failed to migrate verified store", "error", err)
+		}
 		verifiedReputationProv := reputation.NewRegistryProvider(s.registry)
 		verifiedScorer := verified.NewScorer()
 		s.verifiedService = verified.NewService(
