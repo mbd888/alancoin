@@ -430,13 +430,9 @@ internal/stakes/
 
 ## Not Yet Built
 
-### P0 — Cross-Stake Revenue Cap Enforcement (Bug)
+### ~~P0 — Cross-Stake Revenue Cap Enforcement (Bug)~~ **FIXED**
 
-`MaxRevenueShareBPS = 5000` (50%) is documented as a constraint, and it's checked when creating a single stake. But it is **not enforced across multiple active stakes for the same agent**. An agent could create 4 stakes at 15% each (60% total) if they're created separately, because each creation only checks whether that individual stake exceeds 50%.
-
-**Fix required:**
-- On `CreateStake()`, query all active stakes for the agent, sum their `revenueShareBps`, and reject if `sum + newStake.revenueShareBps > 5000`.
-- On `AccumulateRevenue()`, the split calculation already handles multiple stakes correctly (iterates all active stakes). The bug is only at creation time.
+Fixed in `stakes/service.go:55-61` — `GetAgentTotalShareBPS()` checks the sum of `revenueShareBps` across all active stakes for the agent at creation time. Rejects if `sum + newStake.revenueShareBps > 5000`.
 
 ### P0 — Compliance / KYC for Revenue Staking
 

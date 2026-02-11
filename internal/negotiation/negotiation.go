@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -36,6 +37,8 @@ var (
 	ErrWithdrawalBlocked   = errors.New("withdrawals blocked during no-withdrawal window")
 	ErrBidAlreadyWithdrawn = errors.New("bid already withdrawn")
 	ErrTemplateNotFound    = errors.New("template not found")
+	ErrTooManyWinners      = errors.New("more winners selected than maxWinners allows")
+	ErrSealedNoCounter     = errors.New("counter-offers not allowed on sealed-bid RFPs")
 )
 
 // RFPStatus represents the state of an RFP.
@@ -100,10 +103,14 @@ type RFP struct {
 	MaxCounterRounds int            `json:"maxCounterRounds"`
 	RequiredBondPct  float64        `json:"requiredBondPct"`  // 0-100, percentage of bid total required as bond
 	NoWithdrawWindow string         `json:"noWithdrawWindow"` // duration before deadline where withdrawals are blocked (e.g., "6h")
+	MaxWinners       int            `json:"maxWinners"`
+	SealedBids       bool           `json:"sealedBids"`
 	ScoringWeights   ScoringWeights `json:"scoringWeights"`
 	Status           RFPStatus      `json:"status"`
 	WinningBidID     string         `json:"winningBidId,omitempty"`
+	WinningBidIDs    []string       `json:"winningBidIds,omitempty"`
 	ContractID       string         `json:"contractId,omitempty"`
+	ContractIDs      []string       `json:"contractIds,omitempty"`
 	BidCount         int            `json:"bidCount"`
 	CancelReason     string         `json:"cancelReason,omitempty"`
 	AwardedAt        *time.Time     `json:"awardedAt,omitempty"`
@@ -158,6 +165,8 @@ type PublishRFPRequest struct {
 	AutoSelect       bool            `json:"autoSelect"`
 	MinReputation    float64         `json:"minReputation"`
 	MaxCounterRounds int             `json:"maxCounterRounds"`
+	MaxWinners       int             `json:"maxWinners"`
+	SealedBids       bool            `json:"sealedBids"`
 	RequiredBondPct  float64         `json:"requiredBondPct"`  // 0-100, percentage of bid total required as bond
 	NoWithdrawWindow string          `json:"noWithdrawWindow"` // duration before deadline where withdrawals are blocked
 	ScoringWeights   *ScoringWeights `json:"scoringWeights"`
@@ -191,6 +200,11 @@ type SelectRequest struct {
 	BidID string `json:"bidId" binding:"required"`
 }
 
+// SelectWinnersRequest contains the parameters for selecting multiple winning bids.
+type SelectWinnersRequest struct {
+	BidIDs []string `json:"bidIds" binding:"required"`
+}
+
 // CancelRequest contains the parameters for cancelling an RFP.
 type CancelRequest struct {
 	Reason string `json:"reason"`
@@ -212,6 +226,8 @@ type RFPTemplate struct {
 	BidDeadline      string          `json:"bidDeadline"`
 	AutoSelect       bool            `json:"autoSelect"`
 	MinReputation    float64         `json:"minReputation"`
+	MaxWinners       int             `json:"maxWinners"`
+	SealedBids       bool            `json:"sealedBids"`
 	MaxCounterRounds int             `json:"maxCounterRounds"`
 	RequiredBondPct  float64         `json:"requiredBondPct"`
 	NoWithdrawWindow string          `json:"noWithdrawWindow,omitempty"`
@@ -233,6 +249,8 @@ type CreateTemplateRequest struct {
 	BidDeadline      string          `json:"bidDeadline" binding:"required"`
 	AutoSelect       bool            `json:"autoSelect"`
 	MinReputation    float64         `json:"minReputation"`
+	MaxWinners       int             `json:"maxWinners"`
+	SealedBids       bool            `json:"sealedBids"`
 	MaxCounterRounds int             `json:"maxCounterRounds"`
 	RequiredBondPct  float64         `json:"requiredBondPct"`
 	NoWithdrawWindow string          `json:"noWithdrawWindow"`
@@ -248,6 +266,7 @@ type PublishFromTemplateRequest struct {
 	BidDeadline   string  `json:"bidDeadline"`   // override
 	Description   string  `json:"description"`   // override
 	MinReputation float64 `json:"minReputation"` // override (0 = use template)
+	MaxWinners    int     `json:"maxWinners"`    // override (0 = use template)
 }
 
 // Analytics contains marketplace health metrics.
@@ -376,4 +395,30 @@ func parseFloat(s string) float64 {
 	var f float64
 	_, _ = fmt.Sscanf(s, "%f", &f)
 	return f
+}
+
+// encodeIDs joins a string slice into a comma-separated string for DB storage.
+func encodeIDs(ids []string) string {
+	return strings.Join(ids, ",")
+}
+
+// decodeIDs splits a comma-separated string into a string slice.
+func decodeIDs(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
+}
+
+// SealBid returns a copy of a bid with sensitive fields redacted for sealed-bid RFPs.
+func SealBid(b *Bid) *Bid {
+	sealed := *b
+	sealed.PricePerCall = ""
+	sealed.TotalBudget = ""
+	sealed.MaxLatencyMs = 0
+	sealed.SuccessRate = 0
+	sealed.Score = 0
+	sealed.SellerPenalty = ""
+	sealed.Message = ""
+	return &sealed
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +76,14 @@ func (s *Service) PublishRFP(ctx context.Context, req PublishRFPRequest) (*RFP, 
 	if req.MaxCounterRounds <= 0 {
 		req.MaxCounterRounds = 3
 	}
+	if req.MaxWinners <= 0 {
+		req.MaxWinners = 1
+	}
+
+	// Sealed bids don't allow counter-offers, so override max counter rounds
+	if req.SealedBids {
+		req.MaxCounterRounds = 0
+	}
 
 	weights := DefaultScoringWeights()
 	if req.ScoringWeights != nil {
@@ -108,6 +117,8 @@ func (s *Service) PublishRFP(ctx context.Context, req PublishRFPRequest) (*RFP, 
 		BidDeadline:      deadline,
 		AutoSelect:       req.AutoSelect,
 		MinReputation:    req.MinReputation,
+		MaxWinners:       req.MaxWinners,
+		SealedBids:       req.SealedBids,
 		MaxCounterRounds: req.MaxCounterRounds,
 		RequiredBondPct:  req.RequiredBondPct,
 		NoWithdrawWindow: req.NoWithdrawWindow,
@@ -265,6 +276,10 @@ func (s *Service) Counter(ctx context.Context, rfpID, bidID, callerAddr string, 
 		return nil, ErrInvalidStatus
 	}
 
+	if rfp.SealedBids {
+		return nil, ErrSealedNoCounter
+	}
+
 	oldBid, err := s.store.GetBid(ctx, bidID)
 	if err != nil {
 		return nil, err
@@ -380,7 +395,62 @@ func (s *Service) SelectWinner(ctx context.Context, rfpID, bidID, callerAddr str
 	return s.awardBid(ctx, rfp, winningBid)
 }
 
-// AutoSelect automatically selects the highest-scored bid for an RFP.
+// SelectWinners selects multiple winning bids for a multi-winner RFP.
+func (s *Service) SelectWinners(ctx context.Context, rfpID string, bidIDs []string, callerAddr string) (*RFP, []*Bid, error) {
+	mu := s.rfpLock(rfpID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	rfp, err := s.store.GetRFP(ctx, rfpID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if rfp.IsTerminal() {
+		return nil, nil, ErrAlreadyAwarded
+	}
+
+	if rfp.Status != RFPStatusOpen && rfp.Status != RFPStatusSelecting {
+		return nil, nil, ErrInvalidStatus
+	}
+
+	caller := strings.ToLower(callerAddr)
+	if caller != rfp.BuyerAddr {
+		return nil, nil, ErrUnauthorized
+	}
+
+	maxWinners := rfp.MaxWinners
+	if maxWinners <= 0 {
+		maxWinners = 1
+	}
+	if len(bidIDs) > maxWinners {
+		return nil, nil, ErrTooManyWinners
+	}
+
+	seen := make(map[string]bool, len(bidIDs))
+	var winners []*Bid
+	for _, bidID := range bidIDs {
+		if seen[bidID] {
+			continue // deduplicate
+		}
+		seen[bidID] = true
+
+		bid, err := s.store.GetBid(ctx, bidID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if bid.RFPID != rfpID || bid.Status != BidStatusPending {
+			return nil, nil, ErrInvalidStatus
+		}
+		winners = append(winners, bid)
+	}
+
+	return s.awardBids(ctx, rfp, winners)
+}
+
+// AutoSelect automatically selects the highest-scored bid(s) for an RFP.
+// For multi-winner RFPs, it selects the top N bids (up to MaxWinners).
+// Returns the first winner in the *Bid return for backwards compatibility.
 func (s *Service) AutoSelect(ctx context.Context, rfpID string) (*RFP, *Bid, error) {
 	mu := s.rfpLock(rfpID)
 	mu.Lock()
@@ -405,8 +475,6 @@ func (s *Service) AutoSelect(ctx context.Context, rfpID string) (*RFP, *Bid, err
 	}
 
 	// Recompute scores with fresh reputation data
-	var bestBid *Bid
-	bestScore := -1.0
 	for _, bid := range bids {
 		repScore := 0.0
 		if s.reputation != nil {
@@ -416,32 +484,81 @@ func (s *Service) AutoSelect(ctx context.Context, rfpID string) (*RFP, *Bid, err
 			}
 		}
 		bid.Score = ScoreBid(bid, rfp, repScore)
-		if bid.Score > bestScore {
-			bestScore = bid.Score
-			bestBid = bid
-		}
 	}
 
-	return s.awardBid(ctx, rfp, bestBid)
+	// Sort by score descending (already sorted by ListActiveBidsByRFP but scores were recomputed)
+	sort.Slice(bids, func(i, j int) bool {
+		return bids[i].Score > bids[j].Score
+	})
+
+	// Select top-N winners
+	maxWinners := rfp.MaxWinners
+	if maxWinners <= 0 {
+		maxWinners = 1
+	}
+	if maxWinners > len(bids) {
+		maxWinners = len(bids)
+	}
+
+	winners := bids[:maxWinners]
+	rfp, awarded, err := s.awardBids(ctx, rfp, winners)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Return first winner for backwards compat
+	var firstWinner *Bid
+	if len(awarded) > 0 {
+		firstWinner = awarded[0]
+	}
+	return rfp, firstWinner, nil
 }
 
-// awardBid awards the RFP to a bid. Must be called under rfpLock.
+// awardBid awards the RFP to a single bid. Must be called under rfpLock.
 func (s *Service) awardBid(ctx context.Context, rfp *RFP, bid *Bid) (*RFP, *Bid, error) {
+	updatedRFP, _, err := s.awardBids(ctx, rfp, []*Bid{bid})
+	if err != nil {
+		return nil, nil, err
+	}
+	return updatedRFP, bid, nil
+}
+
+// awardBids awards the RFP to one or more bids. Must be called under rfpLock.
+func (s *Service) awardBids(ctx context.Context, rfp *RFP, winners []*Bid) (*RFP, []*Bid, error) {
 	now := time.Now()
 
-	// Accept the winning bid — release the winner's bond (contract takes over)
-	bid.Status = BidStatusAccepted
-	bid.UpdatedAt = now
-	s.releaseBond(ctx, bid)
-	if err := s.store.UpdateBid(ctx, bid); err != nil {
-		return nil, nil, fmt.Errorf("failed to accept winning bid: %w", err)
+	winnerIDs := make(map[string]bool, len(winners))
+	var winningBidIDs []string
+	var contractIDs []string
+
+	for _, bid := range winners {
+		winnerIDs[bid.ID] = true
+
+		// Accept the winning bid — release the winner's bond (contract takes over)
+		bid.Status = BidStatusAccepted
+		bid.UpdatedAt = now
+		s.releaseBond(ctx, bid)
+		if err := s.store.UpdateBid(ctx, bid); err != nil {
+			return nil, nil, fmt.Errorf("failed to accept winning bid %s: %w", bid.ID, err)
+		}
+
+		winningBidIDs = append(winningBidIDs, bid.ID)
+
+		// Form binding contract if ContractFormer is configured
+		if s.contracts != nil {
+			cid, err := s.contracts.FormContract(ctx, rfp, bid)
+			if err != nil {
+				log.Printf("WARNING: failed to form contract for RFP %s bid %s: %v", rfp.ID, bid.ID, err)
+			} else {
+				contractIDs = append(contractIDs, cid)
+			}
+		}
 	}
 
 	// Reject all other pending bids and release their bonds
 	allBids, err := s.store.ListActiveBidsByRFP(ctx, rfp.ID)
 	if err == nil {
 		for _, b := range allBids {
-			if b.ID != bid.ID {
+			if !winnerIDs[b.ID] {
 				b.Status = BidStatusRejected
 				b.UpdatedAt = now
 				s.releaseBond(ctx, b)
@@ -450,21 +567,17 @@ func (s *Service) awardBid(ctx context.Context, rfp *RFP, bid *Bid) (*RFP, *Bid,
 		}
 	}
 
-	// Form binding contract if ContractFormer is configured
-	var contractID string
-	if s.contracts != nil {
-		cid, err := s.contracts.FormContract(ctx, rfp, bid)
-		if err != nil {
-			log.Printf("WARNING: failed to form contract for RFP %s: %v", rfp.ID, err)
-		} else {
-			contractID = cid
-		}
-	}
-
 	// Update RFP
 	rfp.Status = RFPStatusAwarded
-	rfp.WinningBidID = bid.ID
-	rfp.ContractID = contractID
+	rfp.WinningBidIDs = winningBidIDs
+	rfp.ContractIDs = contractIDs
+	// Backwards-compat: first winner
+	if len(winningBidIDs) > 0 {
+		rfp.WinningBidID = winningBidIDs[0]
+	}
+	if len(contractIDs) > 0 {
+		rfp.ContractID = contractIDs[0]
+	}
 	rfp.AwardedAt = &now
 	rfp.UpdatedAt = now
 
@@ -474,7 +587,7 @@ func (s *Service) awardBid(ctx context.Context, rfp *RFP, bid *Bid) (*RFP, *Bid,
 
 	metrics.RFPsAwardedTotal.Inc()
 	metrics.TimeToAwardSeconds.Observe(now.Sub(rfp.CreatedAt).Seconds())
-	return rfp, bid, nil
+	return rfp, winners, nil
 }
 
 // CancelRFP cancels an open RFP and rejects all pending bids.
@@ -651,6 +764,34 @@ func (s *Service) ListBidsByRFP(ctx context.Context, rfpID string, limit int) ([
 	return s.store.ListBidsByRFP(ctx, rfpID, limit)
 }
 
+// ListBidsByRFPPublic returns bids for an RFP, redacting sensitive fields for sealed-bid RFPs
+// that are still in the bidding phase (status=open).
+func (s *Service) ListBidsByRFPPublic(ctx context.Context, rfpID string, limit int) ([]*Bid, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	bids, err := s.store.ListBidsByRFP(ctx, rfpID, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	rfp, err := s.store.GetRFP(ctx, rfpID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Sealed bids: redact during open phase
+	if rfp.SealedBids && rfp.Status == RFPStatusOpen {
+		sealed := make([]*Bid, len(bids))
+		for i, b := range bids {
+			sealed[i] = SealBid(b)
+		}
+		return sealed, nil
+	}
+
+	return bids, nil
+}
+
 // ListBidsBySeller returns all bids by a seller.
 func (s *Service) ListBidsBySeller(ctx context.Context, sellerAddr string, limit int) ([]*Bid, error) {
 	if limit <= 0 {
@@ -681,6 +822,8 @@ func (s *Service) CreateTemplate(ctx context.Context, ownerAddr string, req Crea
 		BidDeadline:      req.BidDeadline,
 		AutoSelect:       req.AutoSelect,
 		MinReputation:    req.MinReputation,
+		MaxWinners:       req.MaxWinners,
+		SealedBids:       req.SealedBids,
 		MaxCounterRounds: req.MaxCounterRounds,
 		RequiredBondPct:  req.RequiredBondPct,
 		NoWithdrawWindow: req.NoWithdrawWindow,
@@ -740,6 +883,8 @@ func (s *Service) PublishFromTemplate(ctx context.Context, templateID string, re
 		BidDeadline:      tmpl.BidDeadline,
 		AutoSelect:       tmpl.AutoSelect,
 		MinReputation:    tmpl.MinReputation,
+		MaxWinners:       tmpl.MaxWinners,
+		SealedBids:       tmpl.SealedBids,
 		MaxCounterRounds: tmpl.MaxCounterRounds,
 		RequiredBondPct:  tmpl.RequiredBondPct,
 		NoWithdrawWindow: tmpl.NoWithdrawWindow,
@@ -764,6 +909,9 @@ func (s *Service) PublishFromTemplate(ctx context.Context, templateID string, re
 	}
 	if req.MinReputation > 0 {
 		rfpReq.MinReputation = req.MinReputation
+	}
+	if req.MaxWinners > 0 {
+		rfpReq.MaxWinners = req.MaxWinners
 	}
 
 	return s.PublishRFP(ctx, rfpReq)

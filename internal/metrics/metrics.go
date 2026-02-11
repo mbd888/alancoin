@@ -172,6 +172,80 @@ var (
 		Name:      "bonds_forfeited_total",
 		Help:      "Total bid bonds forfeited due to withdrawal penalties.",
 	})
+
+	// --- Escrow metrics (extended) ---
+
+	EscrowCreatedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "escrow_created_total",
+		Help:      "Total escrows created.",
+	})
+
+	EscrowConfirmedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "escrow_confirmed_total",
+		Help:      "Total escrows confirmed (funds released to seller).",
+	})
+
+	EscrowDisputedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "escrow_disputed_total",
+		Help:      "Total escrows disputed (funds refunded to buyer).",
+	})
+
+	EscrowAutoReleasedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "escrow_auto_released_total",
+		Help:      "Total escrows auto-released after timeout.",
+	})
+
+	EscrowDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "alancoin",
+		Name:      "escrow_duration_seconds",
+		Help:      "Time from escrow creation to resolution in seconds.",
+		Buckets:   []float64{10, 30, 60, 120, 300, 600, 1800, 3600, 86400},
+	})
+
+	// --- Stakes metrics ---
+
+	StakesRevenueAccumulatedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "stakes_revenue_accumulated_total",
+		Help:      "Total revenue accumulated for stake distributions.",
+	})
+
+	StakesDistributionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "stakes_distributions_total",
+		Help:      "Total stake distribution cycles completed.",
+	})
+
+	StakesDistributionFailuresTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "stakes_distribution_failures_total",
+		Help:      "Total stake distribution failures.",
+	})
+
+	StakesUndistributedBalance = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "alancoin",
+		Name:      "stakes_undistributed_balance",
+		Help:      "Current undistributed revenue across all stakes.",
+	})
+
+	// --- Session key metrics (extended) ---
+
+	SessionKeyTransactionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "sessionkey_transactions_total",
+		Help:      "Total session key transactions processed.",
+	})
+
+	SessionKeyRiskScore = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "alancoin",
+		Name:      "sessionkey_risk_score",
+		Help:      "Distribution of session key transaction risk scores.",
+		Buckets:   []float64{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
+	})
 )
 
 func init() {
@@ -197,6 +271,17 @@ func init() {
 		TimeToAwardSeconds,
 		BidsWithdrawnTotal,
 		BondsForfeitedTotal,
+		EscrowCreatedTotal,
+		EscrowConfirmedTotal,
+		EscrowDisputedTotal,
+		EscrowAutoReleasedTotal,
+		EscrowDuration,
+		StakesRevenueAccumulatedTotal,
+		StakesDistributionsTotal,
+		StakesDistributionFailuresTotal,
+		StakesUndistributedBalance,
+		SessionKeyTransactionsTotal,
+		SessionKeyRiskScore,
 	)
 }
 

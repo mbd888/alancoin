@@ -40,6 +40,7 @@ func (h *Handler) RegisterProtectedRoutes(r *gin.RouterGroup) {
 	r.POST("/rfps/:id/bids/:bidId/counter", h.CounterBid)
 	r.POST("/rfps/:id/bids/:bidId/withdraw", h.WithdrawBid)
 	r.POST("/rfps/:id/select", h.SelectWinner)
+	r.POST("/rfps/:id/select-winners", h.SelectWinners)
 	r.POST("/rfps/:id/cancel", h.CancelRFP)
 
 	// Templates
@@ -126,11 +127,12 @@ func (h *Handler) ListRFPs(c *gin.Context) {
 }
 
 // ListBids handles GET /v1/rfps/:id/bids
+// For sealed-bid RFPs still in the open phase, sensitive bid fields are redacted.
 func (h *Handler) ListBids(c *gin.Context) {
 	rfpID := c.Param("id")
 	limit := parseLimit(c.Query("limit"), 50, 200)
 
-	bids, err := h.service.ListBidsByRFP(c.Request.Context(), rfpID, limit)
+	bids, err := h.service.ListBidsByRFPPublic(c.Request.Context(), rfpID, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
@@ -323,6 +325,9 @@ func (h *Handler) CounterBid(c *gin.Context) {
 		case errors.Is(err, ErrMaxCounterRounds):
 			status = http.StatusConflict
 			code = "max_rounds"
+		case errors.Is(err, ErrSealedNoCounter):
+			status = http.StatusConflict
+			code = "sealed_no_counter"
 		}
 		c.JSON(status, gin.H{"error": code, "message": err.Error()})
 		return
@@ -374,6 +379,55 @@ func (h *Handler) SelectWinner(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"rfp":        rfp,
 		"winningBid": bid,
+	})
+}
+
+// SelectWinners handles POST /v1/rfps/:id/select-winners (multi-winner RFPs)
+func (h *Handler) SelectWinners(c *gin.Context) {
+	rfpID := c.Param("id")
+
+	var req SelectWinnersRequest
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.BidIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "Invalid request body: bidIds array is required",
+		})
+		return
+	}
+
+	callerAddr := c.GetString("authAgentAddr")
+
+	rfp, winners, err := h.service.SelectWinners(c.Request.Context(), rfpID, req.BidIDs, callerAddr)
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := "select_failed"
+		switch {
+		case errors.Is(err, ErrRFPNotFound):
+			status = http.StatusNotFound
+			code = "rfp_not_found"
+		case errors.Is(err, ErrBidNotFound):
+			status = http.StatusNotFound
+			code = "bid_not_found"
+		case errors.Is(err, ErrAlreadyAwarded):
+			status = http.StatusConflict
+			code = "already_awarded"
+		case errors.Is(err, ErrInvalidStatus):
+			status = http.StatusConflict
+			code = "invalid_status"
+		case errors.Is(err, ErrUnauthorized):
+			status = http.StatusForbidden
+			code = "unauthorized"
+		case errors.Is(err, ErrTooManyWinners):
+			status = http.StatusBadRequest
+			code = "too_many_winners"
+		}
+		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"rfp":         rfp,
+		"winningBids": winners,
 	})
 }
 

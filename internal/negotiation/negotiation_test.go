@@ -1876,3 +1876,571 @@ func TestDeleteTemplate_Unauthorized(t *testing.T) {
 		t.Errorf("expected ErrUnauthorized, got %v", err)
 	}
 }
+
+// --- Multi-winner RFP tests ---
+
+func publishMultiWinnerRFP(t *testing.T, svc *Service, maxWinners int) *RFP {
+	t.Helper()
+	rfp, err := svc.PublishRFP(context.Background(), PublishRFPRequest{
+		BuyerAddr:   "0xBuyer",
+		ServiceType: "translation",
+		Description: "Multi-winner translation",
+		MinBudget:   "0.50",
+		MaxBudget:   "1.00",
+		Duration:    "7d",
+		BidDeadline: "24h",
+		MaxWinners:  maxWinners,
+	})
+	if err != nil {
+		t.Fatalf("failed to publish multi-winner RFP: %v", err)
+	}
+	return rfp
+}
+
+func TestPublishRFP_MaxWinnersDefault(t *testing.T) {
+	svc, _, _ := newTestService()
+	rfp := publishTestRFP(t, svc)
+
+	if rfp.MaxWinners != 1 {
+		t.Errorf("expected default maxWinners=1, got %d", rfp.MaxWinners)
+	}
+}
+
+func TestPublishRFP_MaxWinnersSet(t *testing.T) {
+	svc, _, _ := newTestService()
+	rfp := publishMultiWinnerRFP(t, svc, 3)
+
+	if rfp.MaxWinners != 3 {
+		t.Errorf("expected maxWinners=3, got %d", rfp.MaxWinners)
+	}
+}
+
+func TestSelectWinners_MultiWinner(t *testing.T) {
+	svc, _, _ := newTestService()
+	cf := &mockContractFormer{}
+	svc.WithContractFormer(cf)
+
+	rfp := publishMultiWinnerRFP(t, svc, 3)
+
+	bid1, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+	bid2, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller2",
+		PricePerCall: "0.006",
+		TotalBudget:  "0.80",
+		Duration:     "7d",
+	})
+	bid3, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller3",
+		PricePerCall: "0.007",
+		TotalBudget:  "0.85",
+		Duration:     "7d",
+	})
+
+	// Select 2 of 3 as winners
+	updatedRFP, winners, err := svc.SelectWinners(context.Background(), rfp.ID,
+		[]string{bid1.ID, bid2.ID}, "0xBuyer")
+	if err != nil {
+		t.Fatalf("select winners failed: %v", err)
+	}
+
+	if updatedRFP.Status != RFPStatusAwarded {
+		t.Errorf("expected status awarded, got %s", updatedRFP.Status)
+	}
+	if len(updatedRFP.WinningBidIDs) != 2 {
+		t.Errorf("expected 2 winning bid IDs, got %d", len(updatedRFP.WinningBidIDs))
+	}
+	if updatedRFP.WinningBidID != bid1.ID {
+		t.Errorf("expected WinningBidID (compat) to be first winner, got %s", updatedRFP.WinningBidID)
+	}
+	if len(winners) != 2 {
+		t.Errorf("expected 2 winners, got %d", len(winners))
+	}
+	if len(cf.calls) != 2 {
+		t.Errorf("expected 2 contract formations, got %d", len(cf.calls))
+	}
+	if len(updatedRFP.ContractIDs) != 2 {
+		t.Errorf("expected 2 contract IDs, got %d", len(updatedRFP.ContractIDs))
+	}
+
+	// Loser bid should be rejected
+	loser, _ := svc.GetBid(context.Background(), bid3.ID)
+	if loser.Status != BidStatusRejected {
+		t.Errorf("expected loser bid rejected, got %s", loser.Status)
+	}
+}
+
+func TestSelectWinners_TooManyWinners(t *testing.T) {
+	svc, _, _ := newTestService()
+	rfp := publishMultiWinnerRFP(t, svc, 2) // max 2 winners
+
+	bid1, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller1", PricePerCall: "0.005", TotalBudget: "0.75", Duration: "7d",
+	})
+	bid2, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller2", PricePerCall: "0.006", TotalBudget: "0.80", Duration: "7d",
+	})
+	bid3, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller3", PricePerCall: "0.007", TotalBudget: "0.85", Duration: "7d",
+	})
+
+	// Try to select 3 when max is 2
+	_, _, err := svc.SelectWinners(context.Background(), rfp.ID,
+		[]string{bid1.ID, bid2.ID, bid3.ID}, "0xBuyer")
+	if !errors.Is(err, ErrTooManyWinners) {
+		t.Errorf("expected ErrTooManyWinners, got %v", err)
+	}
+}
+
+func TestAutoSelect_MultiWinner(t *testing.T) {
+	svc, store, _ := newTestService()
+	cf := &mockContractFormer{}
+	svc.WithContractFormer(cf)
+
+	rfp, _ := svc.PublishRFP(context.Background(), PublishRFPRequest{
+		BuyerAddr:   "0xBuyer",
+		ServiceType: "translation",
+		MinBudget:   "0.50",
+		MaxBudget:   "1.00",
+		Duration:    "7d",
+		BidDeadline: "24h",
+		AutoSelect:  true,
+		MaxWinners:  2,
+	})
+
+	// seller1 rep=80, seller2 rep=60, seller3 rep=40
+	svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller1", PricePerCall: "0.005", TotalBudget: "0.75",
+		Duration: "7d", SuccessRate: 98,
+	})
+	svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller2", PricePerCall: "0.004", TotalBudget: "0.70",
+		Duration: "7d", SuccessRate: 95,
+	})
+	svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller3", PricePerCall: "0.003", TotalBudget: "0.60",
+		Duration: "7d", SuccessRate: 90,
+	})
+
+	// Move deadline to past for auto-select
+	store.mu.Lock()
+	store.rfps[rfp.ID].BidDeadline = time.Now().Add(-1 * time.Hour)
+	store.mu.Unlock()
+
+	svc.CheckExpired(context.Background())
+
+	updated, _ := svc.Get(context.Background(), rfp.ID)
+	if updated.Status != RFPStatusAwarded {
+		t.Fatalf("expected auto-selected to awarded, got %s", updated.Status)
+	}
+	if len(updated.WinningBidIDs) != 2 {
+		t.Errorf("expected 2 winners, got %d", len(updated.WinningBidIDs))
+	}
+	if len(cf.calls) != 2 {
+		t.Errorf("expected 2 contracts formed, got %d", len(cf.calls))
+	}
+}
+
+func TestSelectWinners_Unauthorized(t *testing.T) {
+	svc, _, _ := newTestService()
+	rfp := publishMultiWinnerRFP(t, svc, 2)
+
+	bid1, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller1", PricePerCall: "0.005", TotalBudget: "0.75", Duration: "7d",
+	})
+
+	_, _, err := svc.SelectWinners(context.Background(), rfp.ID,
+		[]string{bid1.ID}, "0xNotBuyer")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestSelectWinners_BondsReleased(t *testing.T) {
+	svc, _, _ := newTestService()
+	ml := newMockLedger()
+	svc.WithLedger(ml)
+
+	rfp, _ := svc.PublishRFP(context.Background(), PublishRFPRequest{
+		BuyerAddr:       "0xBuyer",
+		ServiceType:     "translation",
+		MinBudget:       "0.50",
+		MaxBudget:       "1.00",
+		Duration:        "7d",
+		BidDeadline:     "24h",
+		MaxWinners:      2,
+		RequiredBondPct: 10,
+	})
+
+	bid1, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller1", PricePerCall: "0.005", TotalBudget: "0.75", Duration: "7d",
+	})
+	bid2, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller2", PricePerCall: "0.006", TotalBudget: "0.80", Duration: "7d",
+	})
+	svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller3", PricePerCall: "0.007", TotalBudget: "0.85", Duration: "7d",
+	})
+
+	if ml.heldCount() != 3 {
+		t.Fatalf("expected 3 bonds before award, got %d", ml.heldCount())
+	}
+
+	_, _, err := svc.SelectWinners(context.Background(), rfp.ID,
+		[]string{bid1.ID, bid2.ID}, "0xBuyer")
+	if err != nil {
+		t.Fatalf("select winners failed: %v", err)
+	}
+
+	// All bonds should be released (winners + losers)
+	if ml.heldCount() != 0 {
+		t.Errorf("expected 0 held bonds after multi-winner award, got %d", ml.heldCount())
+	}
+}
+
+// --- Sealed Bid tests ---
+
+func publishSealedRFP(t *testing.T, svc *Service) *RFP {
+	t.Helper()
+	rfp, err := svc.PublishRFP(context.Background(), PublishRFPRequest{
+		BuyerAddr:   "0xBuyer",
+		ServiceType: "translation",
+		Description: "Sealed bid translation",
+		MinBudget:   "0.50",
+		MaxBudget:   "1.00",
+		Duration:    "7d",
+		BidDeadline: "24h",
+		SealedBids:  true,
+	})
+	if err != nil {
+		t.Fatalf("failed to publish sealed RFP: %v", err)
+	}
+	return rfp
+}
+
+func TestPublishRFP_Sealed(t *testing.T) {
+	svc, _, _ := newTestService()
+	rfp := publishSealedRFP(t, svc)
+
+	if !rfp.SealedBids {
+		t.Error("expected sealedBids=true")
+	}
+	// Sealed bids should force maxCounterRounds to 0
+	if rfp.MaxCounterRounds != 0 {
+		t.Errorf("expected maxCounterRounds=0 for sealed RFP, got %d", rfp.MaxCounterRounds)
+	}
+}
+
+func TestSealedBids_RedactedDuringOpen(t *testing.T) {
+	svc, _, _ := newTestService()
+	rfp := publishSealedRFP(t, svc)
+
+	svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+		SuccessRate:  98,
+		Message:      "secret strategy",
+	})
+
+	// Public listing should be redacted while open
+	bids, err := svc.ListBidsByRFPPublic(context.Background(), rfp.ID, 50)
+	if err != nil {
+		t.Fatalf("list bids failed: %v", err)
+	}
+	if len(bids) != 1 {
+		t.Fatalf("expected 1 bid, got %d", len(bids))
+	}
+
+	b := bids[0]
+	if b.PricePerCall != "" {
+		t.Errorf("expected redacted pricePerCall, got %s", b.PricePerCall)
+	}
+	if b.TotalBudget != "" {
+		t.Errorf("expected redacted totalBudget, got %s", b.TotalBudget)
+	}
+	if b.Score != 0 {
+		t.Errorf("expected redacted score, got %f", b.Score)
+	}
+	if b.SuccessRate != 0 {
+		t.Errorf("expected redacted successRate, got %f", b.SuccessRate)
+	}
+	if b.Message != "" {
+		t.Errorf("expected redacted message, got %s", b.Message)
+	}
+	// Seller addr should still be visible
+	if b.SellerAddr != "0xseller1" {
+		t.Errorf("expected seller addr visible, got %s", b.SellerAddr)
+	}
+}
+
+func TestSealedBids_RevealedAfterDeadline(t *testing.T) {
+	svc, store, _ := newTestService()
+	rfp := publishSealedRFP(t, svc)
+
+	svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+		SuccessRate:  98,
+	})
+
+	// Move to selecting state (simulates post-deadline)
+	store.mu.Lock()
+	store.rfps[rfp.ID].Status = RFPStatusSelecting
+	store.mu.Unlock()
+
+	// Public listing should reveal bids in selecting state
+	bids, err := svc.ListBidsByRFPPublic(context.Background(), rfp.ID, 50)
+	if err != nil {
+		t.Fatalf("list bids failed: %v", err)
+	}
+	if len(bids) != 1 {
+		t.Fatalf("expected 1 bid, got %d", len(bids))
+	}
+
+	b := bids[0]
+	if b.PricePerCall != "0.005" {
+		t.Errorf("expected revealed pricePerCall=0.005, got %s", b.PricePerCall)
+	}
+	if b.TotalBudget != "0.75" {
+		t.Errorf("expected revealed totalBudget=0.75, got %s", b.TotalBudget)
+	}
+}
+
+func TestSealedBids_NoCounter(t *testing.T) {
+	svc, _, _ := newTestService()
+	rfp := publishSealedRFP(t, svc)
+
+	bid, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+
+	// Counter-offer should be blocked on sealed RFP
+	_, err := svc.Counter(context.Background(), rfp.ID, bid.ID, "0xBuyer", CounterRequest{
+		PricePerCall: "0.004",
+	})
+	if !errors.Is(err, ErrSealedNoCounter) {
+		t.Errorf("expected ErrSealedNoCounter, got %v", err)
+	}
+}
+
+func TestSealedBids_AutoSelect(t *testing.T) {
+	svc, store, _ := newTestService()
+	cf := &mockContractFormer{}
+	svc.WithContractFormer(cf)
+
+	rfp, _ := svc.PublishRFP(context.Background(), PublishRFPRequest{
+		BuyerAddr:   "0xBuyer",
+		ServiceType: "translation",
+		MinBudget:   "0.50",
+		MaxBudget:   "1.00",
+		Duration:    "7d",
+		BidDeadline: "24h",
+		AutoSelect:  true,
+		SealedBids:  true,
+	})
+
+	// Bids placed but hidden
+	svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller1", PricePerCall: "0.005", TotalBudget: "0.75",
+		Duration: "7d", SuccessRate: 98,
+	})
+	svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller2", PricePerCall: "0.004", TotalBudget: "0.70",
+		Duration: "7d", SuccessRate: 95,
+	})
+
+	// Move deadline to past
+	store.mu.Lock()
+	store.rfps[rfp.ID].BidDeadline = time.Now().Add(-1 * time.Hour)
+	store.mu.Unlock()
+
+	svc.CheckExpired(context.Background())
+
+	updated, _ := svc.Get(context.Background(), rfp.ID)
+	if updated.Status != RFPStatusAwarded {
+		t.Errorf("expected sealed auto-select to award, got %s", updated.Status)
+	}
+	// Seller1 should win (higher reputation 80 vs 60)
+	if updated.WinningBidID == "" {
+		t.Error("expected winning bid ID to be set")
+	}
+}
+
+func TestSealedBids_NonPublicListNotRedacted(t *testing.T) {
+	svc, _, _ := newTestService()
+	rfp := publishSealedRFP(t, svc)
+
+	svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+
+	// Internal listing (not public) should NOT be redacted
+	bids, err := svc.ListBidsByRFP(context.Background(), rfp.ID, 50)
+	if err != nil {
+		t.Fatalf("list bids failed: %v", err)
+	}
+	if len(bids) != 1 {
+		t.Fatalf("expected 1 bid, got %d", len(bids))
+	}
+
+	b := bids[0]
+	if b.PricePerCall != "0.005" {
+		t.Errorf("internal list should not redact: expected 0.005, got %s", b.PricePerCall)
+	}
+	if b.TotalBudget != "0.75" {
+		t.Errorf("internal list should not redact: expected 0.75, got %s", b.TotalBudget)
+	}
+}
+
+// --- Combined: sealed + multi-winner ---
+
+func TestSealedMultiWinner(t *testing.T) {
+	svc, store, _ := newTestService()
+	cf := &mockContractFormer{}
+	svc.WithContractFormer(cf)
+
+	rfp, _ := svc.PublishRFP(context.Background(), PublishRFPRequest{
+		BuyerAddr:   "0xBuyer",
+		ServiceType: "translation",
+		MinBudget:   "0.50",
+		MaxBudget:   "1.00",
+		Duration:    "7d",
+		BidDeadline: "24h",
+		AutoSelect:  true,
+		MaxWinners:  2,
+		SealedBids:  true,
+	})
+
+	svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller1", PricePerCall: "0.005", TotalBudget: "0.75",
+		Duration: "7d", SuccessRate: 98,
+	})
+	svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller2", PricePerCall: "0.004", TotalBudget: "0.70",
+		Duration: "7d", SuccessRate: 95,
+	})
+	svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr: "0xSeller3", PricePerCall: "0.003", TotalBudget: "0.60",
+		Duration: "7d", SuccessRate: 90,
+	})
+
+	// Bids should be sealed while open
+	bids, _ := svc.ListBidsByRFPPublic(context.Background(), rfp.ID, 50)
+	for _, b := range bids {
+		if b.PricePerCall != "" {
+			t.Errorf("expected sealed bid, got pricePerCall=%s", b.PricePerCall)
+		}
+	}
+
+	// Auto-select after deadline
+	store.mu.Lock()
+	store.rfps[rfp.ID].BidDeadline = time.Now().Add(-1 * time.Hour)
+	store.mu.Unlock()
+
+	svc.CheckExpired(context.Background())
+
+	updated, _ := svc.Get(context.Background(), rfp.ID)
+	if updated.Status != RFPStatusAwarded {
+		t.Fatalf("expected awarded, got %s", updated.Status)
+	}
+	if len(updated.WinningBidIDs) != 2 {
+		t.Errorf("expected 2 winners, got %d", len(updated.WinningBidIDs))
+	}
+
+	// After award, bids should be revealed
+	revealedBids, _ := svc.ListBidsByRFPPublic(context.Background(), rfp.ID, 50)
+	for _, b := range revealedBids {
+		if b.Status == BidStatusAccepted && b.PricePerCall == "" {
+			t.Error("expected accepted bid to be revealed")
+		}
+	}
+}
+
+// --- Encode/Decode helpers tests ---
+
+func TestEncodeDecodeIDs(t *testing.T) {
+	ids := []string{"bid_1", "bid_2", "bid_3"}
+	encoded := encodeIDs(ids)
+	if encoded != "bid_1,bid_2,bid_3" {
+		t.Errorf("expected bid_1,bid_2,bid_3, got %s", encoded)
+	}
+	decoded := decodeIDs(encoded)
+	if len(decoded) != 3 || decoded[0] != "bid_1" || decoded[2] != "bid_3" {
+		t.Errorf("decode mismatch: %v", decoded)
+	}
+
+	// Empty
+	if decodeIDs("") != nil {
+		t.Error("expected nil for empty string")
+	}
+	if encodeIDs(nil) != "" {
+		t.Error("expected empty string for nil slice")
+	}
+}
+
+func TestSealBid(t *testing.T) {
+	bid := &Bid{
+		ID:           "bid_123",
+		RFPID:        "rfp_456",
+		SellerAddr:   "0xseller",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		MaxLatencyMs: 100,
+		SuccessRate:  98,
+		Score:        0.85,
+		Message:      "secret",
+		Status:       BidStatusPending,
+	}
+
+	sealed := SealBid(bid)
+
+	// Identity preserved
+	if sealed.ID != "bid_123" {
+		t.Errorf("expected ID preserved, got %s", sealed.ID)
+	}
+	if sealed.SellerAddr != "0xseller" {
+		t.Errorf("expected seller preserved, got %s", sealed.SellerAddr)
+	}
+	if sealed.Status != BidStatusPending {
+		t.Errorf("expected status preserved, got %s", sealed.Status)
+	}
+
+	// Sensitive fields redacted
+	if sealed.PricePerCall != "" {
+		t.Error("expected redacted pricePerCall")
+	}
+	if sealed.TotalBudget != "" {
+		t.Error("expected redacted totalBudget")
+	}
+	if sealed.Score != 0 {
+		t.Error("expected redacted score")
+	}
+	if sealed.SuccessRate != 0 {
+		t.Error("expected redacted successRate")
+	}
+	if sealed.Message != "" {
+		t.Error("expected redacted message")
+	}
+	if sealed.MaxLatencyMs != 0 {
+		t.Error("expected redacted maxLatencyMs")
+	}
+
+	// Original not mutated
+	if bid.PricePerCall != "0.005" {
+		t.Error("original bid should not be mutated")
+	}
+}

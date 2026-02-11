@@ -9,7 +9,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/metrics"
+	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // Service implements the revenue staking business logic.
@@ -201,6 +205,10 @@ func (s *Service) Invest(ctx context.Context, stakeID string, req InvestRequest)
 func (s *Service) AccumulateRevenue(ctx context.Context, agentAddr, amount, txRef string) error {
 	agentAddr = strings.ToLower(agentAddr)
 
+	ctx, span := traces.StartSpan(ctx, "stakes.AccumulateRevenue",
+		traces.AgentAddr(agentAddr), traces.Amount(amount), attribute.String("tx.ref", txRef))
+	defer span.End()
+
 	// Idempotency check: skip if this transaction ref was already processed
 	if txRef != "" {
 		if _, loaded := s.seenRefs.LoadOrStore(txRef, struct{}{}); loaded {
@@ -210,6 +218,8 @@ func (s *Service) AccumulateRevenue(ctx context.Context, agentAddr, amount, txRe
 
 	stakes, err := s.store.ListByAgent(ctx, agentAddr)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to list agent stakes")
 		return fmt.Errorf("failed to list agent stakes: %w", err)
 	}
 
@@ -269,11 +279,16 @@ func (s *Service) AccumulateRevenue(ctx context.Context, agentAddr, amount, txRe
 		mu.Unlock()
 	}
 
+	metrics.StakesRevenueAccumulatedTotal.Inc()
 	return nil
 }
 
 // Distribute pays out accumulated revenue to shareholders of a stake.
 func (s *Service) Distribute(ctx context.Context, stake *Stake) error {
+	ctx, span := traces.StartSpan(ctx, "stakes.Distribute",
+		traces.StakeID(stake.ID))
+	defer span.End()
+
 	mu := s.stakeLock(stake.ID)
 	mu.Lock()
 	defer mu.Unlock()
@@ -281,6 +296,9 @@ func (s *Service) Distribute(ctx context.Context, stake *Stake) error {
 	// Re-read under lock
 	fresh, err := s.store.GetStake(ctx, stake.ID)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to get stake")
+		metrics.StakesDistributionFailuresTotal.Inc()
 		return err
 	}
 
@@ -291,6 +309,9 @@ func (s *Service) Distribute(ctx context.Context, stake *Stake) error {
 
 	holdings, err := s.store.ListHoldingsByStake(ctx, fresh.ID)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to list holdings")
+		metrics.StakesDistributionFailuresTotal.Inc()
 		return fmt.Errorf("failed to list holdings: %w", err)
 	}
 
@@ -355,6 +376,8 @@ func (s *Service) Distribute(ctx context.Context, stake *Stake) error {
 	// Only record a distribution if at least one holder was paid
 	if holdingCount == 0 {
 		log.Printf("WARNING: stake %s distribution attempted but all %d payouts failed", fresh.ID, failedCount)
+		span.SetStatus(codes.Error, "all payouts failed")
+		metrics.StakesDistributionFailuresTotal.Inc()
 		return nil
 	}
 
@@ -395,6 +418,7 @@ func (s *Service) Distribute(ctx context.Context, stake *Stake) error {
 		log.Printf("CRITICAL: stake %s distribution completed but state update failed: %v", fresh.ID, err)
 	}
 
+	metrics.StakesDistributionsTotal.Inc()
 	return nil
 }
 

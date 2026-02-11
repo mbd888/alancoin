@@ -16,7 +16,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 var (
@@ -190,16 +193,23 @@ func (l *Ledger) GetBalance(ctx context.Context, agentAddr string) (*Balance, er
 
 // Deposit credits an agent's balance (called when deposit detected on-chain)
 func (l *Ledger) Deposit(ctx context.Context, agentAddr, amount, txHash string) error {
+	ctx, span := traces.StartSpan(ctx, "ledger.Deposit",
+		traces.AgentAddr(agentAddr), traces.Amount(amount), attribute.String("tx_hash", txHash))
+	defer span.End()
+
 	amountBig, ok := usdc.Parse(amount)
 	if !ok || amountBig.Sign() <= 0 {
+		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
 
 	exists, err := l.store.HasDeposit(ctx, txHash)
 	if err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if exists {
+		span.SetStatus(codes.Error, "duplicate deposit")
 		return ErrDuplicateDeposit
 	}
 
@@ -222,8 +232,13 @@ func (l *Ledger) Deposit(ctx context.Context, agentAddr, amount, txHash string) 
 
 // Spend debits an agent's balance (called by session key transactions)
 func (l *Ledger) Spend(ctx context.Context, agentAddr, amount, sessionKeyID string) error {
+	ctx, span := traces.StartSpan(ctx, "ledger.Spend",
+		traces.AgentAddr(agentAddr), traces.Amount(amount), traces.Reference(sessionKeyID))
+	defer span.End()
+
 	amountBig, ok := usdc.Parse(amount)
 	if !ok || amountBig.Sign() <= 0 {
+		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
 	_ = amountBig
@@ -342,8 +357,13 @@ func (l *Ledger) Refund(ctx context.Context, agentAddr, amount, reference string
 
 // Hold places a hold on funds before an on-chain transfer.
 func (l *Ledger) Hold(ctx context.Context, agentAddr, amount, reference string) error {
+	ctx, span := traces.StartSpan(ctx, "ledger.Hold",
+		traces.AgentAddr(agentAddr), traces.Amount(amount), traces.Reference(reference))
+	defer span.End()
+
 	amountBig, ok := usdc.Parse(amount)
 	if !ok || amountBig.Sign() <= 0 {
+		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
 	_ = amountBig
@@ -367,8 +387,13 @@ func (l *Ledger) Hold(ctx context.Context, agentAddr, amount, reference string) 
 
 // ConfirmHold finalizes a held amount after on-chain confirmation.
 func (l *Ledger) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
+	ctx, span := traces.StartSpan(ctx, "ledger.ConfirmHold",
+		traces.AgentAddr(agentAddr), traces.Amount(amount), traces.Reference(reference))
+	defer span.End()
+
 	amountBig, ok := usdc.Parse(amount)
 	if !ok || amountBig.Sign() <= 0 {
+		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
 	_ = amountBig
@@ -391,8 +416,13 @@ func (l *Ledger) ConfirmHold(ctx context.Context, agentAddr, amount, reference s
 
 // ReleaseHold returns held funds to available when a transfer fails.
 func (l *Ledger) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
+	ctx, span := traces.StartSpan(ctx, "ledger.ReleaseHold",
+		traces.AgentAddr(agentAddr), traces.Amount(amount), traces.Reference(reference))
+	defer span.End()
+
 	amountBig, ok := usdc.Parse(amount)
 	if !ok || amountBig.Sign() <= 0 {
+		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
 	_ = amountBig
@@ -442,8 +472,13 @@ func (l *Ledger) CanSpend(ctx context.Context, agentAddr, amount string) (bool, 
 
 // EscrowLock locks funds in escrow before service delivery.
 func (l *Ledger) EscrowLock(ctx context.Context, agentAddr, amount, reference string) error {
+	ctx, span := traces.StartSpan(ctx, "ledger.EscrowLock",
+		traces.AgentAddr(agentAddr), traces.Amount(amount), traces.Reference(reference))
+	defer span.End()
+
 	amountBig, ok := usdc.Parse(amount)
 	if !ok || amountBig.Sign() <= 0 {
+		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
 	_ = amountBig
@@ -467,8 +502,14 @@ func (l *Ledger) EscrowLock(ctx context.Context, agentAddr, amount, reference st
 
 // ReleaseEscrow releases escrowed funds to the seller after confirmation.
 func (l *Ledger) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error {
+	ctx, span := traces.StartSpan(ctx, "ledger.ReleaseEscrow",
+		attribute.String("buyer.addr", buyerAddr), attribute.String("seller.addr", sellerAddr),
+		traces.Amount(amount), traces.Reference(reference))
+	defer span.End()
+
 	amountBig, ok := usdc.Parse(amount)
 	if !ok || amountBig.Sign() <= 0 {
+		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
 	_ = amountBig

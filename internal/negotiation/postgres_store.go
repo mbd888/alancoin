@@ -21,8 +21,9 @@ const rfpColumns = `id, buyer_addr, service_type, description,
 	min_budget, max_budget, max_latency_ms, min_success_rate,
 	duration, min_volume, bid_deadline, auto_select,
 	min_reputation, max_counter_rounds, required_bond_pct, no_withdraw_window,
+	max_winners, sealed_bids,
 	scoring_weight_price, scoring_weight_reputation, scoring_weight_sla,
-	status, winning_bid_id, contract_id, bid_count,
+	status, winning_bid_id, winning_bid_ids, contract_id, contract_ids, bid_count,
 	cancel_reason, awarded_at, created_at, updated_at`
 
 // bidColumns is the SELECT column list for bids.
@@ -41,24 +42,28 @@ func (p *PostgresStore) CreateRFP(ctx context.Context, rfp *RFP) error {
 			min_budget, max_budget, max_latency_ms, min_success_rate,
 			duration, min_volume, bid_deadline, auto_select,
 			min_reputation, max_counter_rounds, required_bond_pct, no_withdraw_window,
+			max_winners, sealed_bids,
 			scoring_weight_price, scoring_weight_reputation, scoring_weight_sla,
-			status, winning_bid_id, contract_id, bid_count,
+			status, winning_bid_id, winning_bid_ids, contract_id, contract_ids, bid_count,
 			cancel_reason, awarded_at, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4,
 			$5::NUMERIC(20,6), $6::NUMERIC(20,6), $7, $8,
 			$9, $10, $11, $12,
 			$13, $14, $15, $16,
-			$17, $18, $19,
-			$20, $21, $22, $23,
-			$24, $25, $26, $27
+			$17, $18,
+			$19, $20, $21,
+			$22, $23, $24, $25, $26, $27,
+			$28, $29, $30, $31
 		)`,
 		rfp.ID, rfp.BuyerAddr, rfp.ServiceType, nullStr(rfp.Description),
 		rfp.MinBudget, rfp.MaxBudget, rfp.MaxLatencyMs, rfp.MinSuccessRate,
 		rfp.Duration, rfp.MinVolume, rfp.BidDeadline, rfp.AutoSelect,
 		rfp.MinReputation, rfp.MaxCounterRounds, rfp.RequiredBondPct, nullStr(rfp.NoWithdrawWindow),
+		rfp.MaxWinners, rfp.SealedBids,
 		rfp.ScoringWeights.Price, rfp.ScoringWeights.Reputation, rfp.ScoringWeights.SLA,
-		string(rfp.Status), nullStr(rfp.WinningBidID), nullStr(rfp.ContractID), rfp.BidCount,
+		string(rfp.Status), nullStr(rfp.WinningBidID), nullStr(encodeIDs(rfp.WinningBidIDs)),
+		nullStr(rfp.ContractID), nullStr(encodeIDs(rfp.ContractIDs)), rfp.BidCount,
 		nullStr(rfp.CancelReason), nullTime(rfp.AwardedAt), rfp.CreatedAt, rfp.UpdatedAt,
 	)
 	return err
@@ -78,11 +83,13 @@ func (p *PostgresStore) GetRFP(ctx context.Context, id string) (*RFP, error) {
 func (p *PostgresStore) UpdateRFP(ctx context.Context, rfp *RFP) error {
 	result, err := p.db.ExecContext(ctx, `
 		UPDATE rfps SET
-			status = $1, winning_bid_id = $2, contract_id = $3,
-			bid_count = $4, cancel_reason = $5, awarded_at = $6,
-			updated_at = $7
-		WHERE id = $8`,
-		string(rfp.Status), nullStr(rfp.WinningBidID), nullStr(rfp.ContractID),
+			status = $1, winning_bid_id = $2, winning_bid_ids = $3,
+			contract_id = $4, contract_ids = $5,
+			bid_count = $6, cancel_reason = $7, awarded_at = $8,
+			updated_at = $9
+		WHERE id = $10`,
+		string(rfp.Status), nullStr(rfp.WinningBidID), nullStr(encodeIDs(rfp.WinningBidIDs)),
+		nullStr(rfp.ContractID), nullStr(encodeIDs(rfp.ContractIDs)),
 		rfp.BidCount, nullStr(rfp.CancelReason), nullTime(rfp.AwardedAt),
 		rfp.UpdatedAt, rfp.ID,
 	)
@@ -296,7 +303,9 @@ func scanRFP(sc scanner) (*RFP, error) {
 		description      sql.NullString
 		noWithdrawWindow sql.NullString
 		winningBid       sql.NullString
+		winningBidIDs    sql.NullString
 		contractID       sql.NullString
+		contractIDs      sql.NullString
 		cancelReason     sql.NullString
 		awardedAt        sql.NullTime
 		status           string
@@ -307,8 +316,9 @@ func scanRFP(sc scanner) (*RFP, error) {
 		&rfp.MinBudget, &rfp.MaxBudget, &rfp.MaxLatencyMs, &rfp.MinSuccessRate,
 		&rfp.Duration, &rfp.MinVolume, &rfp.BidDeadline, &rfp.AutoSelect,
 		&rfp.MinReputation, &rfp.MaxCounterRounds, &rfp.RequiredBondPct, &noWithdrawWindow,
+		&rfp.MaxWinners, &rfp.SealedBids,
 		&rfp.ScoringWeights.Price, &rfp.ScoringWeights.Reputation, &rfp.ScoringWeights.SLA,
-		&status, &winningBid, &contractID, &rfp.BidCount,
+		&status, &winningBid, &winningBidIDs, &contractID, &contractIDs, &rfp.BidCount,
 		&cancelReason, &awardedAt, &rfp.CreatedAt, &rfp.UpdatedAt,
 	)
 	if err != nil {
@@ -319,7 +329,9 @@ func scanRFP(sc scanner) (*RFP, error) {
 	rfp.Description = description.String
 	rfp.NoWithdrawWindow = noWithdrawWindow.String
 	rfp.WinningBidID = winningBid.String
+	rfp.WinningBidIDs = decodeIDs(winningBidIDs.String)
 	rfp.ContractID = contractID.String
+	rfp.ContractIDs = decodeIDs(contractIDs.String)
 	rfp.CancelReason = cancelReason.String
 	if awardedAt.Valid {
 		rfp.AwardedAt = &awardedAt.Time
@@ -488,7 +500,8 @@ func (p *PostgresStore) GetAnalytics(ctx context.Context) (*Analytics, error) {
 const templateColumns = `id, owner_addr, name, service_type, description,
 	min_budget, max_budget, max_latency_ms, min_success_rate,
 	duration, min_volume, bid_deadline, auto_select,
-	min_reputation, max_counter_rounds, required_bond_pct, no_withdraw_window,
+	min_reputation, max_counter_rounds, max_winners, sealed_bids,
+	required_bond_pct, no_withdraw_window,
 	scoring_weight_price, scoring_weight_reputation, scoring_weight_sla,
 	created_at`
 
@@ -504,7 +517,8 @@ func (p *PostgresStore) CreateTemplate(ctx context.Context, tmpl *RFPTemplate) e
 			id, owner_addr, name, service_type, description,
 			min_budget, max_budget, max_latency_ms, min_success_rate,
 			duration, min_volume, bid_deadline, auto_select,
-			min_reputation, max_counter_rounds, required_bond_pct, no_withdraw_window,
+			min_reputation, max_counter_rounds, max_winners, sealed_bids,
+			required_bond_pct, no_withdraw_window,
 			scoring_weight_price, scoring_weight_reputation, scoring_weight_sla,
 			created_at
 		) VALUES (
@@ -512,13 +526,15 @@ func (p *PostgresStore) CreateTemplate(ctx context.Context, tmpl *RFPTemplate) e
 			$6::NUMERIC(20,6), $7::NUMERIC(20,6), $8, $9,
 			$10, $11, $12, $13,
 			$14, $15, $16, $17,
-			$18, $19, $20,
-			$21
+			$18, $19,
+			$20, $21, $22,
+			$23
 		)`,
 		tmpl.ID, nullStr(tmpl.OwnerAddr), tmpl.Name, tmpl.ServiceType, nullStr(tmpl.Description),
 		tmpl.MinBudget, tmpl.MaxBudget, tmpl.MaxLatencyMs, tmpl.MinSuccessRate,
 		tmpl.Duration, tmpl.MinVolume, tmpl.BidDeadline, tmpl.AutoSelect,
-		tmpl.MinReputation, tmpl.MaxCounterRounds, tmpl.RequiredBondPct, nullStr(tmpl.NoWithdrawWindow),
+		tmpl.MinReputation, tmpl.MaxCounterRounds, tmpl.MaxWinners, tmpl.SealedBids,
+		tmpl.RequiredBondPct, nullStr(tmpl.NoWithdrawWindow),
 		swPrice, swRep, swSLA,
 		tmpl.CreatedAt,
 	)
@@ -579,7 +595,8 @@ func scanTemplate(sc scanner) (*RFPTemplate, error) {
 		&tmpl.ID, &ownerAddr, &tmpl.Name, &tmpl.ServiceType, &description,
 		&tmpl.MinBudget, &tmpl.MaxBudget, &tmpl.MaxLatencyMs, &tmpl.MinSuccessRate,
 		&tmpl.Duration, &tmpl.MinVolume, &tmpl.BidDeadline, &tmpl.AutoSelect,
-		&tmpl.MinReputation, &tmpl.MaxCounterRounds, &tmpl.RequiredBondPct, &noWithdrawWindow,
+		&tmpl.MinReputation, &tmpl.MaxCounterRounds, &tmpl.MaxWinners, &tmpl.SealedBids,
+		&tmpl.RequiredBondPct, &noWithdrawWindow,
 		&swPrice, &swRep, &swSLA,
 		&tmpl.CreatedAt,
 	)

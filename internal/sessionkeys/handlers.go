@@ -11,8 +11,12 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
+	"github.com/mbd888/alancoin/internal/metrics"
+	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
 	"github.com/mbd888/alancoin/internal/validation"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // TransferResult from a wallet transfer
@@ -266,6 +270,11 @@ func (h *Handler) Transact(c *gin.Context) {
 	address := c.Param("address")
 	keyID := c.Param("keyId")
 
+	ctx, span := traces.StartSpan(c.Request.Context(), "sessionkey.Transact",
+		traces.SessionKeyID(keyID), traces.AgentAddr(address))
+	defer span.End()
+	c.Request = c.Request.WithContext(ctx)
+
 	var req SignedTransactRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -324,6 +333,8 @@ func (h *Handler) Transact(c *gin.Context) {
 
 	// Validate the signed transaction (signature + permissions)
 	if err := h.manager.ValidateSigned(c.Request.Context(), keyID, &req); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "validation failed")
 		if validationErr, ok := err.(*ValidationError); ok {
 			c.JSON(http.StatusForbidden, gin.H{
 				"error":   validationErr.Code,
@@ -479,6 +490,10 @@ func (h *Handler) Transact(c *gin.Context) {
 		})
 		return
 	}
+
+	// Record metrics
+	metrics.SessionKeyTransactionsTotal.Inc()
+	span.SetAttributes(attribute.String("to", req.To), traces.Amount(req.Amount))
 
 	// Build response
 	response := gin.H{
