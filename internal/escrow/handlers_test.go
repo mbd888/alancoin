@@ -1144,3 +1144,372 @@ func TestHandler_CreateWithNoAuth(t *testing.T) {
 // Ensure the mock ledger is used (compile-time interface check)
 var _ LedgerService = (*mockLedger)(nil)
 var _ LedgerService = (*failingLedger)(nil)
+
+// ---------------------------------------------------------------------------
+// #10: Handler tests for SubmitEvidence, AssignArbitrator, ResolveArbitration
+// ---------------------------------------------------------------------------
+
+// createDisputedEscrow is a helper that creates a disputed escrow via the service.
+func createDisputedEscrow(t *testing.T, svc *Service) *Escrow {
+	t.Helper()
+	esc, err := svc.Create(context.TODO(), CreateRequest{
+		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
+		SellerAddr: "0xbbbb000000000000000000000000000000000002",
+		Amount:     "5.00",
+	})
+	if err != nil {
+		t.Fatalf("create escrow: %v", err)
+	}
+	esc, err = svc.Dispute(context.TODO(), esc.ID, "0xaaaa000000000000000000000000000000000001", "bad service")
+	if err != nil {
+		t.Fatalf("dispute escrow: %v", err)
+	}
+	return esc
+}
+
+func TestHandler_SubmitEvidence(t *testing.T) {
+	router, svc := setupTestRouter()
+	esc := createDisputedEscrow(t, svc)
+
+	body, _ := json.Marshal(EvidenceRequest{Content: "here is my proof"})
+	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/evidence", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xaaaa000000000000000000000000000000000001")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Escrow struct {
+			DisputeEvidence []struct {
+				SubmittedBy string `json:"submittedBy"`
+				Content     string `json:"content"`
+			} `json:"disputeEvidence"`
+		} `json:"escrow"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	// Initial dispute reason + new evidence = 2
+	if len(resp.Escrow.DisputeEvidence) != 2 {
+		t.Errorf("Expected 2 evidence entries, got %d", len(resp.Escrow.DisputeEvidence))
+	}
+}
+
+func TestHandler_SubmitEvidenceNotFound(t *testing.T) {
+	router, _ := setupTestRouter()
+
+	body, _ := json.Marshal(EvidenceRequest{Content: "proof"})
+	req := httptest.NewRequest("POST", "/v1/escrow/esc_ghost/evidence", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xaaaa000000000000000000000000000000000001")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandler_SubmitEvidenceUnauthorized(t *testing.T) {
+	router, svc := setupTestRouter()
+	esc := createDisputedEscrow(t, svc)
+
+	body, _ := json.Marshal(EvidenceRequest{Content: "proof"})
+	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/evidence", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xcccc000000000000000000000000000000000009") // stranger
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("Expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandler_SubmitEvidenceWrongStatus(t *testing.T) {
+	router, svc := setupTestRouter()
+
+	// Create pending (not disputed) escrow
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
+		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
+		SellerAddr: "0xbbbb000000000000000000000000000000000002",
+		Amount:     "1.00",
+	})
+
+	body, _ := json.Marshal(EvidenceRequest{Content: "proof"})
+	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/evidence", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xaaaa000000000000000000000000000000000001")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("Expected 409 for pending escrow, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandler_SubmitEvidenceBadBody(t *testing.T) {
+	router, svc := setupTestRouter()
+	esc := createDisputedEscrow(t, svc)
+
+	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/evidence", bytes.NewReader([]byte("{}")))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xaaaa000000000000000000000000000000000001")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected 400 for empty content, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandler_AssignArbitrator(t *testing.T) {
+	router, svc := setupTestRouter()
+	esc := createDisputedEscrow(t, svc)
+
+	body, _ := json.Marshal(ArbitrateRequest{ArbitratorAddr: "0xcccc000000000000000000000000000000000009"})
+	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/arbitrate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xcccc000000000000000000000000000000000009")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Escrow struct {
+			Status         string `json:"status"`
+			ArbitratorAddr string `json:"arbitratorAddr"`
+		} `json:"escrow"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	if resp.Escrow.Status != "arbitrating" {
+		t.Errorf("Expected arbitrating, got %s", resp.Escrow.Status)
+	}
+	if resp.Escrow.ArbitratorAddr != "0xcccc000000000000000000000000000000000009" {
+		t.Errorf("Expected arbitrator addr, got %s", resp.Escrow.ArbitratorAddr)
+	}
+}
+
+func TestHandler_AssignArbitratorNotFound(t *testing.T) {
+	router, _ := setupTestRouter()
+
+	body, _ := json.Marshal(ArbitrateRequest{ArbitratorAddr: "0xcccc000000000000000000000000000000000009"})
+	req := httptest.NewRequest("POST", "/v1/escrow/esc_ghost/arbitrate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xcccc000000000000000000000000000000000009")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandler_AssignArbitratorWrongStatus(t *testing.T) {
+	router, svc := setupTestRouter()
+
+	// Pending (not disputed)
+	esc, _ := svc.Create(context.TODO(), CreateRequest{
+		BuyerAddr:  "0xaaaa000000000000000000000000000000000001",
+		SellerAddr: "0xbbbb000000000000000000000000000000000002",
+		Amount:     "1.00",
+	})
+
+	body, _ := json.Marshal(ArbitrateRequest{ArbitratorAddr: "0xcccc000000000000000000000000000000000009"})
+	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/arbitrate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xcccc000000000000000000000000000000000009")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("Expected 409 for pending escrow, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandler_AssignArbitratorBadBody(t *testing.T) {
+	router, svc := setupTestRouter()
+	esc := createDisputedEscrow(t, svc)
+
+	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/arbitrate", bytes.NewReader([]byte("{}")))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xcccc000000000000000000000000000000000009")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected 400 for missing arbitratorAddr, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandler_ResolveArbitration_Release(t *testing.T) {
+	router, svc := setupTestRouter()
+	esc := createDisputedEscrow(t, svc)
+	svc.AssignArbitrator(context.TODO(), esc.ID, "0xcccc000000000000000000000000000000000009")
+
+	body, _ := json.Marshal(ResolveRequest{Resolution: "release", Reason: "seller was right"})
+	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/resolve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xcccc000000000000000000000000000000000009")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Escrow struct {
+			Status     string `json:"status"`
+			Resolution string `json:"resolution"`
+		} `json:"escrow"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	if resp.Escrow.Status != "released" {
+		t.Errorf("Expected released, got %s", resp.Escrow.Status)
+	}
+}
+
+func TestHandler_ResolveArbitration_Refund(t *testing.T) {
+	router, svc := setupTestRouter()
+	esc := createDisputedEscrow(t, svc)
+	svc.AssignArbitrator(context.TODO(), esc.ID, "0xcccc000000000000000000000000000000000009")
+
+	body, _ := json.Marshal(ResolveRequest{Resolution: "refund", Reason: "seller failed"})
+	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/resolve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xcccc000000000000000000000000000000000009")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Escrow struct {
+			Status string `json:"status"`
+		} `json:"escrow"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	if resp.Escrow.Status != "refunded" {
+		t.Errorf("Expected refunded, got %s", resp.Escrow.Status)
+	}
+}
+
+func TestHandler_ResolveArbitration_Partial(t *testing.T) {
+	router, svc := setupTestRouter()
+	esc := createDisputedEscrow(t, svc)
+	svc.AssignArbitrator(context.TODO(), esc.ID, "0xcccc000000000000000000000000000000000009")
+
+	body, _ := json.Marshal(ResolveRequest{
+		Resolution:    "partial",
+		ReleaseAmount: "2.00",
+		Reason:        "half done",
+	})
+	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/resolve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xcccc000000000000000000000000000000000009")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Escrow struct {
+			Status               string `json:"status"`
+			PartialReleaseAmount string `json:"partialReleaseAmount"`
+			PartialRefundAmount  string `json:"partialRefundAmount"`
+		} `json:"escrow"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	if resp.Escrow.Status != "released" {
+		t.Errorf("Expected released, got %s", resp.Escrow.Status)
+	}
+	if resp.Escrow.PartialReleaseAmount == "" {
+		t.Error("Expected partialReleaseAmount to be set")
+	}
+	if resp.Escrow.PartialRefundAmount == "" {
+		t.Error("Expected partialRefundAmount to be set")
+	}
+}
+
+func TestHandler_ResolveArbitrationNotFound(t *testing.T) {
+	router, _ := setupTestRouter()
+
+	body, _ := json.Marshal(ResolveRequest{Resolution: "release"})
+	req := httptest.NewRequest("POST", "/v1/escrow/esc_ghost/resolve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xcccc000000000000000000000000000000000009")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandler_ResolveArbitrationUnauthorized(t *testing.T) {
+	router, svc := setupTestRouter()
+	esc := createDisputedEscrow(t, svc)
+	svc.AssignArbitrator(context.TODO(), esc.ID, "0xcccc000000000000000000000000000000000009")
+
+	body, _ := json.Marshal(ResolveRequest{Resolution: "release"})
+	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/resolve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xdddd000000000000000000000000000000000008") // wrong arbitrator
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("Expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandler_ResolveArbitrationBadBody(t *testing.T) {
+	router, svc := setupTestRouter()
+	esc := createDisputedEscrow(t, svc)
+	svc.AssignArbitrator(context.TODO(), esc.ID, "0xcccc000000000000000000000000000000000009")
+
+	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/resolve", bytes.NewReader([]byte("{}")))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xcccc000000000000000000000000000000000009")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected 400 for missing resolution, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandler_ResolveArbitrationInvalidPartialAmount(t *testing.T) {
+	router, svc := setupTestRouter()
+	esc := createDisputedEscrow(t, svc)
+	svc.AssignArbitrator(context.TODO(), esc.ID, "0xcccc000000000000000000000000000000000009")
+
+	body, _ := json.Marshal(ResolveRequest{
+		Resolution:    "partial",
+		ReleaseAmount: "999.00", // exceeds escrow amount of 5.00
+	})
+	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/resolve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Address", "0xcccc000000000000000000000000000000000009")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected 400 for excessive releaseAmount, got %d: %s", w.Code, w.Body.String())
+	}
+}

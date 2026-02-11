@@ -979,6 +979,8 @@ func TestEscrow_IsTerminal(t *testing.T) {
 		{StatusReleased, true},
 		{StatusRefunded, true},
 		{StatusExpired, true},
+		{StatusDisputed, false},
+		{StatusArbitrating, false},
 	}
 
 	for _, tt := range tests {
@@ -1498,5 +1500,418 @@ func TestEscrow_ConcurrentOperations(t *testing.T) {
 		if e.Status != StatusReleased {
 			t.Errorf("Escrow %s should be released, got %s", e.ID, e.Status)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #9: SubmitEvidence tests
+// ---------------------------------------------------------------------------
+
+// mockReputation captures RecordDispute calls for verification.
+type mockReputation struct {
+	mu      sync.Mutex
+	records []reputationRecord
+}
+
+type reputationRecord struct {
+	sellerAddr, outcome, amount string
+}
+
+func (m *mockReputation) RecordDispute(_ context.Context, sellerAddr, outcome, amount string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.records = append(m.records, reputationRecord{sellerAddr, outcome, amount})
+	return nil
+}
+
+func TestSubmitEvidence_BuyerAndSeller(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+
+	// Dispute to enter disputed state
+	svc.Dispute(ctx, esc.ID, "0xbuyer", "bad service")
+
+	// Buyer submits evidence
+	result, err := svc.SubmitEvidence(ctx, esc.ID, "0xbuyer", "screenshot of broken output")
+	if err != nil {
+		t.Fatalf("Buyer SubmitEvidence failed: %v", err)
+	}
+	// Initial dispute reason + buyer evidence = 2
+	if len(result.DisputeEvidence) != 2 {
+		t.Errorf("Expected 2 evidence entries, got %d", len(result.DisputeEvidence))
+	}
+
+	// Seller submits evidence
+	result, err = svc.SubmitEvidence(ctx, esc.ID, "0xseller", "logs show delivery succeeded")
+	if err != nil {
+		t.Fatalf("Seller SubmitEvidence failed: %v", err)
+	}
+	if len(result.DisputeEvidence) != 3 {
+		t.Errorf("Expected 3 evidence entries, got %d", len(result.DisputeEvidence))
+	}
+	if result.DisputeEvidence[2].SubmittedBy != "0xseller" {
+		t.Errorf("Expected last evidence from seller, got %s", result.DisputeEvidence[2].SubmittedBy)
+	}
+}
+
+func TestSubmitEvidence_Unauthorized(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+	svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
+
+	_, err := svc.SubmitEvidence(ctx, esc.ID, "0xstranger", "I have opinions")
+	if err != ErrUnauthorized {
+		t.Errorf("Expected ErrUnauthorized for stranger, got %v", err)
+	}
+}
+
+func TestSubmitEvidence_WrongStatus(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+
+	// Pending escrow — can't submit evidence
+	_, err := svc.SubmitEvidence(ctx, esc.ID, "0xbuyer", "evidence")
+	if err != ErrInvalidStatus {
+		t.Errorf("Expected ErrInvalidStatus for pending escrow, got %v", err)
+	}
+}
+
+func TestSubmitEvidence_Nonexistent(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	ctx := context.Background()
+
+	_, err := svc.SubmitEvidence(ctx, "esc_ghost", "0xbuyer", "evidence")
+	if err != ErrEscrowNotFound {
+		t.Errorf("Expected ErrEscrowNotFound, got %v", err)
+	}
+}
+
+func TestSubmitEvidence_ArbitratingStatus(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+	svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
+	svc.AssignArbitrator(ctx, esc.ID, "0xarbitrator")
+
+	// Both parties can still submit evidence during arbitration
+	_, err := svc.SubmitEvidence(ctx, esc.ID, "0xseller", "additional proof")
+	if err != nil {
+		t.Fatalf("SubmitEvidence during arbitration should work: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #9: AssignArbitrator tests
+// ---------------------------------------------------------------------------
+
+func TestAssignArbitrator_HappyPath(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+	svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
+
+	result, err := svc.AssignArbitrator(ctx, esc.ID, "0xARBITRATOR")
+	if err != nil {
+		t.Fatalf("AssignArbitrator failed: %v", err)
+	}
+	if result.Status != StatusArbitrating {
+		t.Errorf("Expected status arbitrating, got %s", result.Status)
+	}
+	if result.ArbitratorAddr != "0xarbitrator" {
+		t.Errorf("Expected lowercased arbitrator addr, got %s", result.ArbitratorAddr)
+	}
+	if result.ArbitrationDeadline == nil {
+		t.Error("Expected ArbitrationDeadline to be set")
+	}
+}
+
+func TestAssignArbitrator_WrongStatus(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+
+	// Pending — not disputed yet
+	_, err := svc.AssignArbitrator(ctx, esc.ID, "0xarbitrator")
+	if err != ErrInvalidStatus {
+		t.Errorf("Expected ErrInvalidStatus for pending escrow, got %v", err)
+	}
+}
+
+func TestAssignArbitrator_Nonexistent(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	ctx := context.Background()
+
+	_, err := svc.AssignArbitrator(ctx, "esc_ghost", "0xarbitrator")
+	if err != ErrEscrowNotFound {
+		t.Errorf("Expected ErrEscrowNotFound, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #9: ResolveArbitration tests
+// ---------------------------------------------------------------------------
+
+func TestResolveArbitration_Release(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	rep := &mockReputation{}
+	svc := NewService(store, ledger).WithReputationImpactor(rep)
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "5.00",
+	})
+	svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
+	svc.AssignArbitrator(ctx, esc.ID, "0xarbitrator")
+
+	result, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
+		Resolution: "release",
+		Reason:     "seller delivered correctly",
+	})
+	if err != nil {
+		t.Fatalf("ResolveArbitration release failed: %v", err)
+	}
+	if result.Status != StatusReleased {
+		t.Errorf("Expected released, got %s", result.Status)
+	}
+	if _, ok := ledger.released[esc.ID]; !ok {
+		t.Error("Expected ledger.ReleaseEscrow to be called")
+	}
+	if result.ResolvedAt == nil {
+		t.Error("Expected ResolvedAt to be set")
+	}
+	// Reputation: dispute records "disputed", then release records "confirmed"
+	if len(rep.records) != 2 {
+		t.Fatalf("Expected 2 reputation records (disputed + confirmed), got %d: %v", len(rep.records), rep.records)
+	}
+	if rep.records[1].outcome != "confirmed" {
+		t.Errorf("Expected second reputation record outcome 'confirmed', got %s", rep.records[1].outcome)
+	}
+}
+
+func TestResolveArbitration_Refund(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	rep := &mockReputation{}
+	svc := NewService(store, ledger).WithReputationImpactor(rep)
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "3.00",
+	})
+	svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
+	svc.AssignArbitrator(ctx, esc.ID, "0xarbitrator")
+
+	result, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
+		Resolution: "refund",
+		Reason:     "seller failed to deliver",
+	})
+	if err != nil {
+		t.Fatalf("ResolveArbitration refund failed: %v", err)
+	}
+	if result.Status != StatusRefunded {
+		t.Errorf("Expected refunded, got %s", result.Status)
+	}
+	if _, ok := ledger.refunded[esc.ID]; !ok {
+		t.Error("Expected ledger.RefundEscrow to be called")
+	}
+	// Reputation: dispute records "disputed", then refund records "refunded"
+	if len(rep.records) != 2 {
+		t.Fatalf("Expected 2 reputation records (disputed + refunded), got %d: %v", len(rep.records), rep.records)
+	}
+	if rep.records[1].outcome != "refunded" {
+		t.Errorf("Expected second reputation record outcome 'refunded', got %s", rep.records[1].outcome)
+	}
+}
+
+func TestResolveArbitration_Partial(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	rep := &mockReputation{}
+	svc := NewService(store, ledger).WithReputationImpactor(rep)
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "10.00",
+	})
+	svc.Dispute(ctx, esc.ID, "0xbuyer", "partial delivery")
+	svc.AssignArbitrator(ctx, esc.ID, "0xarbitrator")
+
+	result, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
+		Resolution:    "partial",
+		ReleaseAmount: "3.50",
+		Reason:        "partial work done",
+	})
+	if err != nil {
+		t.Fatalf("ResolveArbitration partial failed: %v", err)
+	}
+	if result.Status != StatusReleased {
+		t.Errorf("Expected released, got %s", result.Status)
+	}
+	if result.PartialReleaseAmount == "" {
+		t.Error("Expected PartialReleaseAmount to be set")
+	}
+	if result.PartialRefundAmount == "" {
+		t.Error("Expected PartialRefundAmount to be set")
+	}
+	// Both release and refund should be called
+	if len(ledger.released) != 1 {
+		t.Errorf("Expected 1 partial release, got %d", len(ledger.released))
+	}
+	if len(ledger.refunded) != 1 {
+		t.Errorf("Expected 1 partial refund, got %d", len(ledger.refunded))
+	}
+	// Reputation: dispute records "disputed", then partial records "partial"
+	if len(rep.records) != 2 {
+		t.Fatalf("Expected 2 reputation records (disputed + partial), got %d: %v", len(rep.records), rep.records)
+	}
+	if rep.records[1].outcome != "partial" {
+		t.Errorf("Expected second reputation record outcome 'partial', got %s", rep.records[1].outcome)
+	}
+}
+
+func TestResolveArbitration_Unauthorized(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+	svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
+	svc.AssignArbitrator(ctx, esc.ID, "0xarbitrator")
+
+	// Wrong arbitrator
+	_, err := svc.ResolveArbitration(ctx, esc.ID, "0xstranger", ResolveRequest{
+		Resolution: "release",
+	})
+	if err != ErrUnauthorized {
+		t.Errorf("Expected ErrUnauthorized for wrong arbitrator, got %v", err)
+	}
+}
+
+func TestResolveArbitration_WrongStatus(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+
+	// Pending — not disputed
+	_, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
+		Resolution: "release",
+	})
+	if err != ErrInvalidStatus {
+		t.Errorf("Expected ErrInvalidStatus for pending escrow, got %v", err)
+	}
+}
+
+func TestResolveArbitration_InvalidPartialAmount(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "10.00",
+	})
+	svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
+	svc.AssignArbitrator(ctx, esc.ID, "0xarbitrator")
+
+	// Release amount >= total should fail
+	_, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
+		Resolution:    "partial",
+		ReleaseAmount: "10.00",
+	})
+	if err == nil {
+		t.Fatal("Expected error for releaseAmount >= total")
+	}
+
+	// Negative release amount should fail
+	_, err = svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
+		Resolution:    "partial",
+		ReleaseAmount: "-1.00",
+	})
+	if err == nil {
+		t.Fatal("Expected error for negative releaseAmount")
+	}
+}
+
+func TestResolveArbitration_Nonexistent(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	ctx := context.Background()
+
+	_, err := svc.ResolveArbitration(ctx, "esc_ghost", "0xarbitrator", ResolveRequest{
+		Resolution: "release",
+	})
+	if err != ErrEscrowNotFound {
+		t.Errorf("Expected ErrEscrowNotFound, got %v", err)
 	}
 }

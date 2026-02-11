@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -609,5 +610,70 @@ func TestSessionExpiry(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for expired session")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #12: Verify payment headers sent to services
+// ---------------------------------------------------------------------------
+
+func TestProxy_PaymentHeadersSentToService(t *testing.T) {
+	var capturedHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+	}))
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{
+				AgentAddress: "0xseller",
+				ServiceID:    "svc1",
+				ServiceName:  "translate",
+				Price:        "0.75",
+				Endpoint:     server.URL,
+			},
+		},
+	}
+
+	svc := newTestServiceWithLogger(ml, reg)
+
+	session, err := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, err = svc.Proxy(context.Background(), session.ID, ProxyRequest{
+		ServiceType: "translation",
+		Params:      map[string]interface{}{"text": "hello"},
+	})
+	if err != nil {
+		t.Fatalf("proxy: %v", err)
+	}
+
+	// Verify payment headers
+	if capturedHeaders.Get("X-Payment-Amount") != "0.75" {
+		t.Errorf("expected X-Payment-Amount '0.75', got %q", capturedHeaders.Get("X-Payment-Amount"))
+	}
+	if capturedHeaders.Get("X-Payment-From") != "0xbuyer" {
+		t.Errorf("expected X-Payment-From '0xbuyer', got %q", capturedHeaders.Get("X-Payment-From"))
+	}
+	ref := capturedHeaders.Get("X-Payment-Ref")
+	if ref == "" {
+		t.Error("expected X-Payment-Ref to be set")
+	}
+	// Reference should contain the session ID
+	if !strings.Contains(ref, session.ID) {
+		t.Errorf("expected X-Payment-Ref to contain session ID %s, got %q", session.ID, ref)
+	}
+	if capturedHeaders.Get("Content-Type") != "application/json" {
+		t.Errorf("expected Content-Type 'application/json', got %q", capturedHeaders.Get("Content-Type"))
 	}
 }
