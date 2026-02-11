@@ -2,6 +2,7 @@
 package server
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -14,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -130,15 +132,17 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 	// Initialize storage (Postgres if DATABASE_URL set, otherwise in-memory)
 	if cfg.DatabaseURL != "" {
-		db, err := sql.Open("postgres", cfg.DatabaseURL)
+		dbDSN := appendDSNParams(cfg.DatabaseURL, cfg.DBConnectTimeout, cfg.DBStatementTimeout)
+		db, err := sql.Open("postgres", dbDSN)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open database: %w", err)
 		}
 
 		// Configure connection pool
-		db.SetMaxOpenConns(25)
-		db.SetMaxIdleConns(5)
-		db.SetConnMaxLifetime(5 * time.Minute)
+		db.SetMaxOpenConns(cfg.DBMaxOpenConns)
+		db.SetMaxIdleConns(cfg.DBMaxIdleConns)
+		db.SetConnMaxLifetime(cfg.DBConnMaxLifetime)
+		db.SetConnMaxIdleTime(cfg.DBConnMaxIdleTime)
 
 		// Test connection
 		if err := db.Ping(); err != nil {
@@ -165,7 +169,13 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		if err := ledgerStore.Migrate(ctx); err != nil {
 			s.logger.Warn("failed to migrate ledger store", "error", err)
 		}
-		s.ledger = ledger.New(ledgerStore)
+		eventStore := ledger.NewPostgresEventStore(db)
+		auditLogger := ledger.NewPostgresAuditLogger(db)
+		alertStore := ledger.NewPostgresAlertStore(db)
+		alertChecker := ledger.NewAlertChecker(alertStore)
+		s.ledger = ledger.NewWithEvents(ledgerStore, eventStore).
+			WithAuditLogger(auditLogger).
+			WithAlertChecker(alertChecker)
 		s.logger.Info("agent balance tracking enabled")
 
 		// Webhooks with Postgres
@@ -194,7 +204,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Escrow with PostgreSQL store
 		escrowStore := escrow.NewPostgresStore(db)
-		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledger})
+		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledger}).WithLogger(s.logger)
 		s.escrowTimer = escrow.NewTimer(s.escrowService, escrowStore, s.logger)
 		s.logger.Info("escrow enabled (postgres)")
 
@@ -214,7 +224,8 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		negotiationStore := negotiation.NewPostgresStore(db)
 		reputationProvForNeg := reputation.NewRegistryProvider(s.registry)
 		s.negotiationService = negotiation.NewService(negotiationStore, reputationProvForNeg).
-			WithContractFormer(&contractFormerAdapter{s.contractService})
+			WithContractFormer(&contractFormerAdapter{s.contractService}).
+			WithLedger(&negotiationLedgerAdapter{s.ledger})
 		s.negotiationTimer = negotiation.NewTimer(s.negotiationService, s.logger)
 		s.logger.Info("negotiation enabled (postgres)")
 
@@ -261,7 +272,14 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.authMgr = auth.NewManager(auth.NewMemoryStore())
 
 		// In-memory ledger for demo mode
-		s.ledger = ledger.New(ledger.NewMemoryStore())
+		memStore := ledger.NewMemoryStore()
+		memEventStore := ledger.NewMemoryEventStore()
+		memAuditLogger := ledger.NewMemoryAuditLogger()
+		memAlertStore := ledger.NewMemoryAlertStore()
+		memAlertChecker := ledger.NewAlertChecker(memAlertStore)
+		s.ledger = ledger.NewWithEvents(memStore, memEventStore).
+			WithAuditLogger(memAuditLogger).
+			WithAlertChecker(memAlertChecker)
 		s.logger.Info("agent balance tracking enabled (in-memory)")
 
 		// Webhooks with in-memory store
@@ -273,7 +291,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Escrow with in-memory store
 		escrowStore := escrow.NewMemoryStore()
-		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledger})
+		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledger}).WithLogger(s.logger)
 		s.escrowTimer = escrow.NewTimer(s.escrowService, escrowStore, s.logger)
 		s.logger.Info("escrow enabled (in-memory)")
 
@@ -293,7 +311,8 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		negotiationStore := negotiation.NewMemoryStore()
 		reputationProvForNeg := reputation.NewRegistryProvider(s.registry)
 		s.negotiationService = negotiation.NewService(negotiationStore, reputationProvForNeg).
-			WithContractFormer(&contractFormerAdapter{s.contractService})
+			WithContractFormer(&contractFormerAdapter{s.contractService}).
+			WithLedger(&negotiationLedgerAdapter{s.ledger})
 		s.negotiationTimer = negotiation.NewTimer(s.negotiationService, s.logger)
 		s.logger.Info("negotiation enabled (in-memory)")
 
@@ -429,6 +448,9 @@ func (s *Server) setupMiddleware() {
 	// CORS (allow all origins for demo - restrict in production)
 	s.router.Use(security.CORSMiddleware([]string{"*"}))
 
+	// Gzip compression (after CORS, before request size limit)
+	s.router.Use(gzipMiddleware())
+
 	// Request size limit (1MB)
 	s.router.Use(validation.RequestSizeMiddleware(validation.MaxRequestSize))
 
@@ -448,6 +470,9 @@ func (s *Server) setupMiddleware() {
 
 	// Logging
 	s.router.Use(s.loggingMiddleware())
+
+	// Request timeout (after logging so timeouts are logged)
+	s.router.Use(s.timeoutMiddleware())
 }
 
 func (s *Server) requestIDMiddleware() gin.HandlerFunc {
@@ -560,13 +585,13 @@ func (s *Server) setupRoutes() {
 	// PUBLIC ROUTES (no auth required)
 	// These are the discovery/read endpoints
 	v1.GET("/platform", s.platformHandler)
-	v1.GET("/agents", registryHandler.ListAgents)
-	v1.GET("/agents/:address", registryHandler.GetAgent)
-	v1.GET("/services", registryHandler.DiscoverServices)
+	v1.GET("/agents", cacheControl(30), registryHandler.ListAgents)
+	v1.GET("/agents/:address", cacheControl(15), registryHandler.GetAgent)
+	v1.GET("/services", cacheControl(30), registryHandler.DiscoverServices)
 	v1.GET("/agents/:address/transactions", registryHandler.ListTransactions)
-	v1.GET("/network/stats", registryHandler.GetNetworkStats)
-	v1.GET("/network/stats/enhanced", s.enhancedStatsHandler) // Demo-friendly extended stats
-	v1.GET("/feed", registryHandler.GetPublicFeed)
+	v1.GET("/network/stats", cacheControl(60), registryHandler.GetNetworkStats)
+	v1.GET("/network/stats/enhanced", cacheControl(60), s.enhancedStatsHandler) // Demo-friendly extended stats
+	v1.GET("/feed", cacheControl(10), registryHandler.GetPublicFeed)
 
 	// AI-powered natural language search
 	v1.GET("/search", s.naturalLanguageSearch)
@@ -677,6 +702,12 @@ func (s *Server) setupRoutes() {
 		// Admin route for recording deposits (in production: webhook from blockchain indexer)
 		// RequireAdmin checks X-Admin-Secret header (or allows any auth in demo mode).
 		protectedLedger.POST("/admin/deposits", auth.RequireAdmin(), ledgerHandler.RecordDeposit)
+
+		// Admin routes for reconciliation, audit, reversals, batch ops
+		ledgerHandler.RegisterAdminRoutes(protectedLedger)
+
+		// Alert routes (per-agent)
+		ledgerHandler.RegisterAlertRoutes(v1)
 	}
 
 	// Gas abstraction routes (agents pay USDC only, gas is sponsored)
@@ -1077,15 +1108,49 @@ func (s *Server) readinessHandler(c *gin.Context) {
 		return
 	}
 
-	// Verify database connectivity when DB is configured
+	checks := make(map[string]string)
+	allOK := true
+
+	// DB check
 	if s.db != nil {
-		if err := s.db.PingContext(c.Request.Context()); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready", "reason": "database"})
-			return
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+		defer cancel()
+		if err := s.db.PingContext(ctx); err != nil {
+			checks["database"] = "unhealthy"
+			allOK = false
+		} else {
+			checks["database"] = "healthy"
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "ready"})
+	// Timer checks
+	checks["escrow_timer"] = timerStatus(s.escrowTimer)
+	checks["stream_timer"] = timerStatus(s.streamTimer)
+	checks["contract_timer"] = timerStatus(s.contractTimer)
+	checks["negotiation_timer"] = timerStatus(s.negotiationTimer)
+
+	status := "ready"
+	httpStatus := http.StatusOK
+	if !allOK {
+		status = "degraded"
+		httpStatus = http.StatusServiceUnavailable
+	}
+	c.JSON(httpStatus, gin.H{"status": status, "checks": checks})
+}
+
+type runnable interface{ Running() bool }
+
+func timerStatus(t interface{}) string {
+	if t == nil {
+		return "not_configured"
+	}
+	if tr, ok := t.(runnable); ok {
+		if tr.Running() {
+			return "running"
+		}
+		return "stopped"
+	}
+	return "unknown"
 }
 
 func (s *Server) docsRedirectHandler(c *gin.Context) {
@@ -1263,10 +1328,10 @@ func (s *Server) Run(ctx context.Context) error {
 	s.httpSrv = &http.Server{
 		Addr:              ":" + s.cfg.Port,
 		Handler:           s.router,
-		ReadTimeout:       10 * time.Second,
+		ReadTimeout:       s.cfg.HTTPReadTimeout,
 		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		WriteTimeout:      s.cfg.HTTPWriteTimeout,
+		IdleTimeout:       s.cfg.HTTPIdleTimeout,
 	}
 
 	// Channel to catch server errors
@@ -1338,6 +1403,11 @@ func (s *Server) Run(ctx context.Context) error {
 	// Start partition maintainer for transactions table
 	if s.partitionMaint != nil {
 		go s.partitionMaint.Start(runCtx)
+	}
+
+	// Start DB connection pool stats collector
+	if s.db != nil {
+		go metrics.StartDBStatsCollector(runCtx, s.db, 15*time.Second)
 	}
 
 	// Mark as ready after brief delay for startup
@@ -1476,6 +1546,75 @@ func (s *Server) Router() *gin.Engine {
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+// appendDSNParams adds connect_timeout and statement_timeout to a PostgreSQL DSN.
+func appendDSNParams(dsn string, connectTimeout, statementTimeout int) string {
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		sep := "?"
+		if strings.Contains(dsn, "?") {
+			sep = "&"
+		}
+		return fmt.Sprintf("%s%sconnect_timeout=%d&statement_timeout=%d", dsn, sep, connectTimeout, statementTimeout)
+	}
+	// Key-value format
+	return fmt.Sprintf("%s connect_timeout=%d statement_timeout=%d", dsn, connectTimeout, statementTimeout)
+}
+
+func (s *Server) timeoutMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.GetHeader("Upgrade") == "websocket" {
+			c.Next()
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), s.cfg.RequestTimeout)
+		defer cancel()
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	}
+}
+
+type gzipWriter struct {
+	gin.ResponseWriter
+	writer *gzip.Writer
+}
+
+func (w *gzipWriter) Write(data []byte) (int, error) {
+	return w.writer.Write(data)
+}
+
+func (w *gzipWriter) WriteString(s string) (int, error) {
+	return w.writer.Write([]byte(s))
+}
+
+func gzipMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !strings.Contains(c.GetHeader("Accept-Encoding"), "gzip") || c.GetHeader("Upgrade") == "websocket" {
+			c.Next()
+			return
+		}
+		gz, err := gzip.NewWriterLevel(c.Writer, gzip.DefaultCompression)
+		if err != nil {
+			c.Next()
+			return
+		}
+		c.Header("Content-Encoding", "gzip")
+		c.Header("Vary", "Accept-Encoding")
+		c.Writer = &gzipWriter{ResponseWriter: c.Writer, writer: gz}
+		defer func() {
+			gz.Close()
+			c.Header("Content-Length", "")
+		}()
+		c.Next()
+	}
+}
+
+func cacheControl(maxAge int) gin.HandlerFunc {
+	value := fmt.Sprintf("public, max-age=%d", maxAge)
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", value)
+		c.Next()
+	}
+}
 
 func generateRequestID() string {
 	bytes := make([]byte, 16)
@@ -1636,6 +1775,27 @@ func (a *streamLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount
 }
 
 func (a *streamLedgerAdapter) Deposit(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.Deposit(ctx, agentAddr, amount, reference)
+}
+
+// negotiationLedgerAdapter adapts ledger.Ledger to negotiation.LedgerService
+type negotiationLedgerAdapter struct {
+	l *ledger.Ledger
+}
+
+func (a *negotiationLedgerAdapter) Hold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.Hold(ctx, agentAddr, amount, reference)
+}
+
+func (a *negotiationLedgerAdapter) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.ConfirmHold(ctx, agentAddr, amount, reference)
+}
+
+func (a *negotiationLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
+}
+
+func (a *negotiationLedgerAdapter) Deposit(ctx context.Context, agentAddr, amount, reference string) error {
 	return a.l.Deposit(ctx, agentAddr, amount, reference)
 }
 

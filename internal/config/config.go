@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -40,6 +41,20 @@ type Config struct {
 	// Reputation API
 	ReputationHMACSecret string // HMAC secret for signing reputation responses (optional)
 	AdminSecret          string // Admin API secret
+
+	// Database pool settings
+	DBMaxOpenConns     int
+	DBMaxIdleConns     int
+	DBConnMaxLifetime  time.Duration
+	DBConnMaxIdleTime  time.Duration
+	DBConnectTimeout   int // seconds, appended to Postgres DSN
+	DBStatementTimeout int // milliseconds, appended to Postgres DSN
+
+	// HTTP server timeouts
+	HTTPReadTimeout  time.Duration
+	HTTPWriteTimeout time.Duration
+	HTTPIdleTimeout  time.Duration
+	RequestTimeout   time.Duration // global handler execution timeout
 }
 
 // Base Sepolia defaults
@@ -52,6 +67,20 @@ const (
 	DefaultLogLevel     = "info"
 	DefaultPrice        = "0.001"
 	DefaultRateLimit    = 100
+
+	// Database pool defaults
+	DefaultDBMaxOpenConns     = 25
+	DefaultDBMaxIdleConns     = 5
+	DefaultDBConnMaxLifetime  = 5 * time.Minute
+	DefaultDBConnMaxIdleTime  = 3 * time.Minute
+	DefaultDBConnectTimeout   = 5     // seconds
+	DefaultDBStatementTimeout = 30000 // milliseconds (30s)
+
+	// HTTP server timeout defaults
+	DefaultHTTPReadTimeout  = 10 * time.Second
+	DefaultHTTPWriteTimeout = 30 * time.Second
+	DefaultHTTPIdleTimeout  = 60 * time.Second
+	DefaultRequestTimeout   = 30 * time.Second
 )
 
 // Load reads configuration from environment variables
@@ -79,6 +108,18 @@ func Load() (*Config, error) {
 		RateLimitRPS:         int(getEnvInt64("RATE_LIMIT_RPS", int64(DefaultRateLimit))),
 		ReputationHMACSecret: os.Getenv("REPUTATION_HMAC_SECRET"),
 		AdminSecret:          os.Getenv("ADMIN_SECRET"),
+
+		DBMaxOpenConns:     int(getEnvInt64("POSTGRES_MAX_OPEN_CONNS", int64(DefaultDBMaxOpenConns))),
+		DBMaxIdleConns:     int(getEnvInt64("POSTGRES_MAX_IDLE_CONNS", int64(DefaultDBMaxIdleConns))),
+		DBConnMaxLifetime:  getEnvDuration("POSTGRES_CONN_MAX_LIFETIME", DefaultDBConnMaxLifetime),
+		DBConnMaxIdleTime:  getEnvDuration("POSTGRES_CONN_MAX_IDLE_TIME", DefaultDBConnMaxIdleTime),
+		DBConnectTimeout:   int(getEnvInt64("POSTGRES_CONNECT_TIMEOUT", int64(DefaultDBConnectTimeout))),
+		DBStatementTimeout: int(getEnvInt64("POSTGRES_STATEMENT_TIMEOUT", int64(DefaultDBStatementTimeout))),
+
+		HTTPReadTimeout:  getEnvDuration("HTTP_READ_TIMEOUT", DefaultHTTPReadTimeout),
+		HTTPWriteTimeout: getEnvDuration("HTTP_WRITE_TIMEOUT", DefaultHTTPWriteTimeout),
+		HTTPIdleTimeout:  getEnvDuration("HTTP_IDLE_TIMEOUT", DefaultHTTPIdleTimeout),
+		RequestTimeout:   getEnvDuration("REQUEST_TIMEOUT", DefaultRequestTimeout),
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -133,6 +174,15 @@ func getEnvInt64(key string, defaultValue int64) int64 {
 	if value := os.Getenv(key); value != "" {
 		if i, err := strconv.ParseInt(value, 10, 64); err == nil {
 			return i
+		}
+	}
+	return defaultValue
+}
+
+func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if d, err := time.ParseDuration(value); err == nil {
+			return d
 		}
 	}
 	return defaultValue

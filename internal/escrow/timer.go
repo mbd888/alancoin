@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,6 +15,7 @@ type Timer struct {
 	interval time.Duration
 	logger   *slog.Logger
 	stop     chan struct{}
+	running  atomic.Bool
 }
 
 // NewTimer creates a new escrow auto-release timer.
@@ -27,8 +29,16 @@ func NewTimer(service *Service, store Store, logger *slog.Logger) *Timer {
 	}
 }
 
+// Running reports whether the timer loop is actively running.
+func (t *Timer) Running() bool {
+	return t.running.Load()
+}
+
 // Start begins the auto-release loop. Call in a goroutine.
 func (t *Timer) Start(ctx context.Context) {
+	t.running.Store(true)
+	defer t.running.Store(false)
+
 	ticker := time.NewTicker(t.interval)
 	defer ticker.Stop()
 

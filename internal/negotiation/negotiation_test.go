@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -45,6 +46,51 @@ func (m *mockContractFormer) FormContract(_ context.Context, rfp *RFP, bid *Bid)
 		return "", m.returnErr
 	}
 	return "contract_test123", nil
+}
+
+// mockLedger records hold/confirm/release calls for testing bid bonds.
+type mockLedger struct {
+	holds   map[string]string // ref -> amount
+	holdErr error
+	mu      sync.Mutex
+}
+
+func newMockLedger() *mockLedger {
+	return &mockLedger{holds: make(map[string]string)}
+}
+
+func (m *mockLedger) Hold(_ context.Context, _, amount, reference string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.holdErr != nil {
+		return m.holdErr
+	}
+	m.holds[reference] = amount
+	return nil
+}
+
+func (m *mockLedger) ConfirmHold(_ context.Context, _, _, reference string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.holds, reference)
+	return nil
+}
+
+func (m *mockLedger) ReleaseHold(_ context.Context, _, _, reference string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.holds, reference)
+	return nil
+}
+
+func (m *mockLedger) Deposit(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func (m *mockLedger) heldCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.holds)
 }
 
 func newTestService() (*Service, *MemoryStore, *mockReputation) {
@@ -1161,5 +1207,407 @@ func TestMergeHelpers(t *testing.T) {
 	}
 	if mergeFloat(0, 2.0) != 2.0 {
 		t.Error("mergeFloat: expected old value")
+	}
+}
+
+// --- Bid Bond tests ---
+
+func publishBondRFP(t *testing.T, svc *Service, bondPct float64, noWithdrawWindow string) *RFP {
+	t.Helper()
+	rfp, err := svc.PublishRFP(context.Background(), PublishRFPRequest{
+		BuyerAddr:        "0xBuyer",
+		ServiceType:      "translation",
+		Description:      "Need translation service",
+		MinBudget:        "0.50",
+		MaxBudget:        "1.00",
+		Duration:         "7d",
+		BidDeadline:      "24h",
+		RequiredBondPct:  bondPct,
+		NoWithdrawWindow: noWithdrawWindow,
+	})
+	if err != nil {
+		t.Fatalf("failed to publish RFP with bonds: %v", err)
+	}
+	return rfp
+}
+
+func TestPlaceBid_WithBond(t *testing.T) {
+	svc, _, _ := newTestService()
+	ml := newMockLedger()
+	svc.WithLedger(ml)
+
+	rfp := publishBondRFP(t, svc, 10, "") // 10% bond
+
+	bid, err := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+	if err != nil {
+		t.Fatalf("failed to place bid with bond: %v", err)
+	}
+
+	if bid.BondAmount != "0.075000" {
+		t.Errorf("expected bond amount 0.075000, got %s", bid.BondAmount)
+	}
+	if bid.BondStatus != BondStatusHeld {
+		t.Errorf("expected bond status held, got %s", bid.BondStatus)
+	}
+	if ml.heldCount() != 1 {
+		t.Errorf("expected 1 held bond, got %d", ml.heldCount())
+	}
+}
+
+func TestPlaceBid_BondNoLedger(t *testing.T) {
+	svc, _, _ := newTestService()
+	// No ledger configured
+	rfp := publishBondRFP(t, svc, 10, "")
+
+	_, err := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+	if !errors.Is(err, ErrBondRequired) {
+		t.Errorf("expected ErrBondRequired, got %v", err)
+	}
+}
+
+func TestPlaceBid_BondHoldFails(t *testing.T) {
+	svc, _, _ := newTestService()
+	ml := newMockLedger()
+	ml.holdErr = errors.New("insufficient balance")
+	svc.WithLedger(ml)
+
+	rfp := publishBondRFP(t, svc, 10, "")
+
+	_, err := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+	if !errors.Is(err, ErrInsufficientBond) {
+		t.Errorf("expected ErrInsufficientBond, got %v", err)
+	}
+}
+
+func TestSelectWinner_BondsReleased(t *testing.T) {
+	svc, _, _ := newTestService()
+	ml := newMockLedger()
+	svc.WithLedger(ml)
+
+	rfp := publishBondRFP(t, svc, 10, "")
+
+	bid1, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+	bid2, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller2",
+		PricePerCall: "0.006",
+		TotalBudget:  "0.80",
+		Duration:     "7d",
+	})
+
+	if ml.heldCount() != 2 {
+		t.Fatalf("expected 2 held bonds before award, got %d", ml.heldCount())
+	}
+
+	_, _, err := svc.SelectWinner(context.Background(), rfp.ID, bid1.ID, "0xBuyer")
+	if err != nil {
+		t.Fatalf("select winner failed: %v", err)
+	}
+
+	// All bonds should be released (winner + loser)
+	if ml.heldCount() != 0 {
+		t.Errorf("expected 0 held bonds after award, got %d", ml.heldCount())
+	}
+
+	// Winner's bond released
+	winner, _ := svc.GetBid(context.Background(), bid1.ID)
+	if winner.BondStatus != BondStatusReleased {
+		t.Errorf("expected winner bond released, got %s", winner.BondStatus)
+	}
+
+	// Loser's bond released
+	loser, _ := svc.GetBid(context.Background(), bid2.ID)
+	if loser.BondStatus != BondStatusReleased {
+		t.Errorf("expected loser bond released, got %s", loser.BondStatus)
+	}
+}
+
+func TestCancelRFP_BondsReleased(t *testing.T) {
+	svc, _, _ := newTestService()
+	ml := newMockLedger()
+	svc.WithLedger(ml)
+
+	rfp := publishBondRFP(t, svc, 10, "")
+
+	svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+
+	if ml.heldCount() != 1 {
+		t.Fatalf("expected 1 held bond before cancel, got %d", ml.heldCount())
+	}
+
+	_, err := svc.CancelRFP(context.Background(), rfp.ID, "0xBuyer", "changed plans")
+	if err != nil {
+		t.Fatalf("cancel failed: %v", err)
+	}
+
+	if ml.heldCount() != 0 {
+		t.Errorf("expected 0 held bonds after cancel, got %d", ml.heldCount())
+	}
+}
+
+func TestCounter_BondTransfer(t *testing.T) {
+	svc, _, _ := newTestService()
+	ml := newMockLedger()
+	svc.WithLedger(ml)
+
+	rfp := publishBondRFP(t, svc, 10, "")
+
+	bid, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+
+	counter, err := svc.Counter(context.Background(), rfp.ID, bid.ID, "0xBuyer", CounterRequest{
+		PricePerCall: "0.004",
+	})
+	if err != nil {
+		t.Fatalf("counter failed: %v", err)
+	}
+
+	// Counter bid should inherit bond
+	if counter.BondAmount != "0.075000" {
+		t.Errorf("expected counter bond amount 0.075000, got %s", counter.BondAmount)
+	}
+	if counter.BondStatus != BondStatusHeld {
+		t.Errorf("expected counter bond status held, got %s", counter.BondStatus)
+	}
+
+	// Old bid should have zeroed bond
+	old, _ := svc.GetBid(context.Background(), bid.ID)
+	if old.BondAmount != "0" {
+		t.Errorf("expected old bid bond amount 0, got %s", old.BondAmount)
+	}
+	if old.BondStatus != BondStatusNone {
+		t.Errorf("expected old bid bond status none, got %s", old.BondStatus)
+	}
+}
+
+// --- Withdrawal tests ---
+
+func TestWithdrawBid_Simple(t *testing.T) {
+	svc, _, _ := newTestService()
+	rfp := publishTestRFP(t, svc)
+
+	bid, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+
+	withdrawn, err := svc.WithdrawBid(context.Background(), rfp.ID, bid.ID, "0xSeller1")
+	if err != nil {
+		t.Fatalf("withdraw failed: %v", err)
+	}
+
+	if withdrawn.Status != BidStatusWithdrawn {
+		t.Errorf("expected status withdrawn, got %s", withdrawn.Status)
+	}
+}
+
+func TestWithdrawBid_Unauthorized(t *testing.T) {
+	svc, _, _ := newTestService()
+	rfp := publishTestRFP(t, svc)
+
+	bid, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+
+	_, err := svc.WithdrawBid(context.Background(), rfp.ID, bid.ID, "0xSeller2")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestWithdrawBid_AlreadyWithdrawn(t *testing.T) {
+	svc, _, _ := newTestService()
+	rfp := publishTestRFP(t, svc)
+
+	bid, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+
+	svc.WithdrawBid(context.Background(), rfp.ID, bid.ID, "0xSeller1")
+
+	_, err := svc.WithdrawBid(context.Background(), rfp.ID, bid.ID, "0xSeller1")
+	if !errors.Is(err, ErrBidAlreadyWithdrawn) {
+		t.Errorf("expected ErrBidAlreadyWithdrawn, got %v", err)
+	}
+}
+
+func TestWithdrawBid_NoWithdrawWindow(t *testing.T) {
+	svc, store, _ := newTestService()
+	ml := newMockLedger()
+	svc.WithLedger(ml)
+
+	// RFP with 2h no-withdrawal window before deadline
+	rfp := publishBondRFP(t, svc, 10, "2h")
+
+	bid, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+
+	// Move deadline to 1h from now (within the 2h no-withdrawal window)
+	store.mu.Lock()
+	store.rfps[rfp.ID].BidDeadline = time.Now().Add(1 * time.Hour)
+	store.mu.Unlock()
+
+	_, err := svc.WithdrawBid(context.Background(), rfp.ID, bid.ID, "0xSeller1")
+	if !errors.Is(err, ErrWithdrawalBlocked) {
+		t.Errorf("expected ErrWithdrawalBlocked, got %v", err)
+	}
+}
+
+func TestWithdrawBid_EarlyRelease(t *testing.T) {
+	svc, _, _ := newTestService()
+	ml := newMockLedger()
+	svc.WithLedger(ml)
+
+	rfp := publishBondRFP(t, svc, 10, "")
+
+	bid, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+
+	if ml.heldCount() != 1 {
+		t.Fatalf("expected 1 held bond, got %d", ml.heldCount())
+	}
+
+	// Withdraw early (well before deadline) → bond released fully
+	withdrawn, err := svc.WithdrawBid(context.Background(), rfp.ID, bid.ID, "0xSeller1")
+	if err != nil {
+		t.Fatalf("withdraw failed: %v", err)
+	}
+
+	if withdrawn.BondStatus != BondStatusReleased {
+		t.Errorf("expected bond released, got %s", withdrawn.BondStatus)
+	}
+	if ml.heldCount() != 0 {
+		t.Errorf("expected 0 held bonds after early withdraw, got %d", ml.heldCount())
+	}
+}
+
+func TestWithdrawBid_LateWithdrawalPenalty(t *testing.T) {
+	svc, store, _ := newTestService()
+	ml := newMockLedger()
+	svc.WithLedger(ml)
+
+	rfp := publishBondRFP(t, svc, 10, "")
+
+	bid, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+
+	// Move RFP creation time back so we're in the last 25% of the window.
+	// deadline is 24h from original creation. Set createdAt to 23h ago
+	// so totalWindow=24h, timeSinceCreation=23h > 18h (75% of 24h).
+	store.mu.Lock()
+	stored := store.rfps[rfp.ID]
+	stored.CreatedAt = time.Now().Add(-23 * time.Hour)
+	stored.BidDeadline = stored.CreatedAt.Add(24 * time.Hour)
+	store.mu.Unlock()
+
+	withdrawn, err := svc.WithdrawBid(context.Background(), rfp.ID, bid.ID, "0xSeller1")
+	if err != nil {
+		t.Fatalf("withdraw failed: %v", err)
+	}
+
+	if withdrawn.BondStatus != BondStatusForfeited {
+		t.Errorf("expected bond forfeited, got %s", withdrawn.BondStatus)
+	}
+}
+
+func TestWithdrawBid_TerminalRFP(t *testing.T) {
+	svc, _, _ := newTestService()
+	rfp := publishTestRFP(t, svc)
+
+	bid, _ := svc.PlaceBid(context.Background(), rfp.ID, PlaceBidRequest{
+		SellerAddr:   "0xSeller1",
+		PricePerCall: "0.005",
+		TotalBudget:  "0.75",
+		Duration:     "7d",
+	})
+
+	// Cancel the RFP first
+	svc.CancelRFP(context.Background(), rfp.ID, "0xBuyer", "done")
+
+	_, err := svc.WithdrawBid(context.Background(), rfp.ID, bid.ID, "0xSeller1")
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Errorf("expected ErrInvalidStatus for terminal RFP, got %v", err)
+	}
+}
+
+func TestPublishRFP_InvalidBondPct(t *testing.T) {
+	svc, _, _ := newTestService()
+
+	_, err := svc.PublishRFP(context.Background(), PublishRFPRequest{
+		BuyerAddr:       "0xBuyer",
+		ServiceType:     "translation",
+		MinBudget:       "0.50",
+		MaxBudget:       "1.00",
+		Duration:        "7d",
+		BidDeadline:     "24h",
+		RequiredBondPct: 150, // > 100
+	})
+	if err == nil {
+		t.Error("expected error for invalid bond percentage")
+	}
+}
+
+func TestPublishRFP_InvalidNoWithdrawWindow(t *testing.T) {
+	svc, _, _ := newTestService()
+
+	_, err := svc.PublishRFP(context.Background(), PublishRFPRequest{
+		BuyerAddr:        "0xBuyer",
+		ServiceType:      "translation",
+		MinBudget:        "0.50",
+		MaxBudget:        "1.00",
+		Duration:         "7d",
+		BidDeadline:      "24h",
+		NoWithdrawWindow: "not-a-duration",
+	})
+	if err == nil {
+		t.Error("expected error for invalid no-withdraw window")
 	}
 }

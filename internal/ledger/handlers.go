@@ -6,7 +6,9 @@ import (
 	"math/big"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
@@ -50,9 +52,42 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/agents/:address/ledger", h.GetHistory)
 }
 
+// RegisterAdminRoutes sets up admin-only ledger routes.
+func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
+	r.GET("/admin/reconcile", h.Reconcile)
+	r.GET("/admin/audit", h.QueryAudit)
+	r.POST("/admin/reversals", h.Reverse)
+	r.POST("/admin/batch/debits", h.BatchDebits)
+	r.POST("/admin/batch/deposits", h.BatchDeposits)
+	r.POST("/admin/batch/settle", h.BatchSettle)
+}
+
+// RegisterAlertRoutes sets up agent alert routes.
+func (h *Handler) RegisterAlertRoutes(r *gin.RouterGroup) {
+	r.POST("/agents/:address/alerts", h.CreateAlertConfig)
+	r.GET("/agents/:address/alerts", h.GetAlerts)
+	r.DELETE("/agents/:address/alerts/:id", h.DeleteAlertConfig)
+}
+
 // GetBalance handles GET /agents/:address/balance
 func (h *Handler) GetBalance(c *gin.Context) {
 	address := c.Param("address")
+
+	// Support point-in-time query
+	if tsStr := c.Query("at"); tsStr != "" {
+		ts, err := time.Parse(time.RFC3339, tsStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_timestamp", "message": "Use RFC3339 format"})
+			return
+		}
+		bal, err := h.ledger.BalanceAtTime(c.Request.Context(), address, ts)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "balance_error", "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"balance": bal, "at": tsStr})
+		return
+	}
 
 	balance, err := h.ledger.GetBalance(c.Request.Context(), address)
 	if err != nil {
@@ -260,5 +295,287 @@ func (h *Handler) RequestWithdrawal(c *gin.Context) {
 		"message": "Withdrawal request received",
 		"amount":  req.Amount,
 		"note":    "Withdrawals are processed within 24 hours",
+	})
+}
+
+// Reconcile handles GET /admin/reconcile — replays events vs actual balances.
+func (h *Handler) Reconcile(c *gin.Context) {
+	results, err := h.ledger.ReconcileAll(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "reconciliation_error",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// Filter to show only discrepancies if requested
+	if c.Query("discrepancies") == "true" {
+		var filtered []*ReconciliationResult
+		for _, r := range results {
+			if !r.Match {
+				filtered = append(filtered, r)
+			}
+		}
+		results = filtered
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"results": results,
+		"count":   len(results),
+	})
+}
+
+// QueryAudit handles GET /admin/audit?agent=&from=&to=&operation=
+func (h *Handler) QueryAudit(c *gin.Context) {
+	if h.ledger.auditLogger == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{
+			"error":   "not_configured",
+			"message": "Audit logging is not enabled",
+		})
+		return
+	}
+
+	agentAddr := c.Query("agent")
+	if agentAddr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "missing_agent",
+			"message": "agent query parameter is required",
+		})
+		return
+	}
+
+	from := time.Time{}
+	to := time.Now()
+	if fromStr := c.Query("from"); fromStr != "" {
+		if t, err := time.Parse(time.RFC3339, fromStr); err == nil {
+			from = t
+		}
+	}
+	if toStr := c.Query("to"); toStr != "" {
+		if t, err := time.Parse(time.RFC3339, toStr); err == nil {
+			to = t
+		}
+	}
+
+	operation := c.Query("operation")
+	limit := 100
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	entries, err := h.ledger.auditLogger.QueryAudit(c.Request.Context(), strings.ToLower(agentAddr), from, to, operation, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "audit_error",
+			"message": "Failed to query audit log",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"entries": entries,
+		"count":   len(entries),
+	})
+}
+
+// ReverseRequest for transaction reversal
+type ReverseRequest struct {
+	EntryID string `json:"entryId" binding:"required"`
+	Reason  string `json:"reason" binding:"required"`
+}
+
+// Reverse handles POST /admin/reversals
+func (h *Handler) Reverse(c *gin.Context) {
+	var req ReverseRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	adminID := c.GetString("agent_address") // from auth middleware
+	if adminID == "" {
+		adminID = "admin"
+	}
+
+	err := h.ledger.Reverse(c.Request.Context(), req.EntryID, req.Reason, adminID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		errCode := "reversal_error"
+
+		switch err {
+		case ErrEntryNotFound:
+			status = http.StatusNotFound
+			errCode = "entry_not_found"
+		case ErrAlreadyReversed:
+			status = http.StatusConflict
+			errCode = "already_reversed"
+		case ErrInsufficientBalance:
+			status = http.StatusBadRequest
+			errCode = "insufficient_balance"
+		}
+
+		c.JSON(status, gin.H{
+			"error":   errCode,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"status":  "reversed",
+		"message": "Entry reversed successfully",
+		"entryId": req.EntryID,
+	})
+}
+
+// CreateAlertConfig handles POST /agents/:address/alerts
+func (h *Handler) CreateAlertConfig(c *gin.Context) {
+	if h.ledger.alertChecker == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "not_configured", "message": "Alerts not enabled"})
+		return
+	}
+
+	address := c.Param("address")
+	var req struct {
+		AlertType  string `json:"alertType" binding:"required"`
+		Threshold  string `json:"threshold" binding:"required"`
+		WebhookURL string `json:"webhookUrl"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "Invalid request body"})
+		return
+	}
+
+	config := &AlertConfig{
+		AgentAddr:  strings.ToLower(address),
+		AlertType:  req.AlertType,
+		Threshold:  req.Threshold,
+		WebhookURL: req.WebhookURL,
+		Enabled:    true,
+	}
+
+	if err := h.ledger.alertChecker.store.CreateConfig(c.Request.Context(), config); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "alert_error", "message": "Failed to create alert config"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"config": config})
+}
+
+// GetAlerts handles GET /agents/:address/alerts
+func (h *Handler) GetAlerts(c *gin.Context) {
+	if h.ledger.alertChecker == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "not_configured", "message": "Alerts not enabled"})
+		return
+	}
+
+	address := c.Param("address")
+	limit := 50
+
+	alerts, err := h.ledger.alertChecker.store.GetAlerts(c.Request.Context(), strings.ToLower(address), limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "alert_error", "message": "Failed to get alerts"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"alerts": alerts, "count": len(alerts)})
+}
+
+// DeleteAlertConfig handles DELETE /agents/:address/alerts/:id
+func (h *Handler) DeleteAlertConfig(c *gin.Context) {
+	if h.ledger.alertChecker == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "not_configured", "message": "Alerts not enabled"})
+		return
+	}
+
+	configID := c.Param("id")
+	if err := h.ledger.alertChecker.store.DeleteConfig(c.Request.Context(), configID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "alert_error", "message": "Failed to delete alert config"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "disabled"})
+}
+
+// BatchDebits handles POST /admin/batch/debits
+func (h *Handler) BatchDebits(c *gin.Context) {
+	var req struct {
+		Debits []BatchDebitRequest `json:"debits" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "Invalid request body"})
+		return
+	}
+
+	// Execute each debit through the ledger (not batch store) so events/audit fire
+	errs := make([]string, len(req.Debits))
+	allOK := true
+	for i, d := range req.Debits {
+		if err := h.ledger.Spend(c.Request.Context(), d.AgentAddr, d.Amount, d.Reference); err != nil {
+			errs[i] = err.Error()
+			allOK = false
+		}
+	}
+
+	status := http.StatusOK
+	if !allOK {
+		status = http.StatusMultiStatus
+	}
+	c.JSON(status, gin.H{"results": errs, "allOk": allOK})
+}
+
+// BatchDeposits handles POST /admin/batch/deposits
+func (h *Handler) BatchDeposits(c *gin.Context) {
+	var req struct {
+		Deposits []BatchDepositRequest `json:"deposits" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "Invalid request body"})
+		return
+	}
+
+	errs := make([]string, len(req.Deposits))
+	allOK := true
+	for i, d := range req.Deposits {
+		if err := h.ledger.Deposit(c.Request.Context(), d.AgentAddr, d.Amount, d.TxHash); err != nil {
+			errs[i] = err.Error()
+			allOK = false
+		}
+	}
+
+	status := http.StatusOK
+	if !allOK {
+		status = http.StatusMultiStatus
+	}
+	c.JSON(status, gin.H{"results": errs, "allOk": allOK})
+}
+
+// BatchSettle handles POST /admin/batch/settle
+func (h *Handler) BatchSettle(c *gin.Context) {
+	var req struct {
+		Transfers []Transfer `json:"transfers" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "Invalid request body"})
+		return
+	}
+
+	settlements := ComputeNetSettlements(req.Transfers)
+
+	if err := ExecuteSettlement(c.Request.Context(), h.ledger.store, settlements); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "settlement_error", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":      "settled",
+		"settlements": settlements,
+		"count":       len(settlements),
 	})
 }

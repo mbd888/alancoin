@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/metrics"
 )
 
 // Service implements negotiation business logic.
@@ -15,6 +17,7 @@ type Service struct {
 	store      Store
 	reputation ReputationProvider
 	contracts  ContractFormer
+	ledger     LedgerService
 	locks      sync.Map // per-RFP ID locks
 }
 
@@ -35,6 +38,12 @@ func NewService(store Store, reputation ReputationProvider) *Service {
 // WithContractFormer adds the ability to auto-form contracts from winning bids.
 func (s *Service) WithContractFormer(cf ContractFormer) *Service {
 	s.contracts = cf
+	return s
+}
+
+// WithLedger enables bid bond holds via the ledger.
+func (s *Service) WithLedger(l LedgerService) *Service {
+	s.ledger = l
 	return s
 }
 
@@ -72,6 +81,18 @@ func (s *Service) PublishRFP(ctx context.Context, req PublishRFPRequest) (*RFP, 
 		weights = *req.ScoringWeights
 	}
 
+	// Validate bond percentage
+	if req.RequiredBondPct < 0 || req.RequiredBondPct > 100 {
+		return nil, errors.New("requiredBondPct must be between 0 and 100")
+	}
+
+	// Validate no-withdrawal window if provided
+	if req.NoWithdrawWindow != "" {
+		if _, err := parseDuration(req.NoWithdrawWindow); err != nil {
+			return nil, fmt.Errorf("invalid noWithdrawWindow: %w", err)
+		}
+	}
+
 	now := time.Now()
 	rfp := &RFP{
 		ID:               generateRFPID(),
@@ -88,6 +109,8 @@ func (s *Service) PublishRFP(ctx context.Context, req PublishRFPRequest) (*RFP, 
 		AutoSelect:       req.AutoSelect,
 		MinReputation:    req.MinReputation,
 		MaxCounterRounds: req.MaxCounterRounds,
+		RequiredBondPct:  req.RequiredBondPct,
+		NoWithdrawWindow: req.NoWithdrawWindow,
 		ScoringWeights:   weights,
 		Status:           RFPStatusOpen,
 		BidCount:         0,
@@ -99,6 +122,7 @@ func (s *Service) PublishRFP(ctx context.Context, req PublishRFPRequest) (*RFP, 
 		return nil, fmt.Errorf("failed to create RFP: %w", err)
 	}
 
+	metrics.RFPsPublishedTotal.Inc()
 	return rfp, nil
 }
 
@@ -182,16 +206,35 @@ func (s *Service) PlaceBid(ctx context.Context, rfpID string, req PlaceBidReques
 		Duration:      req.Duration,
 		SellerPenalty: req.SellerPenalty,
 		Status:        BidStatusPending,
+		BondAmount:    "0",
+		BondStatus:    BondStatusNone,
 		CounterRound:  0,
 		Message:       req.Message,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
 
+	// Handle bid bond
+	if rfp.RequiredBondPct > 0 {
+		if s.ledger == nil {
+			return nil, ErrBondRequired
+		}
+		bondAmount := calculateBondAmount(bidBudget, rfp.RequiredBondPct)
+		bid.BondAmount = bondAmount
+		if err := s.ledger.Hold(ctx, sellerAddr, bondAmount, "bid_bond:"+bid.ID); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInsufficientBond, err)
+		}
+		bid.BondStatus = BondStatusHeld
+	}
+
 	// Compute score
 	bid.Score = ScoreBid(bid, rfp, repScore)
 
 	if err := s.store.CreateBid(ctx, bid); err != nil {
+		// Release bond if bid creation fails
+		if bid.BondStatus == BondStatusHeld {
+			_ = s.ledger.ReleaseHold(ctx, sellerAddr, bid.BondAmount, "bid_bond:"+bid.ID)
+		}
 		return nil, fmt.Errorf("failed to create bid: %w", err)
 	}
 
@@ -202,6 +245,8 @@ func (s *Service) PlaceBid(ctx context.Context, rfpID string, req PlaceBidReques
 		log.Printf("WARNING: failed to update RFP bid count: %v", err)
 	}
 
+	metrics.BidsPlacedTotal.Inc()
+	metrics.BidScoreHistogram.Observe(bid.Score)
 	return bid, nil
 }
 
@@ -245,7 +290,7 @@ func (s *Service) Counter(ctx context.Context, rfpID, bidID, callerAddr string, 
 		return nil, ErrMaxCounterRounds
 	}
 
-	// Mark old bid as countered
+	// Create counter bid — bond transfers from parent
 	now := time.Now()
 	newBid := &Bid{
 		ID:            generateBidID(),
@@ -258,6 +303,8 @@ func (s *Service) Counter(ctx context.Context, rfpID, bidID, callerAddr string, 
 		Duration:      mergeString(req.Duration, oldBid.Duration),
 		SellerPenalty: mergeString(req.SellerPenalty, oldBid.SellerPenalty),
 		Status:        BidStatusPending,
+		BondAmount:    oldBid.BondAmount,
+		BondStatus:    oldBid.BondStatus,
 		CounterRound:  oldBid.CounterRound + 1,
 		ParentBidID:   oldBid.ID,
 		Message:       req.Message,
@@ -275,16 +322,23 @@ func (s *Service) Counter(ctx context.Context, rfpID, bidID, callerAddr string, 
 	}
 	newBid.Score = ScoreBid(newBid, rfp, repScore)
 
+	// Create counter bid first — it inherits the bond.
+	// This order is critical: if CreateBid fails, the old bid still owns the bond.
+	if err := s.store.CreateBid(ctx, newBid); err != nil {
+		return nil, fmt.Errorf("failed to create counter bid: %w", err)
+	}
+
+	// Only now strip bond tracking from the parent bid.
 	oldBid.Status = BidStatusCountered
 	oldBid.CounteredByID = newBid.ID
+	oldBid.BondStatus = BondStatusNone
+	oldBid.BondAmount = "0"
 	oldBid.UpdatedAt = now
 
 	if err := s.store.UpdateBid(ctx, oldBid); err != nil {
-		return nil, fmt.Errorf("failed to update old bid: %w", err)
-	}
-
-	if err := s.store.CreateBid(ctx, newBid); err != nil {
-		return nil, fmt.Errorf("failed to create counter bid: %w", err)
+		// Counter bid exists with bond — log but don't fail the counter.
+		// The bond is safe on the new bid; old bid status is stale but not harmful.
+		log.Printf("WARNING: counter bid %s created but failed to update parent bid %s: %v", newBid.ID, oldBid.ID, err)
 	}
 
 	return newBid, nil
@@ -375,20 +429,22 @@ func (s *Service) AutoSelect(ctx context.Context, rfpID string) (*RFP, *Bid, err
 func (s *Service) awardBid(ctx context.Context, rfp *RFP, bid *Bid) (*RFP, *Bid, error) {
 	now := time.Now()
 
-	// Accept the winning bid
+	// Accept the winning bid — release the winner's bond (contract takes over)
 	bid.Status = BidStatusAccepted
 	bid.UpdatedAt = now
+	s.releaseBond(ctx, bid)
 	if err := s.store.UpdateBid(ctx, bid); err != nil {
 		return nil, nil, fmt.Errorf("failed to accept winning bid: %w", err)
 	}
 
-	// Reject all other pending bids
+	// Reject all other pending bids and release their bonds
 	allBids, err := s.store.ListActiveBidsByRFP(ctx, rfp.ID)
 	if err == nil {
 		for _, b := range allBids {
 			if b.ID != bid.ID {
 				b.Status = BidStatusRejected
 				b.UpdatedAt = now
+				s.releaseBond(ctx, b)
 				_ = s.store.UpdateBid(ctx, b)
 			}
 		}
@@ -416,6 +472,8 @@ func (s *Service) awardBid(ctx context.Context, rfp *RFP, bid *Bid) (*RFP, *Bid,
 		return nil, nil, fmt.Errorf("failed to update RFP: %w", err)
 	}
 
+	metrics.RFPsAwardedTotal.Inc()
+	metrics.TimeToAwardSeconds.Observe(now.Sub(rfp.CreatedAt).Seconds())
 	return rfp, bid, nil
 }
 
@@ -441,12 +499,13 @@ func (s *Service) CancelRFP(ctx context.Context, rfpID, callerAddr, reason strin
 
 	now := time.Now()
 
-	// Reject all pending bids
+	// Reject all pending bids and release their bonds
 	bids, err := s.store.ListActiveBidsByRFP(ctx, rfpID)
 	if err == nil {
 		for _, b := range bids {
 			b.Status = BidStatusRejected
 			b.UpdatedAt = now
+			s.releaseBond(ctx, b)
 			_ = s.store.UpdateBid(ctx, b)
 		}
 	}
@@ -498,7 +557,10 @@ func (s *Service) CheckExpired(ctx context.Context) {
 				continue
 			}
 
-			if fresh.BidCount > 0 {
+			// Query actual pending bids instead of relying on BidCount
+			// (BidCount can be stale if the count update failed silently)
+			activeBids, bidErr := s.store.ListActiveBidsByRFP(ctx, fresh.ID)
+			if bidErr == nil && len(activeBids) > 0 {
 				// Has bids → selecting (give buyer 24h to pick)
 				fresh.Status = RFPStatusSelecting
 				fresh.UpdatedAt = now
@@ -538,12 +600,13 @@ func (s *Service) expireRFP(ctx context.Context, rfp *RFP) {
 func (s *Service) expireRFPLocked(ctx context.Context, rfp *RFP) {
 	now := time.Now()
 
-	// Reject pending bids
+	// Reject pending bids and release bonds
 	bids, err := s.store.ListActiveBidsByRFP(ctx, rfp.ID)
 	if err == nil {
 		for _, b := range bids {
 			b.Status = BidStatusRejected
 			b.UpdatedAt = now
+			s.releaseBond(ctx, b)
 			_ = s.store.UpdateBid(ctx, b)
 		}
 	}
@@ -551,6 +614,7 @@ func (s *Service) expireRFPLocked(ctx context.Context, rfp *RFP) {
 	rfp.Status = RFPStatusExpired
 	rfp.UpdatedAt = now
 	_ = s.store.UpdateRFP(ctx, rfp)
+	metrics.RFPsExpiredTotal.Inc()
 }
 
 // Get returns an RFP by ID.
@@ -666,4 +730,150 @@ func mergeFloat(new, old float64) float64 {
 		return new
 	}
 	return old
+}
+
+// calculateBondAmount computes the bond as a percentage of the bid budget.
+func calculateBondAmount(budget float64, pct float64) string {
+	return fmt.Sprintf("%.6f", budget*pct/100)
+}
+
+// WithdrawBid allows a seller to withdraw a pending bid.
+// If the RFP has a no-withdrawal window and we're inside it, the withdrawal is blocked.
+// If we're in the last 25% of the bidding window and bonds are held, 50% of the bond is forfeited.
+func (s *Service) WithdrawBid(ctx context.Context, rfpID, bidID, callerAddr string) (*Bid, error) {
+	mu := s.rfpLock(rfpID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	rfp, err := s.store.GetRFP(ctx, rfpID)
+	if err != nil {
+		return nil, err
+	}
+
+	if rfp.IsTerminal() {
+		return nil, ErrInvalidStatus
+	}
+
+	bid, err := s.store.GetBid(ctx, bidID)
+	if err != nil {
+		return nil, err
+	}
+
+	if bid.RFPID != rfpID {
+		return nil, ErrBidNotFound
+	}
+
+	if bid.Status != BidStatusPending {
+		return nil, ErrBidAlreadyWithdrawn
+	}
+
+	caller := strings.ToLower(callerAddr)
+	if caller != bid.SellerAddr {
+		return nil, ErrUnauthorized
+	}
+
+	now := time.Now()
+
+	// Check no-withdrawal window
+	if rfp.NoWithdrawWindow != "" {
+		windowDur, err := parseDuration(rfp.NoWithdrawWindow)
+		if err == nil {
+			windowStart := rfp.BidDeadline.Add(-windowDur)
+			if now.After(windowStart) && now.Before(rfp.BidDeadline) {
+				return nil, ErrWithdrawalBlocked
+			}
+		}
+	}
+
+	// Check if in last 25% of bidding window for penalty
+	totalWindow := rfp.BidDeadline.Sub(rfp.CreatedAt)
+	timeSinceCreation := now.Sub(rfp.CreatedAt)
+	inLastQuarter := totalWindow > 0 && timeSinceCreation > totalWindow*3/4
+
+	bid.Status = BidStatusWithdrawn
+	bid.UpdatedAt = now
+
+	if bid.BondStatus == BondStatusHeld && bid.BondAmount != "0" {
+		if inLastQuarter {
+			s.forfeitBond(ctx, bid, rfp.BuyerAddr, 0.50)
+		} else {
+			s.releaseBond(ctx, bid)
+		}
+	}
+
+	if err := s.store.UpdateBid(ctx, bid); err != nil {
+		return nil, fmt.Errorf("failed to withdraw bid: %w", err)
+	}
+
+	metrics.BidsWithdrawnTotal.Inc()
+	return bid, nil
+}
+
+// releaseBond releases a bid's held bond back to the seller.
+// NOTE: If ReleaseHold fails, the bond stays in "held" status while the bid transitions
+// to a terminal state. No code path retries the release — the seller's funds are stuck
+// in pending. A reconciliation job should periodically scan for bids in terminal states
+// with BondStatus="held" and retry the release.
+func (s *Service) releaseBond(ctx context.Context, bid *Bid) {
+	if s.ledger == nil || bid.BondStatus != BondStatusHeld || bid.BondAmount == "0" {
+		return
+	}
+	if err := s.ledger.ReleaseHold(ctx, bid.SellerAddr, bid.BondAmount, "bid_bond:"+bid.ID); err != nil {
+		log.Printf("WARNING: failed to release bond for bid %s: %v", bid.ID, err)
+		return
+	}
+	bid.BondStatus = BondStatusReleased
+}
+
+// forfeitBond forfeits a portion of a bid's bond, depositing the forfeited amount to the buyer.
+// forfeitPct is 0.0–1.0 (e.g., 0.50 = 50% forfeit).
+//
+// Strategy: ReleaseHold the full bond first (correctly reverses any credit draws),
+// then Hold+ConfirmHold the forfeit portion from the seller's now-available balance,
+// and Deposit the forfeit to the buyer. This avoids splitting a single hold which
+// breaks the ledger's credit_draw_hold reversal logic.
+func (s *Service) forfeitBond(ctx context.Context, bid *Bid, buyerAddr string, forfeitPct float64) {
+	if s.ledger == nil || bid.BondStatus != BondStatusHeld || bid.BondAmount == "0" {
+		return
+	}
+
+	bondAmount := parseFloat(bid.BondAmount)
+	forfeitAmount := bondAmount * forfeitPct
+	ref := "bid_bond:" + bid.ID
+	forfeitRef := "bid_bond_forfeit:" + bid.ID
+
+	// Step 1: Release the full bond (correctly reverses credit draws)
+	if err := s.ledger.ReleaseHold(ctx, bid.SellerAddr, bid.BondAmount, ref); err != nil {
+		log.Printf("WARNING: failed to release bond for forfeit on bid %s: %v", bid.ID, err)
+		return
+	}
+
+	// Step 2: Deduct the forfeit from seller (Hold + ConfirmHold)
+	if forfeitAmount > 0 {
+		forfeitStr := fmt.Sprintf("%.6f", forfeitAmount)
+		if err := s.ledger.Hold(ctx, bid.SellerAddr, forfeitStr, forfeitRef); err != nil {
+			log.Printf("WARNING: failed to hold forfeit for bid %s: %v", bid.ID, err)
+			// Bond was released but forfeit failed — seller keeps full amount.
+			// This is the safe failure mode (no fund loss).
+			bid.BondStatus = BondStatusReleased
+			return
+		}
+		if err := s.ledger.ConfirmHold(ctx, bid.SellerAddr, forfeitStr, forfeitRef); err != nil {
+			log.Printf("WARNING: failed to confirm forfeit for bid %s: %v", bid.ID, err)
+			// Undo the hold
+			_ = s.ledger.ReleaseHold(ctx, bid.SellerAddr, forfeitStr, forfeitRef)
+			bid.BondStatus = BondStatusReleased
+			return
+		}
+
+		// Step 3: Deposit forfeit to buyer
+		if err := s.ledger.Deposit(ctx, buyerAddr, forfeitStr, forfeitRef); err != nil {
+			log.Printf("WARNING: failed to deposit forfeit to buyer for bid %s: %v", bid.ID, err)
+			// Forfeit was confirmed (seller lost funds) but buyer deposit failed.
+			// Funds are in total_out limbo — needs manual reconciliation.
+		}
+	}
+
+	bid.BondStatus = BondStatusForfeited
+	metrics.BondsForfeitedTotal.Inc()
 }

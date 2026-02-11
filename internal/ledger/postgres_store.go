@@ -792,3 +792,143 @@ func (p *PostgresStore) GetCreditInfo(ctx context.Context, agentAddr string) (st
 	}
 	return creditLimit, creditUsed, nil
 }
+
+// SumAllBalances returns the sum of all agent balances.
+func (p *PostgresStore) SumAllBalances(ctx context.Context) (string, string, string, error) {
+	var available, pending, escrowed string
+	err := p.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(available), 0), COALESCE(SUM(pending), 0), COALESCE(SUM(escrowed), 0)
+		FROM agent_balances
+	`).Scan(&available, &pending, &escrowed)
+	if err != nil {
+		return "0", "0", "0", err
+	}
+	return available, pending, escrowed, nil
+}
+
+// GetEntry retrieves a single ledger entry by ID.
+func (p *PostgresStore) GetEntry(ctx context.Context, entryID string) (*Entry, error) {
+	e := &Entry{}
+	var txHash, reference, description sql.NullString
+	var reversedAt sql.NullTime
+	var reversedBy, reversalOf sql.NullString
+
+	err := p.db.QueryRowContext(ctx, `
+		SELECT id, agent_address, type, amount, tx_hash, reference, description,
+		       reversed_at, reversed_by, reversal_of, created_at
+		FROM ledger_entries WHERE id = $1
+	`, entryID).Scan(&e.ID, &e.AgentAddr, &e.Type, &e.Amount,
+		&txHash, &reference, &description,
+		&reversedAt, &reversedBy, &reversalOf, &e.CreatedAt)
+
+	if err == sql.ErrNoRows {
+		return nil, ErrEntryNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	e.TxHash = txHash.String
+	e.Reference = reference.String
+	e.Description = description.String
+	if reversedAt.Valid {
+		e.ReversedAt = &reversedAt.Time
+	}
+	e.ReversedBy = reversedBy.String
+	e.ReversalOf = reversalOf.String
+	return e, nil
+}
+
+// Reverse creates a compensating entry and marks the original as reversed.
+func (p *PostgresStore) Reverse(ctx context.Context, entryID, reason, adminID string) error {
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Get original entry
+	var agentAddr, entryType, amount string
+	var reversedAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `
+		SELECT agent_address, type, amount, reversed_at
+		FROM ledger_entries WHERE id = $1 FOR UPDATE
+	`, entryID).Scan(&agentAddr, &entryType, &amount, &reversedAt)
+	if err == sql.ErrNoRows {
+		return ErrEntryNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if reversedAt.Valid {
+		return ErrAlreadyReversed
+	}
+
+	// Create compensating balance change
+	switch entryType {
+	case "deposit":
+		// Reverse deposit = deduct from available
+		result, err := tx.ExecContext(ctx, `
+			UPDATE agent_balances SET
+				available = available - $2::NUMERIC(20,6),
+				total_in  = total_in  - $2::NUMERIC(20,6),
+				updated_at = NOW()
+			WHERE agent_address = $1 AND available >= $2::NUMERIC(20,6)
+		`, agentAddr, amount)
+		if err != nil {
+			return fmt.Errorf("reversal balance update failed: %w", err)
+		}
+		rows, _ := result.RowsAffected()
+		if rows == 0 {
+			return ErrInsufficientBalance
+		}
+	case "spend", "withdrawal":
+		// Reverse spend/withdrawal = credit back
+		_, err := tx.ExecContext(ctx, `
+			UPDATE agent_balances SET
+				available = available + $2::NUMERIC(20,6),
+				total_out = GREATEST(0, total_out - $2::NUMERIC(20,6)),
+				updated_at = NOW()
+			WHERE agent_address = $1
+		`, agentAddr, amount)
+		if err != nil {
+			return fmt.Errorf("reversal balance update failed: %w", err)
+		}
+	case "refund":
+		// Reverse refund = deduct
+		result, err := tx.ExecContext(ctx, `
+			UPDATE agent_balances SET
+				available = available - $2::NUMERIC(20,6),
+				updated_at = NOW()
+			WHERE agent_address = $1 AND available >= $2::NUMERIC(20,6)
+		`, agentAddr, amount)
+		if err != nil {
+			return fmt.Errorf("reversal balance update failed: %w", err)
+		}
+		rows, _ := result.RowsAffected()
+		if rows == 0 {
+			return ErrInsufficientBalance
+		}
+	default:
+		return fmt.Errorf("cannot reverse entry type %q", entryType)
+	}
+
+	// Mark original as reversed
+	_, err = tx.ExecContext(ctx, `
+		UPDATE ledger_entries SET reversed_at = NOW(), reversed_by = $2 WHERE id = $1
+	`, entryID, adminID)
+	if err != nil {
+		return fmt.Errorf("failed to mark entry as reversed: %w", err)
+	}
+
+	// Create reversal entry
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, reversal_of, created_at)
+		VALUES ($1, $2, $3, $4::NUMERIC(20,6), $5, $6, $7, NOW())
+	`, idgen.New(), agentAddr, "reversal_"+entryType, amount, reason, "reversal: "+reason, entryID)
+	if err != nil {
+		return fmt.Errorf("failed to create reversal entry: %w", err)
+	}
+
+	return tx.Commit()
+}

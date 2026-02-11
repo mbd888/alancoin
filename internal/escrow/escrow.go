@@ -13,7 +13,8 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,7 +35,6 @@ const (
 	StatusPending   Status = "pending"   // Created, funds locked
 	StatusDelivered Status = "delivered" // Seller marked service as delivered
 	StatusReleased  Status = "released"  // Buyer confirmed, funds sent to seller
-	StatusDisputed  Status = "disputed"  // Buyer disputed, funds returned
 	StatusRefunded  Status = "refunded"  // Dispute resolved with refund
 	StatusExpired   Status = "expired"   // Auto-released after timeout
 )
@@ -116,6 +116,7 @@ type Service struct {
 	ledger   LedgerService
 	recorder TransactionRecorder
 	revenue  RevenueAccumulator
+	logger   *slog.Logger
 	locks    sync.Map // per-escrow ID locks to prevent race conditions
 }
 
@@ -126,12 +127,24 @@ func (s *Service) escrowLock(id string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
+// cleanupLock removes the per-escrow mutex after a terminal state is reached.
+func (s *Service) cleanupLock(id string) {
+	s.locks.Delete(id)
+}
+
 // NewService creates a new escrow service.
 func NewService(store Store, ledger LedgerService) *Service {
 	return &Service{
 		store:  store,
 		ledger: ledger,
+		logger: slog.Default(),
 	}
+}
+
+// WithLogger sets a structured logger for the service.
+func (s *Service) WithLogger(l *slog.Logger) *Service {
+	s.logger = l
+	return s
 }
 
 // WithRecorder adds a transaction recorder for reputation integration.
@@ -146,10 +159,34 @@ func (s *Service) WithRevenueAccumulator(r RevenueAccumulator) *Service {
 	return s
 }
 
+// validateAmount checks that the amount string is a positive number within NUMERIC(20,6) range.
+func validateAmount(amount string) error {
+	amount = strings.TrimSpace(amount)
+	if amount == "" {
+		return fmt.Errorf("%w: empty amount", ErrInvalidAmount)
+	}
+	f, err := strconv.ParseFloat(amount, 64)
+	if err != nil {
+		return fmt.Errorf("%w: %q is not a valid number", ErrInvalidAmount, amount)
+	}
+	if f <= 0 {
+		return fmt.Errorf("%w: amount must be positive", ErrInvalidAmount)
+	}
+	// NUMERIC(20,6) max is 99999999999999.999999
+	if f > 99_999_999_999_999 {
+		return fmt.Errorf("%w: amount exceeds maximum", ErrInvalidAmount)
+	}
+	return nil
+}
+
 // Create creates a new escrow and locks buyer funds.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (*Escrow, error) {
 	if strings.EqualFold(req.BuyerAddr, req.SellerAddr) {
 		return nil, errors.New("buyer and seller cannot be the same address")
+	}
+
+	if err := validateAmount(req.Amount); err != nil {
+		return nil, err
 	}
 
 	autoRelease := DefaultAutoRelease
@@ -262,8 +299,8 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 			// CRITICAL: Funds were released to seller but escrow record is stale.
 			// Cannot safely reverse ReleaseEscrow (no inverse operation).
 			// Log for manual resolution rather than applying wrong compensation.
-			log.Printf("CRITICAL: escrow %s funds released to %s but status update failed: %v",
-				escrow.ID, escrow.SellerAddr, retryErr)
+			s.logger.Error("CRITICAL: escrow funds released but status update failed",
+				"escrow_id", escrow.ID, "seller", escrow.SellerAddr, "amount", escrow.Amount, "error", retryErr)
 			return nil, fmt.Errorf("failed to update escrow after fund release (requires manual resolution): %w", err)
 		}
 	}
@@ -278,6 +315,7 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 		_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, escrow.Amount, "escrow_confirm:"+escrow.ID)
 	}
 
+	s.cleanupLock(id)
 	return escrow, nil
 }
 
@@ -327,6 +365,7 @@ func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*
 		_ = s.recorder.RecordTransaction(ctx, escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ServiceID, "failed")
 	}
 
+	s.cleanupLock(id)
 	return escrow, nil
 }
 
@@ -364,8 +403,8 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 			// CRITICAL: Funds were auto-released to seller but escrow record is stale.
 			// Cannot safely reverse ReleaseEscrow (no inverse operation).
 			// Log for manual resolution rather than applying wrong compensation.
-			log.Printf("CRITICAL: escrow %s auto-released to %s but status update failed: %v",
-				escrow.ID, escrow.SellerAddr, retryErr)
+			s.logger.Error("CRITICAL: escrow auto-released but status update failed",
+				"escrow_id", escrow.ID, "seller", escrow.SellerAddr, "amount", escrow.Amount, "error", retryErr)
 			return fmt.Errorf("failed to update escrow after auto-release (requires manual resolution): %w", err)
 		}
 	}
@@ -380,6 +419,7 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 		_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, escrow.Amount, "escrow_release:"+escrow.ID)
 	}
 
+	s.cleanupLock(escrow.ID)
 	return nil
 }
 

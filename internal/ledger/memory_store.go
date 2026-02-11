@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"sync"
 	"time"
@@ -691,4 +692,116 @@ func (m *MemoryStore) GetCreditInfo(ctx context.Context, agentAddr string) (stri
 		return "0", "0", nil
 	}
 	return bal.CreditLimit, bal.CreditUsed, nil
+}
+
+// SumAllBalances returns the sum of all agent balances.
+func (m *MemoryStore) SumAllBalances(_ context.Context) (string, string, string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	availTotal := big.NewInt(0)
+	pendTotal := big.NewInt(0)
+	escrowTotal := big.NewInt(0)
+
+	for _, bal := range m.balances {
+		a, _ := usdc.Parse(bal.Available)
+		p, _ := usdc.Parse(bal.Pending)
+		e, _ := usdc.Parse(bal.Escrowed)
+		availTotal.Add(availTotal, a)
+		pendTotal.Add(pendTotal, p)
+		escrowTotal.Add(escrowTotal, e)
+	}
+
+	return usdc.Format(availTotal), usdc.Format(pendTotal), usdc.Format(escrowTotal), nil
+}
+
+// GetEntry retrieves a single ledger entry by ID.
+func (m *MemoryStore) GetEntry(_ context.Context, entryID string) (*Entry, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, e := range m.entries {
+		if e.ID == entryID {
+			cp := *e
+			return &cp, nil
+		}
+	}
+	return nil, ErrEntryNotFound
+}
+
+// Reverse creates a compensating entry and marks the original as reversed.
+func (m *MemoryStore) Reverse(_ context.Context, entryID, reason, adminID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Find original entry
+	var original *Entry
+	for _, e := range m.entries {
+		if e.ID == entryID {
+			original = e
+			break
+		}
+	}
+	if original == nil {
+		return ErrEntryNotFound
+	}
+	if original.ReversedAt != nil {
+		return ErrAlreadyReversed
+	}
+
+	bal, ok := m.balances[original.AgentAddr]
+	if !ok {
+		return ErrAgentNotFound
+	}
+
+	amt, _ := usdc.Parse(original.Amount)
+	avail, _ := usdc.Parse(bal.Available)
+	totalIn, _ := usdc.Parse(bal.TotalIn)
+	totalOut, _ := usdc.Parse(bal.TotalOut)
+
+	switch original.Type {
+	case "deposit":
+		if avail.Cmp(amt) < 0 {
+			return ErrInsufficientBalance
+		}
+		avail.Sub(avail, amt)
+		totalIn.Sub(totalIn, amt)
+	case "spend", "withdrawal":
+		avail.Add(avail, amt)
+		totalOut.Sub(totalOut, amt)
+		if totalOut.Sign() < 0 {
+			totalOut.SetInt64(0)
+		}
+	case "refund":
+		if avail.Cmp(amt) < 0 {
+			return ErrInsufficientBalance
+		}
+		avail.Sub(avail, amt)
+	default:
+		return fmt.Errorf("cannot reverse entry type %q", original.Type)
+	}
+
+	bal.Available = usdc.Format(avail)
+	bal.TotalIn = usdc.Format(totalIn)
+	bal.TotalOut = usdc.Format(totalOut)
+	bal.UpdatedAt = time.Now()
+
+	// Mark original as reversed
+	now := time.Now()
+	original.ReversedAt = &now
+	original.ReversedBy = adminID
+
+	// Create reversal entry
+	m.entries = append(m.entries, &Entry{
+		ID:          idgen.WithPrefix("entry_reversal_"),
+		AgentAddr:   original.AgentAddr,
+		Type:        "reversal_" + original.Type,
+		Amount:      original.Amount,
+		Reference:   reason,
+		Description: "reversal: " + reason,
+		ReversalOf:  entryID,
+		CreatedAt:   time.Now(),
+	})
+
+	return nil
 }

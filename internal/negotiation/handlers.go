@@ -32,6 +32,7 @@ func (h *Handler) RegisterProtectedRoutes(r *gin.RouterGroup) {
 	r.POST("/rfps", h.PublishRFP)
 	r.POST("/rfps/:id/bids", h.PlaceBid)
 	r.POST("/rfps/:id/bids/:bidId/counter", h.CounterBid)
+	r.POST("/rfps/:id/bids/:bidId/withdraw", h.WithdrawBid)
 	r.POST("/rfps/:id/select", h.SelectWinner)
 	r.POST("/rfps/:id/cancel", h.CancelRFP)
 }
@@ -222,12 +223,56 @@ func (h *Handler) PlaceBid(c *gin.Context) {
 		case errors.Is(err, ErrLowReputation):
 			status = http.StatusForbidden
 			code = "low_reputation"
+		case errors.Is(err, ErrBondRequired):
+			status = http.StatusBadRequest
+			code = "bond_required"
+		case errors.Is(err, ErrInsufficientBond):
+			status = http.StatusPaymentRequired
+			code = "insufficient_bond"
 		}
 		c.JSON(status, gin.H{"error": code, "message": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"bid": bid})
+}
+
+// WithdrawBid handles POST /v1/rfps/:id/bids/:bidId/withdraw
+func (h *Handler) WithdrawBid(c *gin.Context) {
+	rfpID := c.Param("id")
+	bidID := c.Param("bidId")
+
+	callerAddr := c.GetString("authAgentAddr")
+
+	bid, err := h.service.WithdrawBid(c.Request.Context(), rfpID, bidID, callerAddr)
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := "withdraw_failed"
+		switch {
+		case errors.Is(err, ErrRFPNotFound):
+			status = http.StatusNotFound
+			code = "rfp_not_found"
+		case errors.Is(err, ErrBidNotFound):
+			status = http.StatusNotFound
+			code = "bid_not_found"
+		case errors.Is(err, ErrBidAlreadyWithdrawn):
+			status = http.StatusConflict
+			code = "already_withdrawn"
+		case errors.Is(err, ErrInvalidStatus):
+			status = http.StatusConflict
+			code = "invalid_status"
+		case errors.Is(err, ErrUnauthorized):
+			status = http.StatusForbidden
+			code = "unauthorized"
+		case errors.Is(err, ErrWithdrawalBlocked):
+			status = http.StatusConflict
+			code = "withdrawal_blocked"
+		}
+		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"bid": bid})
 }
 
 // CounterBid handles POST /v1/rfps/:id/bids/:bidId/counter

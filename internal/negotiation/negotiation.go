@@ -19,18 +19,22 @@ import (
 )
 
 var (
-	ErrRFPNotFound      = errors.New("rfp not found")
-	ErrBidNotFound      = errors.New("bid not found")
-	ErrInvalidStatus    = errors.New("invalid status for this operation")
-	ErrUnauthorized     = errors.New("not authorized for this operation")
-	ErrBidDeadlinePast  = errors.New("bid deadline has passed")
-	ErrSelfBid          = errors.New("buyer cannot bid on own RFP")
-	ErrDuplicateBid     = errors.New("seller already has a pending bid on this RFP")
-	ErrBudgetOutOfRange = errors.New("bid budget outside RFP range")
-	ErrMaxCounterRounds = errors.New("maximum counter-offer rounds exceeded")
-	ErrLowReputation    = errors.New("seller does not meet minimum reputation")
-	ErrNoBids           = errors.New("no pending bids to select from")
-	ErrAlreadyAwarded   = errors.New("rfp already awarded")
+	ErrRFPNotFound         = errors.New("rfp not found")
+	ErrBidNotFound         = errors.New("bid not found")
+	ErrInvalidStatus       = errors.New("invalid status for this operation")
+	ErrUnauthorized        = errors.New("not authorized for this operation")
+	ErrBidDeadlinePast     = errors.New("bid deadline has passed")
+	ErrSelfBid             = errors.New("buyer cannot bid on own RFP")
+	ErrDuplicateBid        = errors.New("seller already has a pending bid on this RFP")
+	ErrBudgetOutOfRange    = errors.New("bid budget outside RFP range")
+	ErrMaxCounterRounds    = errors.New("maximum counter-offer rounds exceeded")
+	ErrLowReputation       = errors.New("seller does not meet minimum reputation")
+	ErrNoBids              = errors.New("no pending bids to select from")
+	ErrAlreadyAwarded      = errors.New("rfp already awarded")
+	ErrBondRequired        = errors.New("bid bond required but ledger not configured")
+	ErrInsufficientBond    = errors.New("insufficient balance for bid bond")
+	ErrWithdrawalBlocked   = errors.New("withdrawals blocked during no-withdrawal window")
+	ErrBidAlreadyWithdrawn = errors.New("bid already withdrawn")
 )
 
 // RFPStatus represents the state of an RFP.
@@ -53,6 +57,16 @@ const (
 	BidStatusRejected  BidStatus = "rejected"
 	BidStatusWithdrawn BidStatus = "withdrawn"
 	BidStatusCountered BidStatus = "countered"
+)
+
+// BondStatus represents the state of a bid bond.
+type BondStatus string
+
+const (
+	BondStatusNone      BondStatus = "none"
+	BondStatusHeld      BondStatus = "held"
+	BondStatusReleased  BondStatus = "released"
+	BondStatusForfeited BondStatus = "forfeited"
 )
 
 // ScoringWeights controls how bids are scored.
@@ -83,6 +97,8 @@ type RFP struct {
 	AutoSelect       bool           `json:"autoSelect"`
 	MinReputation    float64        `json:"minReputation"`
 	MaxCounterRounds int            `json:"maxCounterRounds"`
+	RequiredBondPct  float64        `json:"requiredBondPct"`  // 0-100, percentage of bid total required as bond
+	NoWithdrawWindow string         `json:"noWithdrawWindow"` // duration before deadline where withdrawals are blocked (e.g., "6h")
 	ScoringWeights   ScoringWeights `json:"scoringWeights"`
 	Status           RFPStatus      `json:"status"`
 	WinningBidID     string         `json:"winningBidId,omitempty"`
@@ -105,23 +121,25 @@ func (r *RFP) IsTerminal() bool {
 
 // Bid represents a seller's offer on an RFP.
 type Bid struct {
-	ID            string    `json:"id"`
-	RFPID         string    `json:"rfpId"`
-	SellerAddr    string    `json:"sellerAddr"`
-	PricePerCall  string    `json:"pricePerCall"`
-	TotalBudget   string    `json:"totalBudget"`
-	MaxLatencyMs  int       `json:"maxLatencyMs"`
-	SuccessRate   float64   `json:"successRate"`
-	Duration      string    `json:"duration"`
-	SellerPenalty string    `json:"sellerPenalty"`
-	Status        BidStatus `json:"status"`
-	Score         float64   `json:"score"`
-	CounterRound  int       `json:"counterRound"`
-	ParentBidID   string    `json:"parentBidId,omitempty"`
-	CounteredByID string    `json:"counteredById,omitempty"`
-	Message       string    `json:"message,omitempty"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	ID            string     `json:"id"`
+	RFPID         string     `json:"rfpId"`
+	SellerAddr    string     `json:"sellerAddr"`
+	PricePerCall  string     `json:"pricePerCall"`
+	TotalBudget   string     `json:"totalBudget"`
+	MaxLatencyMs  int        `json:"maxLatencyMs"`
+	SuccessRate   float64    `json:"successRate"`
+	Duration      string     `json:"duration"`
+	SellerPenalty string     `json:"sellerPenalty"`
+	Status        BidStatus  `json:"status"`
+	Score         float64    `json:"score"`
+	CounterRound  int        `json:"counterRound"`
+	ParentBidID   string     `json:"parentBidId,omitempty"`
+	CounteredByID string     `json:"counteredById,omitempty"`
+	BondAmount    string     `json:"bondAmount"` // Amount held as bond (may be "0")
+	BondStatus    BondStatus `json:"bondStatus"` // none, held, released, forfeited
+	Message       string     `json:"message,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
 }
 
 // PublishRFPRequest contains the parameters for publishing an RFP.
@@ -139,6 +157,8 @@ type PublishRFPRequest struct {
 	AutoSelect       bool            `json:"autoSelect"`
 	MinReputation    float64         `json:"minReputation"`
 	MaxCounterRounds int             `json:"maxCounterRounds"`
+	RequiredBondPct  float64         `json:"requiredBondPct"`  // 0-100, percentage of bid total required as bond
+	NoWithdrawWindow string          `json:"noWithdrawWindow"` // duration before deadline where withdrawals are blocked
 	ScoringWeights   *ScoringWeights `json:"scoringWeights"`
 }
 
@@ -205,6 +225,14 @@ type ReputationProvider interface {
 // ContractFormer creates binding contracts from winning bids.
 type ContractFormer interface {
 	FormContract(ctx context.Context, rfp *RFP, bid *Bid) (string, error)
+}
+
+// LedgerService holds and releases bid bonds.
+type LedgerService interface {
+	Hold(ctx context.Context, agentAddr, amount, reference string) error
+	ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error
+	ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error
+	Deposit(ctx context.Context, agentAddr, amount, reference string) error
 }
 
 // ScoreBid computes a bid's score based on the RFP's scoring weights.
