@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/mbd888/alancoin/internal/metrics"
 	"github.com/mbd888/alancoin/internal/traces"
+	"github.com/mbd888/alancoin/internal/usdc"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )
@@ -37,15 +39,30 @@ var (
 type Status string
 
 const (
-	StatusPending   Status = "pending"   // Created, funds locked
-	StatusDelivered Status = "delivered" // Seller marked service as delivered
-	StatusReleased  Status = "released"  // Buyer confirmed, funds sent to seller
-	StatusRefunded  Status = "refunded"  // Dispute resolved with refund
-	StatusExpired   Status = "expired"   // Auto-released after timeout
+	StatusPending     Status = "pending"     // Created, funds locked
+	StatusDelivered   Status = "delivered"   // Seller marked service as delivered
+	StatusReleased    Status = "released"    // Buyer confirmed, funds sent to seller
+	StatusRefunded    Status = "refunded"    // Dispute resolved with refund
+	StatusExpired     Status = "expired"     // Auto-released after timeout
+	StatusDisputed    Status = "disputed"    // Buyer raised dispute, awaiting arbitration
+	StatusArbitrating Status = "arbitrating" // Arbitrator assigned, evidence being reviewed
 )
 
 // DefaultAutoRelease is the default time before auto-releasing to seller.
 const DefaultAutoRelease = 5 * time.Minute
+
+// DefaultDisputeWindow is the time after delivery during which buyer can dispute.
+const DefaultDisputeWindow = 24 * time.Hour
+
+// DefaultArbitrationDeadline is the time given for arbitration after assignment.
+const DefaultArbitrationDeadline = 72 * time.Hour
+
+// EvidenceEntry represents a piece of evidence submitted during a dispute.
+type EvidenceEntry struct {
+	SubmittedBy string    `json:"submittedBy"`
+	Content     string    `json:"content"`
+	SubmittedAt time.Time `json:"submittedAt"`
+}
 
 // Escrow represents a buyer-protection escrow record.
 type Escrow struct {
@@ -63,6 +80,14 @@ type Escrow struct {
 	Resolution    string     `json:"resolution,omitempty"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	UpdatedAt     time.Time  `json:"updatedAt"`
+
+	// Arbitration fields
+	DisputeEvidence      []EvidenceEntry `json:"disputeEvidence,omitempty"`
+	ArbitratorAddr       string          `json:"arbitratorAddr,omitempty"`
+	ArbitrationDeadline  *time.Time      `json:"arbitrationDeadline,omitempty"`
+	PartialReleaseAmount string          `json:"partialReleaseAmount,omitempty"`
+	PartialRefundAmount  string          `json:"partialRefundAmount,omitempty"`
+	DisputeWindowUntil   *time.Time      `json:"disputeWindowUntil,omitempty"`
 }
 
 // IsTerminal returns true if the escrow is in a final state.
@@ -81,6 +106,7 @@ type Store interface {
 	Update(ctx context.Context, escrow *Escrow) error
 	ListByAgent(ctx context.Context, agentAddr string, limit int) ([]*Escrow, error)
 	ListExpired(ctx context.Context, before time.Time, limit int) ([]*Escrow, error)
+	ListByStatus(ctx context.Context, status Status, limit int) ([]*Escrow, error)
 }
 
 // LedgerService abstracts ledger operations so escrow doesn't import ledger.
@@ -100,6 +126,11 @@ type RevenueAccumulator interface {
 	AccumulateRevenue(ctx context.Context, agentAddr, amount, txRef string) error
 }
 
+// ReputationImpactor records dispute/confirm outcomes for reputation scoring.
+type ReputationImpactor interface {
+	RecordDispute(ctx context.Context, sellerAddr string, outcome string, amount string) error
+}
+
 // CreateRequest contains the parameters for creating an escrow.
 type CreateRequest struct {
 	BuyerAddr    string `json:"buyerAddr" binding:"required"`
@@ -115,14 +146,34 @@ type DisputeRequest struct {
 	Reason string `json:"reason" binding:"required"`
 }
 
+// EvidenceRequest contains the parameters for submitting evidence.
+type EvidenceRequest struct {
+	Content string `json:"content" binding:"required"`
+}
+
+// ArbitrateRequest assigns an arbitrator to a disputed escrow.
+type ArbitrateRequest struct {
+	ArbitratorAddr string `json:"arbitratorAddr" binding:"required"`
+}
+
+// ResolveRequest contains the arbitrator's resolution.
+type ResolveRequest struct {
+	// Resolution type: "release" (to seller), "refund" (to buyer), or "partial"
+	Resolution string `json:"resolution" binding:"required"`
+	// For partial resolutions: how much goes to seller (rest refunded to buyer)
+	ReleaseAmount string `json:"releaseAmount,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+}
+
 // Service implements escrow business logic.
 type Service struct {
-	store    Store
-	ledger   LedgerService
-	recorder TransactionRecorder
-	revenue  RevenueAccumulator
-	logger   *slog.Logger
-	locks    sync.Map // per-escrow ID locks to prevent race conditions
+	store      Store
+	ledger     LedgerService
+	recorder   TransactionRecorder
+	revenue    RevenueAccumulator
+	reputation ReputationImpactor
+	logger     *slog.Logger
+	locks      sync.Map // per-escrow ID locks to prevent race conditions
 }
 
 // escrowLock returns a mutex for the given escrow ID.
@@ -161,6 +212,12 @@ func (s *Service) WithRecorder(r TransactionRecorder) *Service {
 // WithRevenueAccumulator adds a revenue accumulator for stakes interception.
 func (s *Service) WithRevenueAccumulator(r RevenueAccumulator) *Service {
 	s.revenue = r
+	return s
+}
+
+// WithReputationImpactor adds a reputation impactor for dispute/confirm outcomes.
+func (s *Service) WithReputationImpactor(r ReputationImpactor) *Service {
+	s.reputation = r
 	return s
 }
 
@@ -271,8 +328,10 @@ func (s *Service) MarkDelivered(ctx context.Context, id, callerAddr string) (*Es
 	}
 
 	now := time.Now()
+	disputeWindow := now.Add(DefaultDisputeWindow)
 	escrow.Status = StatusDelivered
 	escrow.DeliveredAt = &now
+	escrow.DisputeWindowUntil = &disputeWindow
 	escrow.UpdatedAt = now
 
 	if err := s.store.Update(ctx, escrow); err != nil {
@@ -354,6 +413,11 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 		_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, escrow.Amount, "escrow_confirm:"+escrow.ID)
 	}
 
+	// Record successful outcome for seller reputation
+	if s.reputation != nil {
+		_ = s.reputation.RecordDispute(ctx, escrow.SellerAddr, "confirmed", escrow.Amount)
+	}
+
 	metrics.EscrowConfirmedTotal.Inc()
 	metrics.EscrowDuration.Observe(time.Since(escrow.CreatedAt).Seconds())
 
@@ -361,7 +425,8 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 	return escrow, nil
 }
 
-// Dispute refunds escrowed funds to the buyer.
+// Dispute marks an escrow as disputed, initiating the arbitration process.
+// Funds remain locked until arbitration resolves the dispute.
 func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*Escrow, error) {
 	ctx, span := traces.StartSpan(ctx, "escrow.Dispute",
 		attribute.String("escrow.id", id),
@@ -398,26 +463,20 @@ func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*
 		return nil, ErrInvalidStatus
 	}
 
-	// Refund buyer
-	if err := s.ledger.RefundEscrow(ctx, escrow.BuyerAddr, escrow.Amount, escrow.ID); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to refund escrow")
-		return nil, fmt.Errorf("failed to refund escrow: %w", err)
-	}
-
 	now := time.Now()
-	escrow.Status = StatusRefunded
+	escrow.Status = StatusDisputed
 	escrow.DisputeReason = reason
-	escrow.Resolution = "auto_refund"
-	escrow.ResolvedAt = &now
+	escrow.DisputeEvidence = []EvidenceEntry{{
+		SubmittedBy: escrow.BuyerAddr,
+		Content:     reason,
+		SubmittedAt: now,
+	}}
 	escrow.UpdatedAt = now
 
 	if err := s.store.Update(ctx, escrow); err != nil {
-		// Compensate: re-lock the refunded funds
-		_ = s.ledger.EscrowLock(ctx, escrow.BuyerAddr, escrow.Amount, escrow.ID)
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to update escrow after refund")
-		return nil, fmt.Errorf("failed to update escrow after refund: %w", err)
+		span.SetStatus(codes.Error, "failed to update escrow")
+		return nil, fmt.Errorf("failed to update escrow: %w", err)
 	}
 
 	// Record failed transaction for reputation
@@ -425,10 +484,12 @@ func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*
 		_ = s.recorder.RecordTransaction(ctx, escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ServiceID, "failed")
 	}
 
-	metrics.EscrowDisputedTotal.Inc()
-	metrics.EscrowDuration.Observe(time.Since(escrow.CreatedAt).Seconds())
+	// Record dispute outcome for seller reputation
+	if s.reputation != nil {
+		_ = s.reputation.RecordDispute(ctx, escrow.SellerAddr, "disputed", escrow.Amount)
+	}
 
-	s.cleanupLock(id)
+	metrics.EscrowDisputedTotal.Inc()
 	return escrow, nil
 }
 
@@ -456,6 +517,13 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 		span.RecordError(ErrAlreadyResolved)
 		span.SetStatus(codes.Error, "already resolved")
 		return ErrAlreadyResolved
+	}
+
+	// Don't auto-release escrows in dispute/arbitration
+	if escrow.Status == StatusDisputed || escrow.Status == StatusArbitrating {
+		span.RecordError(ErrInvalidStatus)
+		span.SetStatus(codes.Error, "escrow is in dispute")
+		return ErrInvalidStatus
 	}
 
 	// Release funds to seller
@@ -500,6 +568,194 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 
 	s.cleanupLock(escrow.ID)
 	return nil
+}
+
+// SubmitEvidence adds evidence to a disputed/arbitrating escrow.
+// Both buyer and seller can submit evidence.
+func (s *Service) SubmitEvidence(ctx context.Context, id, callerAddr, content string) (*Escrow, error) {
+	mu := s.escrowLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	escrow, err := s.store.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	caller := strings.ToLower(callerAddr)
+	if caller != escrow.BuyerAddr && caller != escrow.SellerAddr {
+		return nil, ErrUnauthorized
+	}
+
+	if escrow.Status != StatusDisputed && escrow.Status != StatusArbitrating {
+		return nil, ErrInvalidStatus
+	}
+
+	escrow.DisputeEvidence = append(escrow.DisputeEvidence, EvidenceEntry{
+		SubmittedBy: caller,
+		Content:     content,
+		SubmittedAt: time.Now(),
+	})
+	escrow.UpdatedAt = time.Now()
+
+	if err := s.store.Update(ctx, escrow); err != nil {
+		return nil, err
+	}
+	return escrow, nil
+}
+
+// AssignArbitrator assigns an arbitrator to a disputed escrow.
+func (s *Service) AssignArbitrator(ctx context.Context, id, arbitratorAddr string) (*Escrow, error) {
+	mu := s.escrowLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	escrow, err := s.store.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	if escrow.Status != StatusDisputed {
+		return nil, ErrInvalidStatus
+	}
+
+	now := time.Now()
+	deadline := now.Add(DefaultArbitrationDeadline)
+	escrow.Status = StatusArbitrating
+	escrow.ArbitratorAddr = strings.ToLower(arbitratorAddr)
+	escrow.ArbitrationDeadline = &deadline
+	escrow.UpdatedAt = now
+
+	if err := s.store.Update(ctx, escrow); err != nil {
+		return nil, err
+	}
+	return escrow, nil
+}
+
+// ResolveArbitration resolves a disputed escrow. Only the assigned arbitrator can call this.
+// Supports full release to seller, full refund to buyer, or partial split.
+func (s *Service) ResolveArbitration(ctx context.Context, id, callerAddr string, req ResolveRequest) (*Escrow, error) {
+	ctx, span := traces.StartSpan(ctx, "escrow.ResolveArbitration",
+		traces.EscrowID(id),
+		attribute.String("resolution", req.Resolution),
+	)
+	defer span.End()
+
+	mu := s.escrowLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	escrow, err := s.store.Get(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+
+	if escrow.Status != StatusArbitrating && escrow.Status != StatusDisputed {
+		return nil, ErrInvalidStatus
+	}
+
+	// Only assigned arbitrator (or anyone if no arbitrator yet)
+	if escrow.ArbitratorAddr != "" && strings.ToLower(callerAddr) != escrow.ArbitratorAddr {
+		return nil, ErrUnauthorized
+	}
+
+	now := time.Now()
+
+	switch req.Resolution {
+	case "release":
+		// Full release to seller
+		if err := s.ledger.ReleaseEscrow(ctx, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ID); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("failed to release escrow: %w", err)
+		}
+		escrow.Status = StatusReleased
+		escrow.Resolution = "arbitration_release"
+		if s.revenue != nil {
+			_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, escrow.Amount, "escrow_arb_release:"+escrow.ID)
+		}
+		if s.reputation != nil {
+			_ = s.reputation.RecordDispute(ctx, escrow.SellerAddr, "confirmed", escrow.Amount)
+		}
+
+	case "refund":
+		// Full refund to buyer
+		if err := s.ledger.RefundEscrow(ctx, escrow.BuyerAddr, escrow.Amount, escrow.ID); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("failed to refund escrow: %w", err)
+		}
+		escrow.Status = StatusRefunded
+		escrow.Resolution = "arbitration_refund"
+
+	case "partial":
+		// Split: releaseAmount to seller, remainder to buyer
+		if err := validateAmount(req.ReleaseAmount); err != nil {
+			return nil, fmt.Errorf("invalid releaseAmount: %w", err)
+		}
+
+		releaseAmtBig, _ := new(big.Int).SetString(req.ReleaseAmount, 10)
+		if releaseAmtBig == nil {
+			// Try parsing as decimal
+			var ok bool
+			releaseAmtBig, ok = usdc.Parse(req.ReleaseAmount)
+			if !ok {
+				return nil, fmt.Errorf("%w: cannot parse releaseAmount", ErrInvalidAmount)
+			}
+		} else {
+			releaseAmtBig, _ = usdc.Parse(req.ReleaseAmount)
+		}
+
+		totalBig, _ := usdc.Parse(escrow.Amount)
+		if releaseAmtBig.Cmp(totalBig) >= 0 {
+			return nil, fmt.Errorf("%w: releaseAmount must be less than total", ErrInvalidAmount)
+		}
+
+		refundBig := new(big.Int).Sub(totalBig, releaseAmtBig)
+		releaseStr := usdc.Format(releaseAmtBig)
+		refundStr := usdc.Format(refundBig)
+
+		// Release partial to seller
+		if err := s.ledger.ReleaseEscrow(ctx, escrow.BuyerAddr, escrow.SellerAddr, releaseStr, escrow.ID+":partial_release"); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("failed to release partial: %w", err)
+		}
+		// Refund remainder to buyer
+		if err := s.ledger.RefundEscrow(ctx, escrow.BuyerAddr, refundStr, escrow.ID+":partial_refund"); err != nil {
+			span.RecordError(err)
+			s.logger.Error("CRITICAL: partial release succeeded but refund failed",
+				"escrow_id", escrow.ID, "releaseAmount", releaseStr, "refundAmount", refundStr)
+			return nil, fmt.Errorf("failed to refund partial: %w", err)
+		}
+
+		escrow.Status = StatusReleased
+		escrow.Resolution = "arbitration_partial"
+		escrow.PartialReleaseAmount = releaseStr
+		escrow.PartialRefundAmount = refundStr
+
+		if s.revenue != nil {
+			_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, releaseStr, "escrow_arb_partial:"+escrow.ID)
+		}
+
+	default:
+		return nil, fmt.Errorf("invalid resolution: %s (must be release, refund, or partial)", req.Resolution)
+	}
+
+	escrow.ResolvedAt = &now
+	escrow.UpdatedAt = now
+	if req.Reason != "" && escrow.Resolution != "" {
+		escrow.Resolution += ": " + req.Reason
+	}
+
+	if err := s.store.Update(ctx, escrow); err != nil {
+		s.logger.Error("CRITICAL: arbitration resolved but state update failed",
+			"escrow_id", escrow.ID, "resolution", req.Resolution)
+		span.RecordError(err)
+		return nil, err
+	}
+
+	metrics.EscrowDuration.Observe(time.Since(escrow.CreatedAt).Seconds())
+	s.cleanupLock(id)
+	return escrow, nil
 }
 
 // Get returns an escrow by ID.

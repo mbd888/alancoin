@@ -206,8 +206,8 @@ func TestHandler_DisputeEscrow(t *testing.T) {
 	}
 	json.Unmarshal(w.Body.Bytes(), &resp)
 
-	if resp.Escrow.Status != "refunded" {
-		t.Errorf("Expected status refunded, got %s", resp.Escrow.Status)
+	if resp.Escrow.Status != "disputed" {
+		t.Errorf("Expected status disputed, got %s", resp.Escrow.Status)
 	}
 	if resp.Escrow.DisputeReason != "service failed" {
 		t.Errorf("Expected reason 'service failed', got %s", resp.Escrow.DisputeReason)
@@ -636,8 +636,8 @@ func TestHandler_FullLifecycle_CreateDeliverDispute(t *testing.T) {
 		} `json:"escrow"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &disputeResp)
-	if disputeResp.Escrow.Status != "refunded" {
-		t.Errorf("Expected refunded, got %s", disputeResp.Escrow.Status)
+	if disputeResp.Escrow.Status != "disputed" {
+		t.Errorf("Expected disputed, got %s", disputeResp.Escrow.Status)
 	}
 	if disputeResp.Escrow.DisputeReason != "output was gibberish" {
 		t.Errorf("Expected dispute reason, got %s", disputeResp.Escrow.DisputeReason)

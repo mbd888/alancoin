@@ -72,6 +72,7 @@ type Handler struct {
 	balance  BalanceService      // For checking/debiting balances (optional)
 	events   EventEmitter        // For broadcasting events (optional)
 	revenue  RevenueAccumulator  // For revenue staking interception (optional)
+	alerts   *AlertChecker       // For budget/expiration alerts (optional)
 	logger   *slog.Logger
 	demoMode bool // Skip on-chain transfers, use ledger only
 }
@@ -101,6 +102,12 @@ func (h *Handler) WithEvents(events EventEmitter) *Handler {
 // WithRevenueAccumulator adds a revenue accumulator for stakes interception.
 func (h *Handler) WithRevenueAccumulator(r RevenueAccumulator) *Handler {
 	h.revenue = r
+	return h
+}
+
+// WithAlertChecker adds a budget/expiration alert checker.
+func (h *Handler) WithAlertChecker(a *AlertChecker) *Handler {
+	h.alerts = a
 	return h
 }
 
@@ -489,6 +496,11 @@ func (h *Handler) Transact(c *gin.Context) {
 			"message": "Failed to reload session key",
 		})
 		return
+	}
+
+	// Check budget thresholds and emit alerts
+	if h.alerts != nil {
+		h.alerts.CheckBudget(c.Request.Context(), key)
 	}
 
 	// Record metrics

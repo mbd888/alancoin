@@ -32,6 +32,9 @@ func (h *Handler) RegisterProtectedRoutes(r *gin.RouterGroup) {
 	r.POST("/escrow/:id/deliver", h.MarkDelivered)
 	r.POST("/escrow/:id/confirm", h.ConfirmEscrow)
 	r.POST("/escrow/:id/dispute", h.DisputeEscrow)
+	r.POST("/escrow/:id/evidence", h.SubmitEvidence)
+	r.POST("/escrow/:id/arbitrate", h.AssignArbitrator)
+	r.POST("/escrow/:id/resolve", h.ResolveArbitration)
 }
 
 // CreateEscrow handles POST /v1/escrow
@@ -214,6 +217,123 @@ func (h *Handler) DisputeEscrow(c *gin.Context) {
 		case errors.Is(err, ErrAlreadyResolved), errors.Is(err, ErrInvalidStatus):
 			status = http.StatusConflict
 			code = "invalid_state"
+		}
+		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"escrow": escrow})
+}
+
+// SubmitEvidence handles POST /v1/escrow/:id/evidence
+func (h *Handler) SubmitEvidence(c *gin.Context) {
+	id := c.Param("id")
+	callerAddr := c.GetString("authAgentAddr")
+
+	var req EvidenceRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "Content is required",
+		})
+		return
+	}
+
+	escrow, err := h.service.SubmitEvidence(c.Request.Context(), id, callerAddr, req.Content)
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := "internal_error"
+		switch {
+		case errors.Is(err, ErrEscrowNotFound):
+			status = http.StatusNotFound
+			code = "not_found"
+		case errors.Is(err, ErrUnauthorized):
+			status = http.StatusForbidden
+			code = "unauthorized"
+		case errors.Is(err, ErrInvalidStatus):
+			status = http.StatusConflict
+			code = "invalid_state"
+		}
+		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"escrow": escrow})
+}
+
+// AssignArbitrator handles POST /v1/escrow/:id/arbitrate
+func (h *Handler) AssignArbitrator(c *gin.Context) {
+	id := c.Param("id")
+
+	var req ArbitrateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "arbitratorAddr is required",
+		})
+		return
+	}
+
+	if errs := validation.Validate(
+		validation.ValidAddress("arbitrator_addr", req.ArbitratorAddr),
+	); len(errs) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": errs.Error(),
+		})
+		return
+	}
+
+	escrow, err := h.service.AssignArbitrator(c.Request.Context(), id, req.ArbitratorAddr)
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := "internal_error"
+		switch {
+		case errors.Is(err, ErrEscrowNotFound):
+			status = http.StatusNotFound
+			code = "not_found"
+		case errors.Is(err, ErrInvalidStatus):
+			status = http.StatusConflict
+			code = "invalid_state"
+		}
+		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"escrow": escrow})
+}
+
+// ResolveArbitration handles POST /v1/escrow/:id/resolve
+func (h *Handler) ResolveArbitration(c *gin.Context) {
+	id := c.Param("id")
+	callerAddr := c.GetString("authAgentAddr")
+
+	var req ResolveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "resolution is required (release, refund, or partial)",
+		})
+		return
+	}
+
+	escrow, err := h.service.ResolveArbitration(c.Request.Context(), id, callerAddr, req)
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := "internal_error"
+		switch {
+		case errors.Is(err, ErrEscrowNotFound):
+			status = http.StatusNotFound
+			code = "not_found"
+		case errors.Is(err, ErrUnauthorized):
+			status = http.StatusForbidden
+			code = "unauthorized"
+		case errors.Is(err, ErrInvalidStatus):
+			status = http.StatusConflict
+			code = "invalid_state"
+		case errors.Is(err, ErrInvalidAmount):
+			status = http.StatusBadRequest
+			code = "invalid_amount"
 		}
 		c.JSON(status, gin.H{"error": code, "message": err.Error()})
 		return

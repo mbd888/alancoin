@@ -32,6 +32,10 @@ const (
 	EventBalanceDeposit    EventType = "balance.deposit"
 	EventBalanceWithdraw   EventType = "balance.withdraw"
 
+	// Session key budget/expiration alerts
+	EventSessionKeyBudgetWarning EventType = "session_key.budget_warning"
+	EventSessionKeyExpiring      EventType = "session_key.expiring"
+
 	// Negotiation events
 	EventRFPPublished EventType = "rfp.published"
 	EventRFPAwarded   EventType = "rfp.awarded"

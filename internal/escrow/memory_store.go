@@ -76,7 +76,24 @@ func (m *MemoryStore) ListExpired(ctx context.Context, before time.Time, limit i
 
 	var result []*Escrow
 	for _, e := range m.escrows {
-		if !e.IsTerminal() && e.AutoReleaseAt.Before(before) {
+		if !e.IsTerminal() && e.Status != StatusDisputed && e.Status != StatusArbitrating && e.AutoReleaseAt.Before(before) {
+			cp := *e
+			result = append(result, &cp)
+			if len(result) >= limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
+func (m *MemoryStore) ListByStatus(ctx context.Context, status Status, limit int) ([]*Escrow, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []*Escrow
+	for _, e := range m.escrows {
+		if e.Status == status {
 			cp := *e
 			result = append(result, &cp)
 			if len(result) >= limit {

@@ -142,10 +142,25 @@ func TestIntegration_CreateDisputeRefund(t *testing.T) {
 		t.Errorf("After lock: expected 42.000000, got %s", buyerBal.Available)
 	}
 
-	// Dispute → refund
+	// Dispute → enters "disputed" state, funds stay locked
 	_, err = svc.Dispute(ctx, esc.ID, buyer, "service returned garbage")
 	if err != nil {
 		t.Fatalf("Dispute failed: %v", err)
+	}
+
+	// Funds still locked in escrow (disputed, not yet refunded)
+	buyerBal, _ = l.GetBalance(ctx, buyer)
+	if buyerBal.Escrowed != "8.000000" {
+		t.Errorf("After dispute: expected escrowed 8.000000, got %s", buyerBal.Escrowed)
+	}
+
+	// Resolve arbitration → refund to buyer
+	_, err = svc.ResolveArbitration(ctx, esc.ID, "", escrow.ResolveRequest{
+		Resolution: "refund",
+		Reason:     "seller failed to deliver",
+	})
+	if err != nil {
+		t.Fatalf("ResolveArbitration failed: %v", err)
 	}
 
 	// Buyer should be back to full balance
@@ -229,9 +244,10 @@ func TestIntegration_MultipleEscrowsExhaustBudget(t *testing.T) {
 		t.Fatal("Expected error when balance exhausted")
 	}
 
-	// Confirm 1, dispute 2, confirm 3
+	// Confirm 1, dispute+resolve 2, confirm 3
 	svc.Confirm(ctx, e1.ID, buyer)
 	svc.Dispute(ctx, e2.ID, buyer, "bad")
+	svc.ResolveArbitration(ctx, e2.ID, "", escrow.ResolveRequest{Resolution: "refund"})
 	svc.Confirm(ctx, e3.ID, buyer)
 
 	// Buyer: available=4 (refunded from e2), escrowed=0, totalOut=6
@@ -463,7 +479,7 @@ func TestIntegration_HighVolumeStressTest(t *testing.T) {
 		t.Errorf("Expected escrowed 100.000000, got %s", bal.Escrowed)
 	}
 
-	// Confirm even, dispute odd
+	// Confirm even, dispute+resolve odd
 	for i, esc := range escrows {
 		if i%2 == 0 {
 			_, err := svc.Confirm(ctx, esc.ID, buyer)
@@ -475,11 +491,15 @@ func TestIntegration_HighVolumeStressTest(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Dispute %d failed: %v", i, err)
 			}
+			_, err = svc.ResolveArbitration(ctx, esc.ID, "", escrow.ResolveRequest{Resolution: "refund"})
+			if err != nil {
+				t.Fatalf("ResolveArbitration %d failed: %v", i, err)
+			}
 		}
 	}
 
 	// 50 confirmed ($50 to seller, $50 out for buyer)
-	// 50 disputed ($50 refunded to buyer)
+	// 50 disputed+resolved ($50 refunded to buyer)
 	// Buyer: available = 900 + 50 (refunded) = 950, totalOut = 50
 	bal, _ = l.GetBalance(ctx, buyer)
 	if bal.Available != "950.000000" {

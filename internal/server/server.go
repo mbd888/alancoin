@@ -31,6 +31,7 @@ import (
 	"github.com/mbd888/alancoin/internal/discovery"
 	"github.com/mbd888/alancoin/internal/escrow"
 	"github.com/mbd888/alancoin/internal/gas"
+	"github.com/mbd888/alancoin/internal/gateway"
 	"github.com/mbd888/alancoin/internal/ledger"
 	"github.com/mbd888/alancoin/internal/logging"
 	"github.com/mbd888/alancoin/internal/metrics"
@@ -45,6 +46,7 @@ import (
 	"github.com/mbd888/alancoin/internal/sessionkeys"
 	"github.com/mbd888/alancoin/internal/stakes"
 	"github.com/mbd888/alancoin/internal/streams"
+	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/validation"
 	"github.com/mbd888/alancoin/internal/wallet"
 	"github.com/mbd888/alancoin/internal/watcher"
@@ -77,6 +79,7 @@ type Server struct {
 	contractTimer      *contracts.Timer
 	streamService      *streams.Service
 	streamTimer        *streams.Timer
+	gatewayService     *gateway.Service
 	negotiationService *negotiation.Service
 	negotiationTimer   *negotiation.Timer
 	stakesService      *stakes.Service
@@ -92,6 +95,7 @@ type Server struct {
 	httpSrv            *http.Server
 	logger             *slog.Logger
 	cancelRunCtx       context.CancelFunc // cancels background goroutines started in Run
+	tracerShutdown     func(context.Context) error
 
 	// Health state
 	ready   atomic.Bool
@@ -129,6 +133,14 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 	// Context for initialization
 	ctx := context.Background()
+
+	// Initialize distributed tracing (no-op if endpoint not configured)
+	tracerShutdown, err := traces.Init(ctx, cfg.OTLPEndpoint, s.logger)
+	if err != nil {
+		s.logger.Warn("failed to initialize tracing", "error", err)
+		tracerShutdown = func(context.Context) error { return nil }
+	}
+	s.tracerShutdown = tracerShutdown
 
 	// Initialize storage (Postgres if DATABASE_URL set, otherwise in-memory)
 	if cfg.DatabaseURL != "" {
@@ -220,6 +232,13 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.streamTimer = streams.NewTimer(s.streamService, streamStore, s.logger)
 		s.logger.Info("streams enabled (postgres)")
 
+		// Gateway with in-memory store (transparent payment proxy)
+		gwStore := gateway.NewMemoryStore()
+		gwResolver := gateway.NewResolver(&gatewayRegistryAdapter{s.registry})
+		gwForwarder := gateway.NewForwarder(0)
+		s.gatewayService = gateway.NewService(gwStore, gwResolver, gwForwarder, &gatewayLedgerAdapter{s.ledger}, s.logger)
+		s.logger.Info("gateway enabled")
+
 		// Negotiation with PostgreSQL store (autonomous deal-making)
 		negotiationStore := negotiation.NewPostgresStore(db)
 		reputationProvForNeg := reputation.NewRegistryProvider(s.registry)
@@ -306,6 +325,13 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.streamService = streams.NewService(streamStore, &streamLedgerAdapter{s.ledger})
 		s.streamTimer = streams.NewTimer(s.streamService, streamStore, s.logger)
 		s.logger.Info("streams enabled (in-memory)")
+
+		// Gateway with in-memory store (transparent payment proxy)
+		gwStore2 := gateway.NewMemoryStore()
+		gwResolver2 := gateway.NewResolver(&gatewayRegistryAdapter{s.registry})
+		gwForwarder2 := gateway.NewForwarder(0)
+		s.gatewayService = gateway.NewService(gwStore2, gwResolver2, gwForwarder2, &gatewayLedgerAdapter{s.ledger}, s.logger)
+		s.logger.Info("gateway enabled (in-memory)")
 
 		// Negotiation with in-memory store (autonomous deal-making)
 		negotiationStore := negotiation.NewMemoryStore()
@@ -576,6 +602,9 @@ func (s *Server) setupRoutes() {
 	reputationProvider := reputation.NewRegistryProvider(s.registry)
 	registryHandler.SetReputation(reputationProvider)
 
+	// Wire reputation impact tracking into escrow (dispute/confirm outcomes)
+	s.escrowService.WithReputationImpactor(reputationProvider)
+
 	// Wire on-chain transaction verifier so POST /transactions checks receipts.
 	// Only in production (with DB) — in demo mode, transactions are auto-confirmed.
 	if s.wallet != nil && s.db != nil {
@@ -662,6 +691,12 @@ func (s *Server) setupRoutes() {
 	// Add revenue accumulator for stakes interception
 	if s.stakesService != nil {
 		sessionHandler = sessionHandler.WithRevenueAccumulator(&revenueAccumulatorAdapter{s.stakesService})
+	}
+
+	// Add budget/expiration alert checker backed by webhooks
+	if s.webhooks != nil {
+		alertChecker := sessionkeys.NewAlertChecker(&webhookAlertNotifier{d: s.webhooks})
+		sessionHandler = sessionHandler.WithAlertChecker(alertChecker)
 	}
 
 	protectedSessions := v1.Group("")
@@ -833,6 +868,19 @@ func (s *Server) setupRoutes() {
 		protectedStreams := v1.Group("")
 		protectedStreams.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
 		streamHandler.RegisterProtectedRoutes(protectedStreams)
+	}
+
+	// Gateway routes (transparent payment proxy for AI agents)
+	if s.gatewayService != nil {
+		gatewayHandler := gateway.NewHandler(s.gatewayService)
+
+		// Protected routes - session CRUD requires API key auth
+		protectedGateway := v1.Group("")
+		protectedGateway.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		gatewayHandler.RegisterProtectedRoutes(protectedGateway)
+
+		// Proxy route - uses gateway token auth (X-Gateway-Token), no API key needed
+		gatewayHandler.RegisterProxyRoute(v1)
 	}
 
 	// Negotiation routes (autonomous deal-making between agents)
@@ -1525,6 +1573,15 @@ func (s *Server) Shutdown() error {
 		s.logger.Info("deposit watcher stopped")
 	}
 
+	// Flush tracing spans
+	if s.tracerShutdown != nil {
+		if err := s.tracerShutdown(ctx); err != nil {
+			s.logger.Error("tracer shutdown error", "error", err)
+		} else {
+			s.logger.Info("tracer shutdown complete")
+		}
+	}
+
 	// Close wallet connection
 	if err := s.wallet.Close(); err != nil {
 		s.logger.Error("wallet close error", "error", err)
@@ -2195,4 +2252,87 @@ func (a *contractFormerAdapter) FormContract(ctx context.Context, rfp *negotiati
 	}
 
 	return contract.ID, nil
+}
+
+// gatewayLedgerAdapter adapts ledger.Ledger to gateway.LedgerService
+type gatewayLedgerAdapter struct {
+	l *ledger.Ledger
+}
+
+func (a *gatewayLedgerAdapter) Hold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.Hold(ctx, agentAddr, amount, reference)
+}
+
+func (a *gatewayLedgerAdapter) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.ConfirmHold(ctx, agentAddr, amount, reference)
+}
+
+func (a *gatewayLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
+}
+
+func (a *gatewayLedgerAdapter) Deposit(ctx context.Context, agentAddr, amount, reference string) error {
+	return a.l.Deposit(ctx, agentAddr, amount, reference)
+}
+
+// gatewayRegistryAdapter adapts registry.Store to gateway.RegistryProvider
+type gatewayRegistryAdapter struct {
+	store registry.Store
+}
+
+func (a *gatewayRegistryAdapter) ListServices(ctx context.Context, serviceType, maxPrice string) ([]gateway.ServiceCandidate, error) {
+	active := true
+	query := registry.AgentQuery{
+		ServiceType: serviceType,
+		MaxPrice:    maxPrice,
+		Active:      &active,
+		Limit:       10,
+	}
+
+	listings, err := a.store.ListServices(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	var candidates []gateway.ServiceCandidate
+	for _, l := range listings {
+		endpoint := l.Endpoint
+		candidates = append(candidates, gateway.ServiceCandidate{
+			AgentAddress:    l.AgentAddress,
+			AgentName:       l.AgentName,
+			ServiceID:       l.ID,
+			ServiceName:     l.Name,
+			Price:           l.Price,
+			Endpoint:        endpoint,
+			ReputationScore: l.ReputationScore,
+		})
+	}
+	return candidates, nil
+}
+
+// webhookAlertNotifier adapts webhooks.Dispatcher to sessionkeys.AlertNotifier.
+type webhookAlertNotifier struct {
+	d *webhooks.Dispatcher
+}
+
+func (n *webhookAlertNotifier) NotifyAlert(ctx context.Context, alert sessionkeys.AlertEvent) error {
+	eventType := webhooks.EventSessionKeyBudgetWarning
+	if alert.Type == "expiring" {
+		eventType = webhooks.EventSessionKeyExpiring
+	}
+	return n.d.DispatchToAgent(ctx, alert.OwnerAddr, &webhooks.Event{
+		ID:        alert.KeyID + ":" + alert.Type,
+		Type:      eventType,
+		Timestamp: alert.TriggeredAt,
+		Data: map[string]interface{}{
+			"keyId":      alert.KeyID,
+			"ownerAddr":  alert.OwnerAddr,
+			"threshold":  alert.Threshold,
+			"usedPct":    alert.UsedPct,
+			"totalSpent": alert.TotalSpent,
+			"maxTotal":   alert.MaxTotal,
+			"expiresAt":  alert.ExpiresAt,
+			"expiresIn":  alert.ExpiresIn,
+		},
+	})
 }

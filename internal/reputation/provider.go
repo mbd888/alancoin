@@ -4,14 +4,23 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mbd888/alancoin/internal/registry"
 )
 
-// RegistryProvider implements MetricsProvider using the registry store
+// disputeRecord tracks dispute/confirm outcomes for an agent.
+type disputeRecord struct {
+	Confirmed int
+	Disputed  int
+}
+
+// RegistryProvider implements MetricsProvider using the registry store.
+// It also implements escrow.ReputationImpactor for dispute tracking.
 type RegistryProvider struct {
-	store registry.Store
+	store    registry.Store
+	disputes sync.Map // address → *disputeRecord
 }
 
 // NewRegistryProvider creates a provider backed by the registry
@@ -60,6 +69,7 @@ func (p *RegistryProvider) GetAllAgentMetrics(ctx context.Context) (map[string]*
 
 // GetScore returns the reputation score and tier for a single agent.
 // Implements registry.ReputationProvider.
+// If dispute data is available, a penalty is applied for high dispute rates.
 func (p *RegistryProvider) GetScore(ctx context.Context, address string) (float64, string, error) {
 	metrics, err := p.GetAgentMetrics(ctx, address)
 	if err != nil {
@@ -67,6 +77,20 @@ func (p *RegistryProvider) GetScore(ctx context.Context, address string) (float6
 	}
 	calc := NewCalculator()
 	score := calc.Calculate(address, *metrics)
+
+	// Apply dispute penalty: high dispute rates reduce the score.
+	// >50% dispute rate → up to 30% score reduction.
+	dr := p.DisputeRate(address)
+	if dr > 0.1 {
+		// Linear penalty: 10% dispute rate = 0 penalty, 60%+ = 30% reduction
+		penalty := (dr - 0.1) * 0.6 // maxes at 0.3 when dr=0.6
+		if penalty > 0.3 {
+			penalty = 0.3
+		}
+		score.Score *= (1.0 - penalty)
+		score.Tier = getTier(score.Score)
+	}
+
 	return score.Score, string(score.Tier), nil
 }
 
@@ -131,6 +155,37 @@ func (p *RegistryProvider) calculateMetrics(agent *registry.Agent, txns []*regis
 	m.UniqueCounterparties = len(counterparties)
 
 	return m
+}
+
+// RecordDispute records an escrow dispute or confirmation outcome for
+// the given seller address. This data is factored into reputation scoring
+// as a penalty for high dispute rates.
+func (p *RegistryProvider) RecordDispute(_ context.Context, sellerAddr string, outcome string, _ string) error {
+	sellerAddr = strings.ToLower(sellerAddr)
+	val, _ := p.disputes.LoadOrStore(sellerAddr, &disputeRecord{})
+	rec := val.(*disputeRecord)
+	switch outcome {
+	case "confirmed":
+		rec.Confirmed++
+	case "disputed":
+		rec.Disputed++
+	}
+	return nil
+}
+
+// DisputeRate returns the fraction of escrow outcomes that were disputes
+// for the given address. Returns 0 if no data is available.
+func (p *RegistryProvider) DisputeRate(address string) float64 {
+	val, ok := p.disputes.Load(strings.ToLower(address))
+	if !ok {
+		return 0
+	}
+	rec := val.(*disputeRecord)
+	total := rec.Confirmed + rec.Disputed
+	if total == 0 {
+		return 0
+	}
+	return float64(rec.Disputed) / float64(total)
 }
 
 func parseAmount(s string) float64 {

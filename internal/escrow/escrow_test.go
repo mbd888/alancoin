@@ -167,19 +167,20 @@ func TestEscrow_DisputeRefund(t *testing.T) {
 		t.Fatalf("Create failed: %v", err)
 	}
 
-	// Dispute
+	// Dispute → enters "disputed" state (funds stay locked for arbitration)
 	esc, err = svc.Dispute(ctx, esc.ID, buyer, "service returned garbage")
 	if err != nil {
 		t.Fatalf("Dispute failed: %v", err)
 	}
-	if esc.Status != StatusRefunded {
-		t.Errorf("Expected status refunded, got %s", esc.Status)
+	if esc.Status != StatusDisputed {
+		t.Errorf("Expected status disputed, got %s", esc.Status)
 	}
 	if esc.DisputeReason != "service returned garbage" {
 		t.Errorf("Expected dispute reason, got %s", esc.DisputeReason)
 	}
-	if _, ok := ledger.refunded[esc.ID]; !ok {
-		t.Error("Expected ledger.RefundEscrow to be called")
+	// Funds remain locked (no refund until arbitration resolves)
+	if len(ledger.refunded) != 0 {
+		t.Error("Expected no ledger.RefundEscrow call (funds stay locked for arbitration)")
 	}
 
 	// Check transaction recorded as failed
@@ -351,8 +352,8 @@ func TestEscrow_DisputeAfterDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dispute after delivery should work: %v", err)
 	}
-	if esc.Status != StatusRefunded {
-		t.Errorf("Expected refunded, got %s", esc.Status)
+	if esc.Status != StatusDisputed {
+		t.Errorf("Expected disputed, got %s", esc.Status)
 	}
 }
 
@@ -448,7 +449,7 @@ func TestEscrow_AutoReleaseAfterDispute(t *testing.T) {
 		AutoRelease: "1ms",
 	})
 
-	// Dispute first
+	// Dispute first → status becomes "disputed"
 	_, _ = svc.Dispute(ctx, esc.ID, "0xbuyer", "bad service")
 
 	time.Sleep(5 * time.Millisecond)
@@ -456,10 +457,10 @@ func TestEscrow_AutoReleaseAfterDispute(t *testing.T) {
 	// Re-fetch to get current state (Get returns a copy)
 	updated, _ := svc.Get(ctx, esc.ID)
 
-	// AutoRelease on already-refunded should fail
+	// AutoRelease on disputed escrow should fail (funds locked for arbitration)
 	err := svc.AutoRelease(ctx, updated)
-	if err != ErrAlreadyResolved {
-		t.Errorf("Expected ErrAlreadyResolved for auto-release after dispute, got %v", err)
+	if err != ErrInvalidStatus {
+		t.Errorf("Expected ErrInvalidStatus for auto-release after dispute, got %v", err)
 	}
 }
 
@@ -616,7 +617,9 @@ func TestEscrow_ConfirmFailsOnLedgerReleaseError(t *testing.T) {
 	}
 }
 
-func TestEscrow_DisputeFailsOnLedgerRefundError(t *testing.T) {
+func TestEscrow_DisputeSucceedsWithoutLedgerRefund(t *testing.T) {
+	// Dispute no longer calls ledger.RefundEscrow — funds stay locked for arbitration.
+	// Even with a failing refund ledger, dispute should succeed.
 	store := NewMemoryStore()
 	fl := &failingLedger{refundErr: errors.New("ledger refund failed")}
 	svc := NewService(store, fl)
@@ -628,15 +631,12 @@ func TestEscrow_DisputeFailsOnLedgerRefundError(t *testing.T) {
 		Amount:     "1.00",
 	})
 
-	_, err := svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
-	if err == nil {
-		t.Fatal("Expected error when ledger refund fails")
+	result, err := svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
+	if err != nil {
+		t.Fatalf("Dispute should succeed (no refund needed): %v", err)
 	}
-
-	// Escrow should still be pending
-	got, _ := store.Get(ctx, esc.ID)
-	if got.Status != StatusPending {
-		t.Errorf("Escrow should remain pending after ledger failure, got %s", got.Status)
+	if result.Status != StatusDisputed {
+		t.Errorf("Expected disputed, got %s", result.Status)
 	}
 }
 
@@ -683,8 +683,8 @@ func TestEscrow_MultipleEscrowsSameBuyer(t *testing.T) {
 	if g1.Status != StatusReleased {
 		t.Errorf("e1 should be released, got %s", g1.Status)
 	}
-	if g2.Status != StatusRefunded {
-		t.Errorf("e2 should be refunded, got %s", g2.Status)
+	if g2.Status != StatusDisputed {
+		t.Errorf("e2 should be disputed, got %s", g2.Status)
 	}
 	if g3.Status != StatusPending {
 		t.Errorf("e3 should be pending, got %s", g3.Status)
@@ -697,8 +697,8 @@ func TestEscrow_MultipleEscrowsSameBuyer(t *testing.T) {
 	if len(ledger.released) != 1 {
 		t.Errorf("Expected 1 release, got %d", len(ledger.released))
 	}
-	if len(ledger.refunded) != 1 {
-		t.Errorf("Expected 1 refund, got %d", len(ledger.refunded))
+	if len(ledger.refunded) != 0 {
+		t.Errorf("Expected 0 refunds (dispute keeps funds locked), got %d", len(ledger.refunded))
 	}
 }
 
@@ -1259,8 +1259,8 @@ func TestEscrow_RecorderErrorDoesNotBlockDispute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dispute should succeed even with failing recorder: %v", err)
 	}
-	if result.Status != StatusRefunded {
-		t.Errorf("Expected refunded, got %s", result.Status)
+	if result.Status != StatusDisputed {
+		t.Errorf("Expected disputed, got %s", result.Status)
 	}
 }
 
@@ -1418,10 +1418,10 @@ func TestEscrow_ConcurrentDisputes(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Final state should be refunded (the first one wins, rest get ErrAlreadyResolved)
+	// Final state should be disputed (the first one wins, rest get ErrInvalidStatus)
 	got, _ := svc.Get(ctx, esc.ID)
-	if got.Status != StatusRefunded {
-		t.Errorf("Expected final status refunded, got %s", got.Status)
+	if got.Status != StatusDisputed {
+		t.Errorf("Expected final status disputed, got %s", got.Status)
 	}
 }
 

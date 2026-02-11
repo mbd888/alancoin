@@ -72,13 +72,28 @@ func (t *Timer) safeReleaseExpired(ctx context.Context) {
 }
 
 func (t *Timer) releaseExpired(ctx context.Context) {
-	expired, err := t.store.ListExpired(ctx, time.Now(), 100)
+	now := time.Now()
+
+	// 1. Auto-release escrows past their auto-release deadline
+	expired, err := t.store.ListExpired(ctx, now, 100)
 	if err != nil {
 		t.logger.Warn("failed to list expired escrows", "error", err)
 		return
 	}
 
 	for _, escrow := range expired {
+		// If delivered and past dispute window, auto-release
+		if escrow.Status == StatusDelivered && escrow.DisputeWindowUntil != nil && now.After(*escrow.DisputeWindowUntil) {
+			if err := t.service.AutoRelease(ctx, escrow); err != nil {
+				t.logger.Warn("failed to auto-release escrow after dispute window",
+					"escrowId", escrow.ID, "error", err)
+			} else {
+				t.logger.Info("auto-released escrow (dispute window expired)",
+					"escrowId", escrow.ID, "seller", escrow.SellerAddr, "amount", escrow.Amount)
+			}
+			continue
+		}
+
 		if err := t.service.AutoRelease(ctx, escrow); err != nil {
 			t.logger.Warn("failed to auto-release escrow",
 				"escrowId", escrow.ID,
@@ -92,5 +107,34 @@ func (t *Timer) releaseExpired(ctx context.Context) {
 			"seller", escrow.SellerAddr,
 			"amount", escrow.Amount,
 		)
+	}
+
+	// 2. Auto-resolve arbitrations past their deadline (default: release to seller)
+	t.resolveExpiredArbitrations(ctx, now)
+}
+
+func (t *Timer) resolveExpiredArbitrations(ctx context.Context, now time.Time) {
+	arbitrating, err := t.store.ListByStatus(ctx, StatusArbitrating, 100)
+	if err != nil {
+		return // ListByStatus may not be implemented in all stores
+	}
+
+	for _, escrow := range arbitrating {
+		if escrow.ArbitrationDeadline == nil || !now.After(*escrow.ArbitrationDeadline) {
+			continue
+		}
+
+		// Default: release to seller after arbitration deadline
+		_, err := t.service.ResolveArbitration(ctx, escrow.ID, escrow.ArbitratorAddr, ResolveRequest{
+			Resolution: "release",
+			Reason:     "arbitration deadline expired, auto-released to seller",
+		})
+		if err != nil {
+			t.logger.Warn("failed to auto-resolve expired arbitration",
+				"escrowId", escrow.ID, "error", err)
+			continue
+		}
+		t.logger.Info("auto-resolved expired arbitration",
+			"escrowId", escrow.ID, "seller", escrow.SellerAddr, "amount", escrow.Amount)
 	}
 }

@@ -55,6 +55,9 @@ type Config struct {
 	HTTPWriteTimeout time.Duration
 	HTTPIdleTimeout  time.Duration
 	RequestTimeout   time.Duration // global handler execution timeout
+
+	// Observability
+	OTLPEndpoint string // OpenTelemetry collector endpoint (e.g. "localhost:4317"), empty = disabled
 }
 
 // Base Sepolia defaults
@@ -120,6 +123,8 @@ func Load() (*Config, error) {
 		HTTPWriteTimeout: getEnvDuration("HTTP_WRITE_TIMEOUT", DefaultHTTPWriteTimeout),
 		HTTPIdleTimeout:  getEnvDuration("HTTP_IDLE_TIMEOUT", DefaultHTTPIdleTimeout),
 		RequestTimeout:   getEnvDuration("REQUEST_TIMEOUT", DefaultRequestTimeout),
+
+		OTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 	}
 
 	if err := cfg.Validate(); err != nil {
