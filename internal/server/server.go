@@ -167,7 +167,11 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Session keys with Postgres
 		sessionStore := sessionkeys.NewPostgresStore(db)
-		s.sessionMgr = sessionkeys.NewManager(sessionStore, nil)
+		policyStore := sessionkeys.NewPolicyPostgresStore(db)
+		if err := policyStore.Migrate(ctx); err != nil {
+			s.logger.Warn("failed to migrate policy store", "error", err)
+		}
+		s.sessionMgr = sessionkeys.NewManager(sessionStore, nil, policyStore)
 
 		// API keys with Postgres
 		authStore := auth.NewPostgresStore(db)
@@ -285,7 +289,8 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Session keys with in-memory store
 		sessionStore := sessionkeys.NewMemoryStore()
-		s.sessionMgr = sessionkeys.NewManager(sessionStore, nil)
+		policyStore := sessionkeys.NewPolicyMemoryStore()
+		s.sessionMgr = sessionkeys.NewManager(sessionStore, nil, policyStore)
 
 		// API keys with in-memory store
 		s.authMgr = auth.NewManager(auth.NewMemoryStore())
@@ -708,6 +713,12 @@ func (s *Server) setupRoutes() {
 		protectedSessions.POST("/agents/:address/sessions", auth.RequireOwnership(s.authMgr, "address"), sessionHandler.CreateSessionKey)
 		protectedSessions.DELETE("/agents/:address/sessions/:keyId", auth.RequireOwnership(s.authMgr, "address"), sessionHandler.RevokeSessionKey)
 	}
+
+	// Policy engine routes (CRUD + attach/detach, ownership required)
+	protectedPolicies := v1.Group("")
+	protectedPolicies.Use(auth.Middleware(s.authMgr))
+	protectedPolicies.Use(auth.RequireOwnership(s.authMgr, "address"))
+	sessionHandler.RegisterPolicyRoutes(protectedPolicies)
 	// Using a session key to transact doesn't require API key (the session key IS the auth)
 	v1.POST("/agents/:address/sessions/:keyId/transact", sessionHandler.Transact)
 

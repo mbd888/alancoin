@@ -33,9 +33,10 @@ type ServiceResolver interface {
 
 // Manager handles session key operations
 type Manager struct {
-	store    Store
-	resolver ServiceResolver
-	keyLocks sync.Map // per-key locks to prevent nonce TOCTOU replay
+	store       Store
+	resolver    ServiceResolver
+	policyStore PolicyStore // optional: policy engine for additional constraints
+	keyLocks    sync.Map    // per-key locks to prevent nonce TOCTOU replay
 }
 
 // LockKey acquires a per-key mutex and returns the unlock function.
@@ -87,12 +88,22 @@ func (m *Manager) LockKeyChain(ctx context.Context, keyID string) func() {
 	}
 }
 
-// NewManager creates a new session key manager
-func NewManager(store Store, resolver ServiceResolver) *Manager {
-	return &Manager{
+// NewManager creates a new session key manager.
+// An optional PolicyStore can be provided to enable the policy engine.
+func NewManager(store Store, resolver ServiceResolver, policyStores ...PolicyStore) *Manager {
+	m := &Manager{
 		store:    store,
 		resolver: resolver,
 	}
+	if len(policyStores) > 0 && policyStores[0] != nil {
+		m.policyStore = policyStores[0]
+	}
+	return m
+}
+
+// PolicyStore returns the manager's policy store (may be nil).
+func (m *Manager) PolicyStore() PolicyStore {
+	return m.policyStore
 }
 
 // Create creates a new session key with the given permissions
@@ -637,7 +648,16 @@ func (m *Manager) RecordUsage(ctx context.Context, keyID string, amount string, 
 	key.Usage.LastUsed = time.Now()
 	key.Usage.LastNonce = nonce // Track nonce for replay protection
 
-	return m.store.Update(ctx, key)
+	if err := m.store.Update(ctx, key); err != nil {
+		return err
+	}
+
+	// Update rate_limit window counters on attached policies
+	if m.policyStore != nil {
+		recordPolicyUsage(ctx, m.policyStore, keyID)
+	}
+
+	return nil
 }
 
 // validateTransaction performs all permission validation checks
@@ -745,6 +765,13 @@ func (m *Manager) validateTransaction(ctx context.Context, key *SessionKey, to s
 
 		if !allowed {
 			return ErrRecipientNotAllowed
+		}
+	}
+
+	// Evaluate attached policies (rate_limit, time_window, cooldown, tx_count)
+	if m.policyStore != nil {
+		if err := evaluatePolicies(ctx, m.policyStore, key); err != nil {
+			return err
 		}
 	}
 
