@@ -40,6 +40,7 @@ import (
 	"github.com/mbd888/alancoin/internal/predictions"
 	"github.com/mbd888/alancoin/internal/ratelimit"
 	"github.com/mbd888/alancoin/internal/realtime"
+	"github.com/mbd888/alancoin/internal/receipts"
 	"github.com/mbd888/alancoin/internal/registry"
 	"github.com/mbd888/alancoin/internal/reputation"
 	"github.com/mbd888/alancoin/internal/risk"
@@ -87,6 +88,7 @@ type Server struct {
 	negotiationTimer   *negotiation.Timer
 	stakesService      *stakes.Service
 	stakesDistributor  *stakes.Distributor
+	receiptService     *receipts.Service
 	reputationStore    reputation.SnapshotStore
 	reputationWorker   *reputation.Worker
 	reputationSigner   *reputation.Signer
@@ -242,6 +244,15 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.streamTimer = streams.NewTimer(s.streamService, streamStore, s.logger)
 		s.logger.Info("streams enabled (postgres)")
 
+		// Receipt signing (cryptographic payment proofs)
+		receiptStore := receipts.NewPostgresStore(db)
+		if err := receiptStore.Migrate(ctx); err != nil {
+			s.logger.Warn("failed to migrate receipt store", "error", err)
+		}
+		receiptSigner := receipts.NewSigner(cfg.ReceiptHMACSecret)
+		s.receiptService = receipts.NewService(receiptStore, receiptSigner)
+		s.logger.Info("receipt signing enabled (postgres)")
+
 		// Gateway with in-memory store (transparent payment proxy)
 		gwStore := gateway.NewMemoryStore()
 		gwResolver := gateway.NewResolver(&gatewayRegistryAdapter{s.registry})
@@ -271,6 +282,14 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.streamService.WithRevenueAccumulator(revenueAdapter)
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry}).
 			WithRevenueAccumulator(revenueAdapter)
+
+		// Wire receipt issuer into all payment paths
+		if s.receiptService != nil {
+			rcptAdapter := &receiptIssuerAdapter{s.receiptService}
+			s.gatewayService.WithReceiptIssuer(rcptAdapter)
+			s.streamService.WithReceiptIssuer(rcptAdapter)
+			s.escrowService.WithReceiptIssuer(rcptAdapter)
+		}
 
 		// Reputation snapshots (PostgreSQL)
 		s.reputationStore = reputation.NewPostgresSnapshotStore(db)
@@ -378,6 +397,11 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.streamTimer = streams.NewTimer(s.streamService, streamStore, s.logger)
 		s.logger.Info("streams enabled (in-memory)")
 
+		// Receipt signing (cryptographic payment proofs, in-memory)
+		receiptSigner := receipts.NewSigner(cfg.ReceiptHMACSecret)
+		s.receiptService = receipts.NewService(receipts.NewMemoryStore(), receiptSigner)
+		s.logger.Info("receipt signing enabled (in-memory)")
+
 		// Gateway with in-memory store (transparent payment proxy)
 		gwStore2 := gateway.NewMemoryStore()
 		gwResolver2 := gateway.NewResolver(&gatewayRegistryAdapter{s.registry})
@@ -407,6 +431,14 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.streamService.WithRevenueAccumulator(revenueAdapter)
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry}).
 			WithRevenueAccumulator(revenueAdapter)
+
+		// Wire receipt issuer into all payment paths
+		if s.receiptService != nil {
+			rcptAdapter := &receiptIssuerAdapter{s.receiptService}
+			s.gatewayService.WithReceiptIssuer(rcptAdapter)
+			s.streamService.WithReceiptIssuer(rcptAdapter)
+			s.escrowService.WithReceiptIssuer(rcptAdapter)
+		}
 
 		// Reputation snapshots (in-memory)
 		s.reputationStore = reputation.NewMemorySnapshotStore()
@@ -793,6 +825,11 @@ func (s *Server) setupRoutes() {
 		sessionHandler = sessionHandler.WithAlertChecker(alertChecker)
 	}
 
+	// Add receipt issuer for cryptographic payment proofs
+	if s.receiptService != nil {
+		sessionHandler = sessionHandler.WithReceiptIssuer(&receiptIssuerAdapter{s.receiptService})
+	}
+
 	protectedSessions := v1.Group("")
 	protectedSessions.Use(auth.Middleware(s.authMgr))
 	{
@@ -987,6 +1024,12 @@ func (s *Server) setupRoutes() {
 		protectedStreams := v1.Group("")
 		protectedStreams.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
 		streamHandler.RegisterProtectedRoutes(protectedStreams)
+	}
+
+	// Receipt routes (cryptographic payment proofs — public, read-only)
+	if s.receiptService != nil {
+		receiptHandler := receipts.NewHandler(s.receiptService)
+		receiptHandler.RegisterRoutes(v1)
 	}
 
 	// Gateway routes (transparent payment proxy for AI agents)
@@ -2654,4 +2697,24 @@ func (a *gatewayContractAdapter) RecordCall(ctx context.Context, contractID stri
 		LatencyMs: latencyMs,
 	}, contract.BuyerAddr)
 	return err
+}
+
+// receiptIssuerAdapter adapts receipts.Service to the ReceiptIssuer interface
+// used by gateway, streams, escrow, and session keys. A single adapter satisfies
+// all four payment paths via Go structural typing.
+type receiptIssuerAdapter struct {
+	svc *receipts.Service
+}
+
+func (a *receiptIssuerAdapter) IssueReceipt(ctx context.Context, path, reference, from, to, amount, serviceID, status, metadata string) error {
+	return a.svc.IssueReceipt(ctx, receipts.IssueRequest{
+		Path:      receipts.PaymentPath(path),
+		Reference: reference,
+		From:      from,
+		To:        to,
+		Amount:    amount,
+		ServiceID: serviceID,
+		Status:    status,
+		Metadata:  metadata,
+	})
 }

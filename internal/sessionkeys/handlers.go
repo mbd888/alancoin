@@ -72,18 +72,24 @@ type RiskScorer interface {
 	RecordTransaction(keyID, to, amount string)
 }
 
+// ReceiptIssuer issues cryptographic receipts for payments.
+type ReceiptIssuer interface {
+	IssueReceipt(ctx context.Context, path, reference, from, to, amount, serviceID, status, metadata string) error
+}
+
 // Handler provides HTTP handlers for session key operations
 type Handler struct {
-	manager    *Manager
-	wallet     WalletService       // For executing transfers (optional)
-	recorder   TransactionRecorder // For recording txs (optional)
-	balance    BalanceService      // For checking/debiting balances (optional)
-	events     EventEmitter        // For broadcasting events (optional)
-	revenue    RevenueAccumulator  // For revenue staking interception (optional)
-	alerts     *AlertChecker       // For budget/expiration alerts (optional)
-	riskScorer RiskScorer          // For real-time risk scoring (optional)
-	logger     *slog.Logger
-	demoMode   bool // Skip on-chain transfers, use ledger only
+	manager       *Manager
+	wallet        WalletService       // For executing transfers (optional)
+	recorder      TransactionRecorder // For recording txs (optional)
+	balance       BalanceService      // For checking/debiting balances (optional)
+	events        EventEmitter        // For broadcasting events (optional)
+	revenue       RevenueAccumulator  // For revenue staking interception (optional)
+	alerts        *AlertChecker       // For budget/expiration alerts (optional)
+	riskScorer    RiskScorer          // For real-time risk scoring (optional)
+	receiptIssuer ReceiptIssuer       // For cryptographic payment receipts (optional)
+	logger        *slog.Logger
+	demoMode      bool // Skip on-chain transfers, use ledger only
 }
 
 // NewHandler creates a new session key handler
@@ -123,6 +129,12 @@ func (h *Handler) WithAlertChecker(a *AlertChecker) *Handler {
 // WithRiskScorer adds a risk scoring engine for real-time transaction evaluation.
 func (h *Handler) WithRiskScorer(rs RiskScorer) *Handler {
 	h.riskScorer = rs
+	return h
+}
+
+// WithReceiptIssuer adds a receipt issuer for cryptographic payment proofs.
+func (h *Handler) WithReceiptIssuer(r ReceiptIssuer) *Handler {
+	h.receiptIssuer = r
 	return h
 }
 
@@ -520,6 +532,13 @@ func (h *Handler) Transact(c *gin.Context) {
 				h.logger.Warn("AccumulateRevenue failed: payment succeeded but revenue not escrowed for stakes",
 					"seller", req.To, "amount", req.Amount, "error", revErr)
 			}
+		}
+
+		// Issue receipt for session key transaction
+		if h.receiptIssuer != nil {
+			rcptRef := fmt.Sprintf("sk:%s:%s", keyID, txHash)
+			_ = h.receiptIssuer.IssueReceipt(c.Request.Context(), "session_key", rcptRef,
+				address, req.To, req.Amount, req.ServiceID, "confirmed", "")
 		}
 	}
 

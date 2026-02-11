@@ -42,6 +42,9 @@ type Config struct {
 	ReputationHMACSecret string // HMAC secret for signing reputation responses (optional)
 	AdminSecret          string // Admin API secret
 
+	// Receipt signing
+	ReceiptHMACSecret string // HMAC secret for signing payment receipts (optional)
+
 	// Database pool settings
 	DBMaxOpenConns     int
 	DBMaxIdleConns     int
@@ -111,6 +114,7 @@ func Load() (*Config, error) {
 		RateLimitRPS:         int(getEnvInt64("RATE_LIMIT_RPS", int64(DefaultRateLimit))),
 		ReputationHMACSecret: os.Getenv("REPUTATION_HMAC_SECRET"),
 		AdminSecret:          os.Getenv("ADMIN_SECRET"),
+		ReceiptHMACSecret:    os.Getenv("RECEIPT_HMAC_SECRET"),
 
 		DBMaxOpenConns:     int(getEnvInt64("POSTGRES_MAX_OPEN_CONNS", int64(DefaultDBMaxOpenConns))),
 		DBMaxIdleConns:     int(getEnvInt64("POSTGRES_MAX_IDLE_CONNS", int64(DefaultDBMaxIdleConns))),

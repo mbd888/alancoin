@@ -23,6 +23,7 @@ type Service struct {
 	revenue           RevenueAccumulator
 	verification      VerificationChecker
 	contracts         ContractManager
+	receiptIssuer     ReceiptIssuer
 	guaranteeFundAddr string // platform address receiving guarantee premiums
 	logger            *slog.Logger
 	locks             sync.Map // per-session mutex
@@ -60,6 +61,12 @@ func (s *Service) WithVerification(v VerificationChecker) *Service {
 // WithContracts adds a contract manager for auto-contract creation.
 func (s *Service) WithContracts(c ContractManager) *Service {
 	s.contracts = c
+	return s
+}
+
+// WithReceiptIssuer adds a receipt issuer for cryptographic payment proofs.
+func (s *Service) WithReceiptIssuer(r ReceiptIssuer) *Service {
+	s.receiptIssuer = r
 	return s
 }
 
@@ -281,6 +288,12 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 					candidate.AgentAddress, candidate.Price, candidate.ServiceID, "failed")
 			}
 
+			// Issue receipt for failed forward (payment was still made)
+			if s.receiptIssuer != nil {
+				_ = s.receiptIssuer.IssueReceipt(ctx, "gateway", ref, session.AgentAddr,
+					candidate.AgentAddress, candidate.Price, candidate.ServiceID, "failed", "forward_failed")
+			}
+
 			// Update session spend even though forward failed (payment was made)
 			newSpent := new(big.Int).Add(spentBig, totalCostBig)
 			session.TotalSpent = usdc.Format(newSpent)
@@ -316,6 +329,12 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		// Accumulate revenue for stakes
 		if s.revenue != nil {
 			_ = s.revenue.AccumulateRevenue(ctx, candidate.AgentAddress, candidate.Price, "gateway_proxy:"+ref)
+		}
+
+		// Issue receipt for successful payment
+		if s.receiptIssuer != nil {
+			_ = s.receiptIssuer.IssueReceipt(ctx, "gateway", ref, session.AgentAddr,
+				candidate.AgentAddress, candidate.Price, candidate.ServiceID, "confirmed", "")
 		}
 
 		return &ProxyResult{

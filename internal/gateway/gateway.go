@@ -139,6 +139,11 @@ type ContractManager interface {
 	RecordCall(ctx context.Context, contractID string, status string, latencyMs int) error
 }
 
+// ReceiptIssuer issues cryptographic receipts for payments.
+type ReceiptIssuer interface {
+	IssueReceipt(ctx context.Context, path, reference, from, to, amount, serviceID, status, metadata string) error
+}
+
 // ServiceCandidate is a discovered service suitable for proxying.
 type ServiceCandidate struct {
 	AgentAddress    string  `json:"agentAddress"`

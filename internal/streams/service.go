@@ -15,11 +15,12 @@ import (
 
 // Service implements streaming micropayment business logic.
 type Service struct {
-	store    Store
-	ledger   LedgerService
-	recorder TransactionRecorder
-	revenue  RevenueAccumulator
-	locks    sync.Map // per-stream ID locks to prevent race conditions
+	store         Store
+	ledger        LedgerService
+	recorder      TransactionRecorder
+	revenue       RevenueAccumulator
+	receiptIssuer ReceiptIssuer
+	locks         sync.Map // per-stream ID locks to prevent race conditions
 }
 
 // streamLock returns a mutex for the given stream ID.
@@ -45,6 +46,12 @@ func (s *Service) WithRecorder(r TransactionRecorder) *Service {
 // WithRevenueAccumulator adds a revenue accumulator for stakes interception.
 func (s *Service) WithRevenueAccumulator(r RevenueAccumulator) *Service {
 	s.revenue = r
+	return s
+}
+
+// WithReceiptIssuer adds a receipt issuer for cryptographic payment proofs.
+func (s *Service) WithReceiptIssuer(r ReceiptIssuer) *Service {
+	s.receiptIssuer = r
 	return s
 }
 
@@ -265,6 +272,16 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 	// Intercept revenue for stakes (seller earned money)
 	if s.revenue != nil && spentBig.Sign() > 0 && status != StatusDisputed {
 		_ = s.revenue.AccumulateRevenue(ctx, stream.SellerAddr, stream.SpentAmount, "stream_settle:"+stream.ID)
+	}
+
+	// Issue receipt for stream settlement
+	if s.receiptIssuer != nil && spentBig.Sign() > 0 {
+		rcptStatus := "confirmed"
+		if status == StatusDisputed {
+			rcptStatus = "failed"
+		}
+		_ = s.receiptIssuer.IssueReceipt(ctx, "stream", stream.ID, stream.BuyerAddr,
+			stream.SellerAddr, stream.SpentAmount, stream.ServiceID, rcptStatus, string(status))
 	}
 
 	return stream, nil

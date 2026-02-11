@@ -110,6 +110,11 @@ type RevenueAccumulator interface {
 	AccumulateRevenue(ctx context.Context, agentAddr, amount, txRef string) error
 }
 
+// ReceiptIssuer issues cryptographic receipts for payments.
+type ReceiptIssuer interface {
+	IssueReceipt(ctx context.Context, path, reference, from, to, amount, serviceID, status, metadata string) error
+}
+
 // OpenRequest contains the parameters for opening a stream.
 type OpenRequest struct {
 	BuyerAddr       string `json:"buyerAddr" binding:"required"`

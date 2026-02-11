@@ -131,6 +131,11 @@ type ReputationImpactor interface {
 	RecordDispute(ctx context.Context, sellerAddr string, outcome string, amount string) error
 }
 
+// ReceiptIssuer issues cryptographic receipts for payments.
+type ReceiptIssuer interface {
+	IssueReceipt(ctx context.Context, path, reference, from, to, amount, serviceID, status, metadata string) error
+}
+
 // CreateRequest contains the parameters for creating an escrow.
 type CreateRequest struct {
 	BuyerAddr    string `json:"buyerAddr" binding:"required"`
@@ -167,13 +172,14 @@ type ResolveRequest struct {
 
 // Service implements escrow business logic.
 type Service struct {
-	store      Store
-	ledger     LedgerService
-	recorder   TransactionRecorder
-	revenue    RevenueAccumulator
-	reputation ReputationImpactor
-	logger     *slog.Logger
-	locks      sync.Map // per-escrow ID locks to prevent race conditions
+	store         Store
+	ledger        LedgerService
+	recorder      TransactionRecorder
+	revenue       RevenueAccumulator
+	reputation    ReputationImpactor
+	receiptIssuer ReceiptIssuer
+	logger        *slog.Logger
+	locks         sync.Map // per-escrow ID locks to prevent race conditions
 }
 
 // escrowLock returns a mutex for the given escrow ID.
@@ -218,6 +224,12 @@ func (s *Service) WithRevenueAccumulator(r RevenueAccumulator) *Service {
 // WithReputationImpactor adds a reputation impactor for dispute/confirm outcomes.
 func (s *Service) WithReputationImpactor(r ReputationImpactor) *Service {
 	s.reputation = r
+	return s
+}
+
+// WithReceiptIssuer adds a receipt issuer for cryptographic payment proofs.
+func (s *Service) WithReceiptIssuer(r ReceiptIssuer) *Service {
+	s.receiptIssuer = r
 	return s
 }
 
@@ -413,6 +425,12 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 		_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, escrow.Amount, "escrow_confirm:"+escrow.ID)
 	}
 
+	// Issue receipt for confirmed escrow release
+	if s.receiptIssuer != nil {
+		_ = s.receiptIssuer.IssueReceipt(ctx, "escrow", escrow.ID, escrow.BuyerAddr,
+			escrow.SellerAddr, escrow.Amount, escrow.ServiceID, "confirmed", "buyer_confirmed")
+	}
+
 	metrics.EscrowConfirmedTotal.Inc()
 	metrics.EscrowDuration.Observe(time.Since(escrow.CreatedAt).Seconds())
 
@@ -556,6 +574,12 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 	// Intercept revenue for stakes (seller earned money)
 	if s.revenue != nil {
 		_ = s.revenue.AccumulateRevenue(ctx, escrow.SellerAddr, escrow.Amount, "escrow_release:"+escrow.ID)
+	}
+
+	// Issue receipt for auto-released escrow
+	if s.receiptIssuer != nil {
+		_ = s.receiptIssuer.IssueReceipt(ctx, "escrow", escrow.ID, escrow.BuyerAddr,
+			escrow.SellerAddr, escrow.Amount, escrow.ServiceID, "confirmed", "auto_released")
 	}
 
 	metrics.EscrowAutoReleasedTotal.Inc()
@@ -745,6 +769,16 @@ func (s *Service) ResolveArbitration(ctx context.Context, id, callerAddr string,
 			"escrow_id", escrow.ID, "resolution", req.Resolution)
 		span.RecordError(err)
 		return nil, err
+	}
+
+	// Issue receipt for arbitration resolution (release or partial → funds moved to seller)
+	if s.receiptIssuer != nil && (req.Resolution == "release" || req.Resolution == "partial") {
+		receiptAmount := escrow.Amount
+		if req.Resolution == "partial" && escrow.PartialReleaseAmount != "" {
+			receiptAmount = escrow.PartialReleaseAmount
+		}
+		_ = s.receiptIssuer.IssueReceipt(ctx, "escrow", escrow.ID, escrow.BuyerAddr,
+			escrow.SellerAddr, receiptAmount, escrow.ServiceID, "confirmed", "arbitration_"+req.Resolution)
 	}
 
 	metrics.EscrowDuration.Observe(time.Since(escrow.CreatedAt).Seconds())
