@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -114,6 +113,7 @@ type LedgerService interface {
 	EscrowLock(ctx context.Context, agentAddr, amount, reference string) error
 	ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error
 	RefundEscrow(ctx context.Context, agentAddr, amount, reference string) error
+	PartialEscrowSettle(ctx context.Context, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference string) error
 }
 
 // TransactionRecorder records transactions for reputation tracking.
@@ -239,15 +239,15 @@ func validateAmount(amount string) error {
 	if amount == "" {
 		return fmt.Errorf("%w: empty amount", ErrInvalidAmount)
 	}
-	f, err := strconv.ParseFloat(amount, 64)
-	if err != nil {
+	parsed, ok := usdc.Parse(amount)
+	if !ok {
 		return fmt.Errorf("%w: %q is not a valid number", ErrInvalidAmount, amount)
 	}
-	if f <= 0 {
+	if parsed.Sign() <= 0 {
 		return fmt.Errorf("%w: amount must be positive", ErrInvalidAmount)
 	}
-	// NUMERIC(20,6) max is 99999999999999.999999
-	if f > 99_999_999_999_999 {
+	maxAmount, _ := new(big.Int).SetString("99999999999999999999", 10)
+	if parsed.Cmp(maxAmount) > 0 {
 		return fmt.Errorf("%w: amount exceeds maximum", ErrInvalidAmount)
 	}
 	return nil
@@ -729,17 +729,10 @@ func (s *Service) ResolveArbitration(ctx context.Context, id, callerAddr string,
 		releaseStr := usdc.Format(releaseAmtBig)
 		refundStr := usdc.Format(refundBig)
 
-		// Release partial to seller
-		if err := s.ledger.ReleaseEscrow(ctx, escrow.BuyerAddr, escrow.SellerAddr, releaseStr, escrow.ID+":partial_release"); err != nil {
+		// Atomically settle: release to seller + refund to buyer in one transaction
+		if err := s.ledger.PartialEscrowSettle(ctx, escrow.BuyerAddr, escrow.SellerAddr, releaseStr, refundStr, escrow.ID+":partial"); err != nil {
 			span.RecordError(err)
-			return nil, fmt.Errorf("failed to release partial: %w", err)
-		}
-		// Refund remainder to buyer
-		if err := s.ledger.RefundEscrow(ctx, escrow.BuyerAddr, refundStr, escrow.ID+":partial_refund"); err != nil {
-			span.RecordError(err)
-			s.logger.Error("CRITICAL: partial release succeeded but refund failed",
-				"escrow_id", escrow.ID, "releaseAmount", releaseStr, "refundAmount", refundStr)
-			return nil, fmt.Errorf("failed to refund partial: %w", err)
+			return nil, fmt.Errorf("failed to settle partial escrow: %w", err)
 		}
 
 		escrow.Status = StatusReleased

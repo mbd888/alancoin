@@ -549,6 +549,73 @@ func (p *PostgresStore) ReleaseHold(ctx context.Context, agentAddr, amount, refe
 	return tx.Commit()
 }
 
+// SettleHold atomically moves funds from buyer's pending to seller's available.
+// Used by gateway and stream settlement to avoid separate ConfirmHold + Deposit calls.
+func (p *PostgresStore) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error {
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Debit buyer's pending, increment total_out
+	result, err := tx.ExecContext(ctx, `
+		UPDATE agent_balances SET
+			pending    = pending   - $2::NUMERIC(20,6),
+			total_out  = total_out + $2::NUMERIC(20,6),
+			updated_at = NOW()
+		WHERE agent_address = $1
+		  AND pending >= $2::NUMERIC(20,6)
+	`, buyerAddr, amount)
+	if err != nil {
+		return fmt.Errorf("failed to debit buyer pending: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if rows == 0 {
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, buyerAddr).Scan(&exists)
+		if !exists {
+			return ErrAgentNotFound
+		}
+		return ErrInsufficientBalance
+	}
+
+	// Credit seller's available, increment total_in (upsert)
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO agent_balances (agent_address, available, total_in, updated_at)
+		VALUES ($1, $2::NUMERIC(20,6), $2::NUMERIC(20,6), NOW())
+		ON CONFLICT (agent_address) DO UPDATE SET
+			available  = agent_balances.available + $2::NUMERIC(20,6),
+			total_in   = agent_balances.total_in  + $2::NUMERIC(20,6),
+			updated_at = NOW()
+	`, sellerAddr, amount)
+	if err != nil {
+		return fmt.Errorf("failed to credit seller: %w", err)
+	}
+
+	// Record entries for both parties
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
+		VALUES ($1, $2, 'spend', $3::NUMERIC(20,6), $4, 'settle_hold', NOW())
+	`, idgen.New(), buyerAddr, amount, reference)
+	if err != nil {
+		return fmt.Errorf("failed to record buyer entry: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
+		VALUES ($1, $2, 'deposit', $3::NUMERIC(20,6), $4, 'settle_hold_receive', NOW())
+	`, idgen.New(), sellerAddr, amount, reference)
+	if err != nil {
+		return fmt.Errorf("failed to record seller entry: %w", err)
+	}
+
+	return tx.Commit()
+}
+
 // EscrowLock moves funds from available to escrowed.
 func (p *PostgresStore) EscrowLock(ctx context.Context, agentAddr, amount, reference string) error {
 	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
@@ -673,6 +740,7 @@ func (p *PostgresStore) RefundEscrow(ctx context.Context, agentAddr, amount, ref
 			available  = available + $2::NUMERIC(20,6),
 			updated_at = NOW()
 		WHERE agent_address = $1
+		  AND escrowed >= $2::NUMERIC(20,6)
 	`, agentAddr, amount)
 	if err != nil {
 		return fmt.Errorf("failed to refund escrow: %w", err)
@@ -683,7 +751,12 @@ func (p *PostgresStore) RefundEscrow(ctx context.Context, agentAddr, amount, ref
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
 	if rows == 0 {
-		return ErrAgentNotFound
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists)
+		if !exists {
+			return ErrAgentNotFound
+		}
+		return ErrInsufficientBalance
 	}
 
 	_, err = tx.ExecContext(ctx, `
@@ -692,6 +765,89 @@ func (p *PostgresStore) RefundEscrow(ctx context.Context, agentAddr, amount, ref
 	`, idgen.New(), agentAddr, amount, reference)
 	if err != nil {
 		return fmt.Errorf("failed to record escrow refund entry: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// PartialEscrowSettle atomically splits escrowed funds: release to seller, refund to buyer.
+// Single serializable transaction prevents money loss from partial failures.
+func (p *PostgresStore) PartialEscrowSettle(ctx context.Context, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference string) error {
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Compute total to deduct from escrowed
+	releaseBig, _ := usdc.Parse(releaseAmount)
+	refundBig, _ := usdc.Parse(refundAmount)
+	totalBig := new(big.Int).Add(releaseBig, refundBig)
+	totalStr := usdc.Format(totalBig)
+
+	// Debit buyer's escrowed for total, credit available for refund, total_out for release
+	result, err := tx.ExecContext(ctx, `
+		UPDATE agent_balances SET
+			escrowed   = escrowed  - $2::NUMERIC(20,6),
+			total_out  = total_out + $3::NUMERIC(20,6),
+			available  = available + $4::NUMERIC(20,6),
+			updated_at = NOW()
+		WHERE agent_address = $1
+		  AND escrowed >= $2::NUMERIC(20,6)
+	`, buyerAddr, totalStr, releaseAmount, refundAmount)
+	if err != nil {
+		return fmt.Errorf("failed to debit buyer escrow: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if rows == 0 {
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, buyerAddr).Scan(&exists)
+		if !exists {
+			return ErrAgentNotFound
+		}
+		return ErrInsufficientBalance
+	}
+
+	// Credit seller's available for release amount
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO agent_balances (agent_address, available, total_in, updated_at)
+		VALUES ($1, $2::NUMERIC(20,6), $2::NUMERIC(20,6), NOW())
+		ON CONFLICT (agent_address) DO UPDATE SET
+			available  = agent_balances.available + $2::NUMERIC(20,6),
+			total_in   = agent_balances.total_in  + $2::NUMERIC(20,6),
+			updated_at = NOW()
+	`, sellerAddr, releaseAmount)
+	if err != nil {
+		return fmt.Errorf("failed to credit seller: %w", err)
+	}
+
+	// Record entries for buyer: release + refund
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
+		VALUES ($1, $2, 'escrow_release', $3::NUMERIC(20,6), $4, 'partial_escrow_release', NOW())
+	`, idgen.New(), buyerAddr, releaseAmount, reference)
+	if err != nil {
+		return fmt.Errorf("failed to record buyer release entry: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
+		VALUES ($1, $2, 'escrow_refund', $3::NUMERIC(20,6), $4, 'partial_escrow_refund', NOW())
+	`, idgen.New(), buyerAddr, refundAmount, reference)
+	if err != nil {
+		return fmt.Errorf("failed to record buyer refund entry: %w", err)
+	}
+
+	// Record entry for seller
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
+		VALUES ($1, $2, 'escrow_receive', $3::NUMERIC(20,6), $4, 'partial_escrow_receive', NOW())
+	`, idgen.New(), sellerAddr, releaseAmount, reference)
+	if err != nil {
+		return fmt.Errorf("failed to record seller entry: %w", err)
 	}
 
 	return tx.Commit()

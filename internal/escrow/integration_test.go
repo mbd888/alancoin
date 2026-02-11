@@ -32,6 +32,10 @@ func (a *ledgerAdapter) RefundEscrow(ctx context.Context, agentAddr, amount, ref
 	return a.l.RefundEscrow(ctx, agentAddr, amount, reference)
 }
 
+func (a *ledgerAdapter) PartialEscrowSettle(ctx context.Context, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference string) error {
+	return a.l.PartialEscrowSettle(ctx, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference)
+}
+
 var _ escrow.LedgerService = (*ledgerAdapter)(nil)
 
 func setupIntegration() (*escrow.Service, *ledger.Ledger) {

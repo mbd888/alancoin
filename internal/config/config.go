@@ -36,7 +36,7 @@ type Config struct {
 	// Security
 	APIKeyHash    string // For authenticating SDK clients
 	WebhookSecret string
-	RateLimitRPS  int
+	RateLimitRPM  int
 
 	// Reputation API
 	ReputationHMACSecret string // HMAC secret for signing reputation responses (optional)
@@ -96,22 +96,28 @@ func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		Port:                 getEnv("PORT", DefaultPort),
-		Env:                  getEnv("ENV", DefaultEnv),
-		LogLevel:             getEnv("LOG_LEVEL", DefaultLogLevel),
-		DatabaseURL:          os.Getenv("DATABASE_URL"), // Optional, uses in-memory if not set
-		RPCURL:               getEnv("RPC_URL", DefaultRPCURL),
-		ChainID:              getEnvInt64("CHAIN_ID", DefaultChainID),
-		PrivateKey:           os.Getenv("PRIVATE_KEY"), // Required, no default
-		WalletAddress:        os.Getenv("WALLET_ADDRESS"),
-		USDCContract:         getEnv("USDC_CONTRACT", DefaultUSDCContract),
-		PaymasterURL:         os.Getenv("PAYMASTER_URL"),
-		DefaultPrice:         getEnv("DEFAULT_PRICE", DefaultPrice),
-		MinPayment:           getEnv("MIN_PAYMENT", "0.0001"),
-		MaxPayment:           getEnv("MAX_PAYMENT", "1000"),
-		APIKeyHash:           os.Getenv("API_KEY_HASH"),
-		WebhookSecret:        os.Getenv("WEBHOOK_SECRET"),
-		RateLimitRPS:         int(getEnvInt64("RATE_LIMIT_RPS", int64(DefaultRateLimit))),
+		Port:          getEnv("PORT", DefaultPort),
+		Env:           getEnv("ENV", DefaultEnv),
+		LogLevel:      getEnv("LOG_LEVEL", DefaultLogLevel),
+		DatabaseURL:   os.Getenv("DATABASE_URL"), // Optional, uses in-memory if not set
+		RPCURL:        getEnv("RPC_URL", DefaultRPCURL),
+		ChainID:       getEnvInt64("CHAIN_ID", DefaultChainID),
+		PrivateKey:    os.Getenv("PRIVATE_KEY"), // Required, no default
+		WalletAddress: os.Getenv("WALLET_ADDRESS"),
+		USDCContract:  getEnv("USDC_CONTRACT", DefaultUSDCContract),
+		PaymasterURL:  os.Getenv("PAYMASTER_URL"),
+		DefaultPrice:  getEnv("DEFAULT_PRICE", DefaultPrice),
+		MinPayment:    getEnv("MIN_PAYMENT", "0.0001"),
+		MaxPayment:    getEnv("MAX_PAYMENT", "1000"),
+		APIKeyHash:    os.Getenv("API_KEY_HASH"),
+		WebhookSecret: os.Getenv("WEBHOOK_SECRET"),
+		RateLimitRPM: func() int {
+			rpm := getEnvInt64("RATE_LIMIT_RPM", 0)
+			if rpm == 0 {
+				rpm = getEnvInt64("RATE_LIMIT_RPS", int64(DefaultRateLimit))
+			}
+			return int(rpm)
+		}(),
 		ReputationHMACSecret: os.Getenv("REPUTATION_HMAC_SECRET"),
 		AdminSecret:          os.Getenv("ADMIN_SECRET"),
 		ReceiptHMACSecret:    os.Getenv("RECEIPT_HMAC_SECRET"),

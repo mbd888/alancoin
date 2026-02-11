@@ -605,7 +605,7 @@ func (s *Server) setupMiddleware() {
 
 	// Rate limiting
 	s.rateLimiter = ratelimit.New(ratelimit.Config{
-		RequestsPerMinute: s.cfg.RateLimitRPS,
+		RequestsPerMinute: s.cfg.RateLimitRPM,
 		BurstSize:         10,
 		CleanupInterval:   time.Minute,
 	})
@@ -888,8 +888,10 @@ func (s *Server) setupRoutes() {
 		adminLedger.Use(auth.Middleware(s.authMgr), auth.RequireAdmin())
 		ledgerHandler.RegisterAdminRoutes(adminLedger)
 
-		// Alert routes (per-agent)
-		ledgerHandler.RegisterAlertRoutes(v1)
+		// Alert routes (per-agent, require authentication and ownership)
+		protectedAlerts := v1.Group("")
+		protectedAlerts.Use(auth.Middleware(s.authMgr), auth.RequireOwnership(s.authMgr, "address"))
+		ledgerHandler.RegisterAlertRoutes(protectedAlerts)
 	}
 
 	// Gas abstraction routes (agents pay USDC only, gas is sponsored)
@@ -1984,6 +1986,10 @@ func (a *escrowLedgerAdapter) RefundEscrow(ctx context.Context, agentAddr, amoun
 	return a.l.RefundEscrow(ctx, agentAddr, amount, reference)
 }
 
+func (a *escrowLedgerAdapter) PartialEscrowSettle(ctx context.Context, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference string) error {
+	return a.l.PartialEscrowSettle(ctx, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference)
+}
+
 // creditMetricsAdapter adapts reputation.RegistryProvider to credit.MetricsProvider
 type creditMetricsAdapter struct {
 	rep *reputation.RegistryProvider
@@ -2027,16 +2033,12 @@ func (a *streamLedgerAdapter) Hold(ctx context.Context, agentAddr, amount, refer
 	return a.l.Hold(ctx, agentAddr, amount, reference)
 }
 
-func (a *streamLedgerAdapter) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.ConfirmHold(ctx, agentAddr, amount, reference)
+func (a *streamLedgerAdapter) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error {
+	return a.l.SettleHold(ctx, buyerAddr, sellerAddr, amount, reference)
 }
 
 func (a *streamLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
 	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
-}
-
-func (a *streamLedgerAdapter) Deposit(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.Deposit(ctx, agentAddr, amount, reference)
 }
 
 // negotiationLedgerAdapter adapts ledger.Ledger to negotiation.LedgerService
@@ -2477,16 +2479,12 @@ func (a *gatewayLedgerAdapter) Hold(ctx context.Context, agentAddr, amount, refe
 	return a.l.Hold(ctx, agentAddr, amount, reference)
 }
 
-func (a *gatewayLedgerAdapter) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.ConfirmHold(ctx, agentAddr, amount, reference)
+func (a *gatewayLedgerAdapter) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error {
+	return a.l.SettleHold(ctx, buyerAddr, sellerAddr, amount, reference)
 }
 
 func (a *gatewayLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
 	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
-}
-
-func (a *gatewayLedgerAdapter) Deposit(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.Deposit(ctx, agentAddr, amount, reference)
 }
 
 // gatewayRegistryAdapter adapts registry.Store to gateway.RegistryProvider

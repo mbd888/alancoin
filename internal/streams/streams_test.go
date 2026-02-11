@@ -10,20 +10,18 @@ import (
 
 // mockLedger records calls for verification.
 type mockLedger struct {
-	mu       sync.Mutex
-	holds    map[string]string // reference → amount
-	confirms map[string]string
-	releases map[string]string
-	deposits map[string]string // agentAddr → amount
-	holdErr  error
+	mu          sync.Mutex
+	holds       map[string]string // reference → amount
+	settlements map[string]string // reference → amount (SettleHold calls)
+	releases    map[string]string
+	holdErr     error
 }
 
 func newMockLedger() *mockLedger {
 	return &mockLedger{
-		holds:    make(map[string]string),
-		confirms: make(map[string]string),
-		releases: make(map[string]string),
-		deposits: make(map[string]string),
+		holds:       make(map[string]string),
+		settlements: make(map[string]string),
+		releases:    make(map[string]string),
 	}
 }
 
@@ -37,10 +35,10 @@ func (m *mockLedger) Hold(_ context.Context, agentAddr, amount, reference string
 	return nil
 }
 
-func (m *mockLedger) ConfirmHold(_ context.Context, agentAddr, amount, reference string) error {
+func (m *mockLedger) SettleHold(_ context.Context, buyerAddr, sellerAddr, amount, reference string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.confirms[reference] = amount
+	m.settlements[reference] = amount
 	return nil
 }
 
@@ -48,13 +46,6 @@ func (m *mockLedger) ReleaseHold(_ context.Context, agentAddr, amount, reference
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.releases[reference] = amount
-	return nil
-}
-
-func (m *mockLedger) Deposit(_ context.Context, agentAddr, amount, reference string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.deposits[agentAddr] = amount
 	return nil
 }
 
@@ -228,18 +219,12 @@ func TestCloseStream(t *testing.T) {
 		t.Errorf("expected reason 'done', got %s", closed.CloseReason)
 	}
 
-	// Verify settlement: confirm hold for spent, release for unused
-	if _, ok := ledger.confirms[stream.ID]; !ok {
-		t.Error("expected confirm hold for spent amount")
+	// Verify settlement: SettleHold for spent, ReleaseHold for unused
+	if _, ok := ledger.settlements[stream.ID]; !ok {
+		t.Error("expected SettleHold for spent amount")
 	}
 	if _, ok := ledger.releases[stream.ID]; !ok {
-		t.Error("expected release hold for unused amount")
-	}
-
-	// Verify seller was credited
-	sellerAddr := "0x2222222222222222222222222222222222222222"
-	if _, ok := ledger.deposits[sellerAddr]; !ok {
-		t.Error("expected deposit to seller")
+		t.Error("expected ReleaseHold for unused amount")
 	}
 }
 
@@ -358,18 +343,12 @@ func TestCloseZeroSpentStream(t *testing.T) {
 		t.Errorf("expected status closed, got %s", closed.Status)
 	}
 
-	// No confirm (nothing spent), but release should exist (full refund)
-	if _, ok := ledger.confirms[stream.ID]; ok {
-		t.Error("expected no confirm hold for zero-spent stream")
+	// No settlement (nothing spent), but release should exist (full refund)
+	if _, ok := ledger.settlements[stream.ID]; ok {
+		t.Error("expected no SettleHold for zero-spent stream")
 	}
 	if _, ok := ledger.releases[stream.ID]; !ok {
 		t.Error("expected release hold for full refund")
-	}
-
-	// Seller should NOT have been credited
-	sellerAddr := "0x2222222222222222222222222222222222222222"
-	if _, ok := ledger.deposits[sellerAddr]; ok {
-		t.Error("expected no deposit to seller for zero-spent stream")
 	}
 }
 
@@ -499,19 +478,14 @@ func TestCloseFullySpentStream(t *testing.T) {
 		t.Fatalf("close failed: %v", err)
 	}
 
-	// Confirm hold for full amount (spent == hold)
-	if _, ok := ledger.confirms[stream.ID]; !ok {
-		t.Error("expected confirm hold for spent amount")
+	// SettleHold for full amount (spent == hold)
+	if _, ok := ledger.settlements[stream.ID]; !ok {
+		t.Error("expected SettleHold for spent amount")
 	}
 
 	// No release needed (nothing unused)
 	if _, ok := ledger.releases[stream.ID]; ok {
 		t.Error("expected no release hold when fully spent")
-	}
-
-	// Seller credited
-	if _, ok := ledger.deposits["0x2222222222222222222222222222222222222222"]; !ok {
-		t.Error("expected deposit to seller")
 	}
 
 	if closed.SpentAmount != "0.003000" {

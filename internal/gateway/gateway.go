@@ -105,9 +105,8 @@ type CreateSessionRequest struct {
 // LedgerService abstracts ledger operations.
 type LedgerService interface {
 	Hold(ctx context.Context, agentAddr, amount, reference string) error
-	ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error
+	SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error
 	ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error
-	Deposit(ctx context.Context, agentAddr, amount, reference string) error
 }
 
 // RegistryProvider abstracts service discovery.

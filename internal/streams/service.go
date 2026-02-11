@@ -29,6 +29,9 @@ func (s *Service) streamLock(id string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
+// cleanupLock removes the per-stream mutex after settlement to prevent memory leaks.
+func (s *Service) cleanupLock(id string) { s.locks.Delete(id) }
+
 // NewService creates a new streaming micropayment service.
 func NewService(store Store, ledger LedgerService) *Service {
 	return &Service{
@@ -226,15 +229,10 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 	spentBig, _ := usdc.Parse(stream.SpentAmount)
 	holdBig, _ := usdc.Parse(stream.HoldAmount)
 
-	// 1. Confirm hold for the spent portion (pending → total_out for buyer)
+	// 1. Atomically settle spent portion: buyer pending → seller available
 	if spentBig.Sign() > 0 {
-		if err := s.ledger.ConfirmHold(ctx, stream.BuyerAddr, stream.SpentAmount, stream.ID); err != nil {
-			return nil, fmt.Errorf("failed to confirm spent hold: %w", err)
-		}
-
-		// Credit seller for the spent amount
-		if err := s.ledger.Deposit(ctx, stream.SellerAddr, stream.SpentAmount, stream.ID); err != nil {
-			return nil, fmt.Errorf("failed to credit seller: %w", err)
+		if err := s.ledger.SettleHold(ctx, stream.BuyerAddr, stream.SellerAddr, stream.SpentAmount, stream.ID); err != nil {
+			return nil, fmt.Errorf("failed to settle hold: %w", err)
 		}
 	}
 
@@ -259,6 +257,8 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 			stream.ID, err)
 		return nil, fmt.Errorf("failed to update stream after settlement (requires manual resolution): %w", err)
 	}
+
+	s.cleanupLock(stream.ID)
 
 	// Record transaction for reputation
 	if s.recorder != nil && spentBig.Sign() > 0 {

@@ -16,6 +16,7 @@ type mockLedger struct {
 	locked   map[string]string // reference -> amount
 	released map[string]string
 	refunded map[string]string
+	partials map[string]string // reference -> releaseAmount (PartialEscrowSettle calls)
 }
 
 func newMockLedger() *mockLedger {
@@ -23,6 +24,7 @@ func newMockLedger() *mockLedger {
 		locked:   make(map[string]string),
 		released: make(map[string]string),
 		refunded: make(map[string]string),
+		partials: make(map[string]string),
 	}
 }
 
@@ -47,6 +49,13 @@ func (m *mockLedger) RefundEscrow(ctx context.Context, agentAddr, amount, refere
 	return nil
 }
 
+func (m *mockLedger) PartialEscrowSettle(ctx context.Context, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.partials[reference] = releaseAmount
+	return nil
+}
+
 // mockRecorder captures recorded transactions.
 type mockRecorder struct {
 	txns []recordedTx
@@ -66,6 +75,7 @@ type failingLedger struct {
 	lockErr    error
 	releaseErr error
 	refundErr  error
+	partialErr error
 	calls      []string
 }
 
@@ -82,6 +92,11 @@ func (f *failingLedger) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr
 func (f *failingLedger) RefundEscrow(ctx context.Context, agentAddr, amount, reference string) error {
 	f.calls = append(f.calls, "refund")
 	return f.refundErr
+}
+
+func (f *failingLedger) PartialEscrowSettle(ctx context.Context, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference string) error {
+	f.calls = append(f.calls, "partial_settle")
+	return f.partialErr
 }
 
 func TestEscrow_HappyPath(t *testing.T) {
@@ -1809,12 +1824,9 @@ func TestResolveArbitration_Partial(t *testing.T) {
 	if result.PartialRefundAmount == "" {
 		t.Error("Expected PartialRefundAmount to be set")
 	}
-	// Both release and refund should be called
-	if len(ledger.released) != 1 {
-		t.Errorf("Expected 1 partial release, got %d", len(ledger.released))
-	}
-	if len(ledger.refunded) != 1 {
-		t.Errorf("Expected 1 partial refund, got %d", len(ledger.refunded))
+	// Atomic partial settlement should be called
+	if len(ledger.partials) != 1 {
+		t.Errorf("Expected 1 PartialEscrowSettle call, got %d", len(ledger.partials))
 	}
 	// Reputation: dispute records "disputed", then partial records "partial"
 	if len(rep.records) != 2 {

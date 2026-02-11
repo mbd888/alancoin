@@ -93,10 +93,7 @@ func (h *MultiStepHandler) CreateMultiStepEscrow(c *gin.Context) {
 	// Convert request planned steps to domain type
 	planned := make([]PlannedStep, len(req.PlannedSteps))
 	for i, ps := range req.PlannedSteps {
-		planned[i] = PlannedStep{
-			SellerAddr: ps.SellerAddr,
-			Amount:     ps.Amount,
-		}
+		planned[i] = PlannedStep(ps)
 	}
 
 	callerAddr := c.GetString("authAgentAddr")

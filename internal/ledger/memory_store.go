@@ -514,6 +514,110 @@ func (m *MemoryStore) ReleaseHold(ctx context.Context, agentAddr, amount, refere
 	return nil
 }
 
+func (m *MemoryStore) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	buyerBal, ok := m.balances[buyerAddr]
+	if !ok {
+		return ErrAgentNotFound
+	}
+
+	pend, _ := usdc.Parse(buyerBal.Pending)
+	totalOut, _ := usdc.Parse(buyerBal.TotalOut)
+	sub, _ := usdc.Parse(amount)
+
+	if pend.Cmp(sub) < 0 {
+		return ErrInsufficientBalance
+	}
+
+	pend.Sub(pend, sub)
+	totalOut.Add(totalOut, sub)
+	buyerBal.Pending = usdc.Format(pend)
+	buyerBal.TotalOut = usdc.Format(totalOut)
+	buyerBal.UpdatedAt = time.Now()
+
+	// Credit seller (create balance if needed)
+	sellerBal, ok := m.balances[sellerAddr]
+	if !ok {
+		sellerBal = &Balance{
+			AgentAddr: sellerAddr, Available: "0", Pending: "0", Escrowed: "0",
+			CreditLimit: "0", CreditUsed: "0", TotalIn: "0", TotalOut: "0",
+		}
+		m.balances[sellerAddr] = sellerBal
+	}
+	sellerAvail, _ := usdc.Parse(sellerBal.Available)
+	sellerTotalIn, _ := usdc.Parse(sellerBal.TotalIn)
+	sellerAvail.Add(sellerAvail, sub)
+	sellerTotalIn.Add(sellerTotalIn, sub)
+	sellerBal.Available = usdc.Format(sellerAvail)
+	sellerBal.TotalIn = usdc.Format(sellerTotalIn)
+	sellerBal.UpdatedAt = time.Now()
+
+	now := time.Now()
+	m.entries = append(m.entries,
+		&Entry{ID: idgen.WithPrefix("entry_"), AgentAddr: buyerAddr, Type: "spend", Amount: amount, Reference: reference, Description: "settle_hold", CreatedAt: now},
+		&Entry{ID: idgen.WithPrefix("entry_"), AgentAddr: sellerAddr, Type: "deposit", Amount: amount, Reference: reference, Description: "settle_hold_receive", CreatedAt: now},
+	)
+
+	return nil
+}
+
+func (m *MemoryStore) PartialEscrowSettle(ctx context.Context, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	buyerBal, ok := m.balances[buyerAddr]
+	if !ok {
+		return ErrAgentNotFound
+	}
+
+	escrow, _ := usdc.Parse(buyerBal.Escrowed)
+	avail, _ := usdc.Parse(buyerBal.Available)
+	totalOut, _ := usdc.Parse(buyerBal.TotalOut)
+	releaseBig, _ := usdc.Parse(releaseAmount)
+	refundBig, _ := usdc.Parse(refundAmount)
+	totalBig := new(big.Int).Add(new(big.Int).Set(releaseBig), refundBig)
+
+	if escrow.Cmp(totalBig) < 0 {
+		return ErrInsufficientBalance
+	}
+
+	escrow.Sub(escrow, totalBig)
+	totalOut.Add(totalOut, releaseBig)
+	avail.Add(avail, refundBig)
+	buyerBal.Escrowed = usdc.Format(escrow)
+	buyerBal.TotalOut = usdc.Format(totalOut)
+	buyerBal.Available = usdc.Format(avail)
+	buyerBal.UpdatedAt = time.Now()
+
+	// Credit seller
+	sellerBal, ok := m.balances[sellerAddr]
+	if !ok {
+		sellerBal = &Balance{
+			AgentAddr: sellerAddr, Available: "0", Pending: "0", Escrowed: "0",
+			CreditLimit: "0", CreditUsed: "0", TotalIn: "0", TotalOut: "0",
+		}
+		m.balances[sellerAddr] = sellerBal
+	}
+	sellerAvail, _ := usdc.Parse(sellerBal.Available)
+	sellerTotalIn, _ := usdc.Parse(sellerBal.TotalIn)
+	sellerAvail.Add(sellerAvail, releaseBig)
+	sellerTotalIn.Add(sellerTotalIn, releaseBig)
+	sellerBal.Available = usdc.Format(sellerAvail)
+	sellerBal.TotalIn = usdc.Format(sellerTotalIn)
+	sellerBal.UpdatedAt = time.Now()
+
+	now := time.Now()
+	m.entries = append(m.entries,
+		&Entry{ID: idgen.WithPrefix("entry_"), AgentAddr: buyerAddr, Type: "escrow_release", Amount: releaseAmount, Reference: reference, Description: "partial_escrow_release", CreatedAt: now},
+		&Entry{ID: idgen.WithPrefix("entry_"), AgentAddr: buyerAddr, Type: "escrow_refund", Amount: refundAmount, Reference: reference, Description: "partial_escrow_refund", CreatedAt: now},
+		&Entry{ID: idgen.WithPrefix("entry_"), AgentAddr: sellerAddr, Type: "escrow_receive", Amount: releaseAmount, Reference: reference, Description: "partial_escrow_receive", CreatedAt: now},
+	)
+
+	return nil
+}
+
 func (m *MemoryStore) EscrowLock(ctx context.Context, agentAddr, amount, reference string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

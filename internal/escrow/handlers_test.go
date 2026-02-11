@@ -19,6 +19,7 @@ func setupTestRouter() (*gin.Engine, *Service) {
 		locked:   make(map[string]string),
 		released: make(map[string]string),
 		refunded: make(map[string]string),
+		partials: make(map[string]string),
 	}
 	svc := NewService(store, ledger)
 	handler := NewHandler(svc)

@@ -104,6 +104,17 @@ type Store interface {
 	// Prevents fund loss if the process crashes between debit and credit.
 	Transfer(ctx context.Context, fromAddr, toAddr, amount, reference string) error
 
+	// SettleHold atomically moves funds from buyer's pending to seller's available.
+	// Single transaction: buyer pending -= amount, buyer total_out += amount,
+	// seller available += amount, seller total_in += amount.
+	// Does NOT touch credit_draw_hold entries — credit tracking stays for ReleaseHold.
+	SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error
+
+	// PartialEscrowSettle atomically splits escrowed funds between seller and buyer.
+	// Single transaction: buyer escrowed -= (release+refund), buyer total_out += release,
+	// buyer available += refund, seller available += release, seller total_in += release.
+	PartialEscrowSettle(ctx context.Context, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference string) error
+
 	// Reversal operations.
 	GetEntry(ctx context.Context, entryID string) (*Entry, error)
 	Reverse(ctx context.Context, entryID, reason, adminID string) error
@@ -456,6 +467,79 @@ func (l *Ledger) ReleaseHold(ctx context.Context, agentAddr, amount, reference s
 	after, _ := l.store.GetBalance(ctx, addr)
 	l.logAudit(ctx, addr, "release_hold", amount, reference, before, after)
 	l.checkAlerts(ctx, addr, after, "release_hold", amount)
+	return nil
+}
+
+// SettleHold atomically moves funds from buyer's pending to seller's available.
+func (l *Ledger) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error {
+	ctx, span := traces.StartSpan(ctx, "ledger.SettleHold",
+		attribute.String("buyer.addr", buyerAddr), attribute.String("seller.addr", sellerAddr),
+		traces.Amount(amount), traces.Reference(reference))
+	defer span.End()
+
+	amountBig, ok := usdc.Parse(amount)
+	if !ok || amountBig.Sign() <= 0 {
+		span.SetStatus(codes.Error, "invalid amount")
+		return ErrInvalidAmount
+	}
+	_ = amountBig
+
+	buyer := strings.ToLower(buyerAddr)
+	seller := strings.ToLower(sellerAddr)
+	done := observeOp("settle_hold")
+	defer done()
+
+	buyerBefore, _ := l.store.GetBalance(ctx, buyer)
+
+	if err := l.store.SettleHold(ctx, buyer, seller, amount, reference); err != nil {
+		return err
+	}
+
+	l.appendEvent(ctx, buyer, "settle_hold_out", amount, reference, seller)
+	l.appendEvent(ctx, seller, "settle_hold_in", amount, reference, buyer)
+
+	buyerAfter, _ := l.store.GetBalance(ctx, buyer)
+	l.logAudit(ctx, buyer, "settle_hold", amount, reference, buyerBefore, buyerAfter)
+	return nil
+}
+
+// PartialEscrowSettle atomically splits escrowed funds between seller and buyer.
+func (l *Ledger) PartialEscrowSettle(ctx context.Context, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference string) error {
+	ctx, span := traces.StartSpan(ctx, "ledger.PartialEscrowSettle",
+		attribute.String("buyer.addr", buyerAddr), attribute.String("seller.addr", sellerAddr),
+		attribute.String("release", releaseAmount), attribute.String("refund", refundAmount),
+		traces.Reference(reference))
+	defer span.End()
+
+	releaseBig, ok1 := usdc.Parse(releaseAmount)
+	refundBig, ok2 := usdc.Parse(refundAmount)
+	if !ok1 || !ok2 || releaseBig.Sign() < 0 || refundBig.Sign() < 0 {
+		span.SetStatus(codes.Error, "invalid amount")
+		return ErrInvalidAmount
+	}
+	totalBig := new(big.Int).Add(releaseBig, refundBig)
+	if totalBig.Sign() <= 0 {
+		span.SetStatus(codes.Error, "invalid amount")
+		return ErrInvalidAmount
+	}
+
+	buyer := strings.ToLower(buyerAddr)
+	seller := strings.ToLower(sellerAddr)
+	done := observeOp("partial_escrow_settle")
+	defer done()
+
+	buyerBefore, _ := l.store.GetBalance(ctx, buyer)
+
+	if err := l.store.PartialEscrowSettle(ctx, buyer, seller, releaseAmount, refundAmount, reference); err != nil {
+		return err
+	}
+
+	l.appendEvent(ctx, buyer, "escrow_partial_release", releaseAmount, reference, seller)
+	l.appendEvent(ctx, buyer, "escrow_partial_refund", refundAmount, reference, "")
+	l.appendEvent(ctx, seller, "escrow_partial_receive", releaseAmount, reference, buyer)
+
+	buyerAfter, _ := l.store.GetBalance(ctx, buyer)
+	l.logAudit(ctx, buyer, "partial_escrow_settle", releaseAmount, reference, buyerBefore, buyerAfter)
 	return nil
 }
 

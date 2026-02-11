@@ -82,6 +82,9 @@ func (s *Service) sessionLock(id string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
+// cleanupLock removes the per-session mutex after a terminal state to prevent memory leaks.
+func (s *Service) cleanupLock(id string) { s.locks.Delete(id) }
+
 // CreateSession creates a gateway session and holds the buyer's budget.
 func (s *Service) CreateSession(ctx context.Context, agentAddr string, req CreateSessionRequest) (*Session, error) {
 	maxTotalBig, ok := usdc.Parse(req.MaxTotal)
@@ -201,9 +204,10 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 				guaranteedRate = gr
 				slaWindow = 20 // default SLA window
 				if pr > 0 {
-					// Premium = price * premiumRate (e.g. 0.05 = 5%)
-					premiumF := float64(priceBig.Int64()) * pr
-					premiumBig = big.NewInt(int64(premiumF))
+					// Premium = price * premiumRate using basis points (avoids float64 precision loss)
+					basisPoints := int64(pr*10000 + 0.5)
+					premiumBig = new(big.Int).Mul(priceBig, big.NewInt(basisPoints))
+					premiumBig.Div(premiumBig, big.NewInt(10000))
 					if premiumBig.Sign() <= 0 {
 						premiumBig = big.NewInt(1) // minimum 1 micro-unit
 					}
@@ -227,26 +231,25 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			continue
 		}
 
-		// Payment: deposit to seller. The buyer's budget is already held (pending).
-		// Settlement (ConfirmHold for spent + ReleaseHold for unused) happens on session close,
-		// using the original hold reference (session.ID) to avoid cross-hold interference.
+		// Payment: settle from buyer's held funds to seller atomically per-request.
+		// Each SettleHold debits buyer's pending and credits seller's available in one transaction.
 		ref := fmt.Sprintf("%s:req:%d:%s", session.ID, session.RequestCount+1, candidate.ServiceID)
 		totalCostStr := usdc.Format(totalCostBig)
 
-		// Deposit base price to seller
-		if err := s.ledger.Deposit(ctx, candidate.AgentAddress, candidate.Price, ref); err != nil {
-			s.logger.Error("deposit failed after confirm hold", "session", sessionID, "seller", candidate.AgentAddress, "error", err)
+		// Settle base price: buyer pending → seller available
+		if err := s.ledger.SettleHold(ctx, session.AgentAddr, candidate.AgentAddress, candidate.Price, ref); err != nil {
+			s.logger.Error("settle hold failed", "session", sessionID, "seller", candidate.AgentAddress, "error", err)
 			lastErr = err
 			retries++
 			continue
 		}
 
-		// Deposit premium to guarantee fund (platform address)
+		// Settle premium to guarantee fund
 		if premiumBig.Sign() > 0 {
 			premiumStr := usdc.Format(premiumBig)
-			if err := s.ledger.Deposit(ctx, s.guaranteeFundAddr, premiumStr, "gpremium:"+ref); err != nil {
-				// Non-fatal: base payment succeeded, premium deposit is best-effort
-				s.logger.Warn("guarantee premium deposit failed", "session", sessionID, "premium", premiumStr, "error", err)
+			if err := s.ledger.SettleHold(ctx, session.AgentAddr, s.guaranteeFundAddr, premiumStr, "gpremium:"+ref); err != nil {
+				// Non-fatal: base payment succeeded, premium settle is best-effort
+				s.logger.Warn("guarantee premium settle failed", "session", sessionID, "premium", premiumStr, "error", err)
 			}
 		}
 
@@ -372,19 +375,10 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 		return nil, ErrSessionClosed
 	}
 
-	// Settle the hold: confirm the spent portion, release the unused portion.
-	// Both use the original hold reference (session.ID) to ensure we only affect
-	// this session's hold and don't consume pending from other holds/streams.
+	// Release only the unused portion. Per-request SettleHold already settled the spent portion.
 	spentBig, _ := usdc.Parse(session.TotalSpent)
 	holdBig, _ := usdc.Parse(session.MaxTotal)
 	unused := new(big.Int).Sub(holdBig, spentBig)
-
-	if spentBig.Sign() > 0 {
-		spentStr := usdc.Format(spentBig)
-		if err := s.ledger.ConfirmHold(ctx, session.AgentAddr, spentStr, session.ID); err != nil {
-			return nil, fmt.Errorf("failed to confirm spent hold: %w", err)
-		}
-	}
 
 	if unused.Sign() > 0 {
 		unusedStr := usdc.Format(unused)
@@ -402,6 +396,7 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 		return nil, fmt.Errorf("failed to update session after close: %w", err)
 	}
 
+	s.cleanupLock(session.ID)
 	return session, nil
 }
 
@@ -460,17 +455,10 @@ func (s *Service) AutoCloseExpired(ctx context.Context, session *Session) error 
 		return ErrSessionClosed
 	}
 
-	// Settle the hold: confirm spent, release unused (same as CloseSession)
+	// Release only the unused portion. Per-request SettleHold already settled the spent portion.
 	spentBig, _ := usdc.Parse(fresh.TotalSpent)
 	holdBig, _ := usdc.Parse(fresh.MaxTotal)
 	unused := new(big.Int).Sub(holdBig, spentBig)
-
-	if spentBig.Sign() > 0 {
-		spentStr := usdc.Format(spentBig)
-		if err := s.ledger.ConfirmHold(ctx, fresh.AgentAddr, spentStr, fresh.ID); err != nil {
-			return fmt.Errorf("failed to confirm spent hold: %w", err)
-		}
-	}
 
 	if unused.Sign() > 0 {
 		unusedStr := usdc.Format(unused)
@@ -486,5 +474,6 @@ func (s *Service) AutoCloseExpired(ctx context.Context, session *Session) error 
 		return fmt.Errorf("failed to update expired session: %w", err)
 	}
 
+	s.cleanupLock(fresh.ID)
 	return nil
 }

@@ -17,18 +17,17 @@ import (
 // --- Mock Ledger ---
 
 type mockLedger struct {
-	holds      map[string]string // ref → amount
-	deposits   map[string]string // ref → amount
-	holdErr    error
-	confirmErr error
-	releaseErr error
-	depositErr error
+	holds       map[string]string // ref → amount
+	settlements map[string]string // ref → amount (SettleHold calls)
+	holdErr     error
+	settleErr   error
+	releaseErr  error
 }
 
 func newMockLedger() *mockLedger {
 	return &mockLedger{
-		holds:    make(map[string]string),
-		deposits: make(map[string]string),
+		holds:       make(map[string]string),
+		settlements: make(map[string]string),
 	}
 }
 
@@ -40,10 +39,11 @@ func (m *mockLedger) Hold(_ context.Context, agentAddr, amount, reference string
 	return nil
 }
 
-func (m *mockLedger) ConfirmHold(_ context.Context, agentAddr, amount, reference string) error {
-	if m.confirmErr != nil {
-		return m.confirmErr
+func (m *mockLedger) SettleHold(_ context.Context, buyerAddr, sellerAddr, amount, reference string) error {
+	if m.settleErr != nil {
+		return m.settleErr
 	}
+	m.settlements[reference] = amount
 	return nil
 }
 
@@ -52,14 +52,6 @@ func (m *mockLedger) ReleaseHold(_ context.Context, agentAddr, amount, reference
 		return m.releaseErr
 	}
 	delete(m.holds, reference)
-	return nil
-}
-
-func (m *mockLedger) Deposit(_ context.Context, agentAddr, amount, reference string) error {
-	if m.depositErr != nil {
-		return m.depositErr
-	}
-	m.deposits[reference] = amount
 	return nil
 }
 
@@ -300,9 +292,9 @@ func TestProxy_RetryOnForwardFailure(t *testing.T) {
 		t.Errorf("expected 1 retry, got %d", result.Retries)
 	}
 
-	// Payment was made to both the failed and successful service
-	if len(ml.deposits) != 2 {
-		t.Errorf("expected 2 deposits (failed + successful), got %d", len(ml.deposits))
+	// Payment was settled for both the failed and successful service
+	if len(ml.settlements) != 2 {
+		t.Errorf("expected 2 settlements (failed + successful), got %d", len(ml.settlements))
 	}
 
 	// Session spend reflects both payments (0.10 failed + 0.10 success)

@@ -95,9 +95,8 @@ type Store interface {
 // LedgerService abstracts ledger operations so streams doesn't import ledger.
 type LedgerService interface {
 	Hold(ctx context.Context, agentAddr, amount, reference string) error
-	ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error
+	SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error
 	ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error
-	Deposit(ctx context.Context, agentAddr, amount, reference string) error
 }
 
 // TransactionRecorder records transactions for reputation tracking.
