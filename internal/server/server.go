@@ -62,48 +62,49 @@ import (
 
 // Server wraps the HTTP server and dependencies
 type Server struct {
-	cfg                *config.Config
-	wallet             wallet.WalletService
-	registry           registry.Store
-	sessionMgr         *sessionkeys.Manager
-	authMgr            *auth.Manager
-	ledger             *ledger.Ledger
-	commentary         *commentary.Service
-	predictions        *predictions.Service
-	depositWatcher     *watcher.Watcher
-	webhooks           *webhooks.Dispatcher
-	realtimeHub        *realtime.Hub
-	paymaster          gas.Paymaster
-	escrowService      *escrow.Service
-	escrowTimer        *escrow.Timer
-	creditService      *credit.Service
-	creditTimer        *credit.Timer
-	contractService    *contracts.Service
-	contractTimer      *contracts.Timer
-	streamService      *streams.Service
-	streamTimer        *streams.Timer
-	gatewayService     *gateway.Service
-	gatewayTimer       *gateway.Timer
-	negotiationService *negotiation.Service
-	negotiationTimer   *negotiation.Timer
-	stakesService      *stakes.Service
-	stakesDistributor  *stakes.Distributor
-	receiptService     *receipts.Service
-	reputationStore    reputation.SnapshotStore
-	reputationWorker   *reputation.Worker
-	reputationSigner   *reputation.Signer
-	matviewRefresher   *registry.MatviewRefresher
-	partitionMaint     *registry.PartitionMaintainer
-	riskEngine         *risk.Engine
-	verifiedService    *verified.Service
-	verifiedEnforcer   *verified.Enforcer
-	rateLimiter        *ratelimit.Limiter
-	db                 *sql.DB // nil if using in-memory
-	router             *gin.Engine
-	httpSrv            *http.Server
-	logger             *slog.Logger
-	cancelRunCtx       context.CancelFunc // cancels background goroutines started in Run
-	tracerShutdown     func(context.Context) error
+	cfg                    *config.Config
+	wallet                 wallet.WalletService
+	registry               registry.Store
+	sessionMgr             *sessionkeys.Manager
+	authMgr                *auth.Manager
+	ledger                 *ledger.Ledger
+	commentary             *commentary.Service
+	predictions            *predictions.Service
+	depositWatcher         *watcher.Watcher
+	webhooks               *webhooks.Dispatcher
+	realtimeHub            *realtime.Hub
+	paymaster              gas.Paymaster
+	escrowService          *escrow.Service
+	escrowTimer            *escrow.Timer
+	multiStepEscrowService *escrow.MultiStepService
+	creditService          *credit.Service
+	creditTimer            *credit.Timer
+	contractService        *contracts.Service
+	contractTimer          *contracts.Timer
+	streamService          *streams.Service
+	streamTimer            *streams.Timer
+	gatewayService         *gateway.Service
+	gatewayTimer           *gateway.Timer
+	negotiationService     *negotiation.Service
+	negotiationTimer       *negotiation.Timer
+	stakesService          *stakes.Service
+	stakesDistributor      *stakes.Distributor
+	receiptService         *receipts.Service
+	reputationStore        reputation.SnapshotStore
+	reputationWorker       *reputation.Worker
+	reputationSigner       *reputation.Signer
+	matviewRefresher       *registry.MatviewRefresher
+	partitionMaint         *registry.PartitionMaintainer
+	riskEngine             *risk.Engine
+	verifiedService        *verified.Service
+	verifiedEnforcer       *verified.Enforcer
+	rateLimiter            *ratelimit.Limiter
+	db                     *sql.DB // nil if using in-memory
+	router                 *gin.Engine
+	httpSrv                *http.Server
+	logger                 *slog.Logger
+	cancelRunCtx           context.CancelFunc // cancels background goroutines started in Run
+	tracerShutdown         func(context.Context) error
 
 	// Health state
 	ready   atomic.Bool
@@ -230,6 +231,9 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		escrowStore := escrow.NewPostgresStore(db)
 		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledger}).WithLogger(s.logger)
 		s.escrowTimer = escrow.NewTimer(s.escrowService, escrowStore, s.logger)
+		s.multiStepEscrowService = escrow.NewMultiStepService(
+			escrow.NewMultiStepPostgresStore(db), &escrowLedgerAdapter{s.ledger},
+		).WithLogger(s.logger)
 		s.logger.Info("escrow enabled (postgres)")
 
 		// Contracts with PostgreSQL store
@@ -383,6 +387,9 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		escrowStore := escrow.NewMemoryStore()
 		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledger}).WithLogger(s.logger)
 		s.escrowTimer = escrow.NewTimer(s.escrowService, escrowStore, s.logger)
+		s.multiStepEscrowService = escrow.NewMultiStepService(
+			escrow.NewMultiStepMemoryStore(), &escrowLedgerAdapter{s.ledger},
+		).WithLogger(s.logger)
 		s.logger.Info("escrow enabled (in-memory)")
 
 		// Contracts with in-memory store
@@ -964,6 +971,17 @@ func (s *Server) setupRoutes() {
 		protectedEscrow := v1.Group("")
 		protectedEscrow.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
 		escrowHandler.RegisterProtectedRoutes(protectedEscrow)
+	}
+
+	// MultiStep escrow routes (atomic N-step pipeline payments)
+	if s.multiStepEscrowService != nil {
+		msHandler := escrow.NewMultiStepHandler(s.multiStepEscrowService)
+
+		msHandler.RegisterRoutes(v1)
+
+		protectedMS := v1.Group("")
+		protectedMS.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		msHandler.RegisterProtectedRoutes(protectedMS)
 	}
 
 	// Credit routes (agent credit lines - spend on credit, repay from earnings)

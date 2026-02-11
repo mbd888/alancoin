@@ -1464,6 +1464,89 @@ class Alancoin(InvestMixin):
         )
 
     # -------------------------------------------------------------------------
+    # MultiStep Escrow (atomic N-step pipeline payments)
+    # -------------------------------------------------------------------------
+
+    def create_multistep_escrow(
+        self,
+        total_amount: str,
+        total_steps: int,
+        planned_steps: list,
+    ) -> dict:
+        """
+        Create a multistep escrow that locks funds for an N-step pipeline.
+
+        Funds are locked upfront from the buyer's balance. Each step is
+        confirmed individually, releasing that step's amount to the seller.
+        If a step fails, call refund_multistep_escrow to return unspent funds.
+
+        Args:
+            total_amount: Total USDC to lock (e.g., "0.030")
+            total_steps: Number of pipeline steps
+            planned_steps: List of dicts with ``sellerAddr`` and ``amount`` for
+                each step. The server validates these during confirm-step.
+
+        Returns:
+            Created multistep escrow object
+        """
+        return self._request("POST", "/v1/escrow/multistep", json={
+            "totalAmount": total_amount,
+            "totalSteps": total_steps,
+            "plannedSteps": planned_steps,
+        })
+
+    def confirm_multistep_step(
+        self, escrow_id: str, step_index: int, seller_addr: str, amount: str
+    ) -> dict:
+        """
+        Confirm a single step, releasing funds to the seller.
+
+        Args:
+            escrow_id: The multistep escrow ID
+            step_index: Zero-based step index
+            seller_addr: Seller's address for this step
+            amount: Amount in USDC for this step
+
+        Returns:
+            Updated multistep escrow
+        """
+        return self._request(
+            "POST",
+            f"/v1/escrow/multistep/{escrow_id}/confirm-step",
+            json={
+                "stepIndex": step_index,
+                "sellerAddr": seller_addr,
+                "amount": amount,
+            },
+        )
+
+    def refund_multistep_escrow(self, escrow_id: str) -> dict:
+        """
+        Abort a multistep escrow and refund remaining locked funds.
+
+        Only the buyer can call this. Already-confirmed steps are not reversed.
+
+        Args:
+            escrow_id: The multistep escrow ID
+
+        Returns:
+            Updated multistep escrow with status 'aborted'
+        """
+        return self._request("POST", f"/v1/escrow/multistep/{escrow_id}/refund")
+
+    def get_multistep_escrow(self, escrow_id: str) -> dict:
+        """
+        Get a multistep escrow by ID.
+
+        Args:
+            escrow_id: The multistep escrow ID
+
+        Returns:
+            Multistep escrow details
+        """
+        return self._request("GET", f"/v1/escrow/multistep/{escrow_id}")
+
+    # -------------------------------------------------------------------------
     # Streaming Micropayments
     # -------------------------------------------------------------------------
 

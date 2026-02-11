@@ -476,7 +476,11 @@ class BudgetSession:
         steps: List[Dict],
         prefer: str = "cheapest",
     ) -> List[ServiceResult]:
-        """Chain multiple service calls where each step's output feeds the next.
+        """Chain multiple service calls with atomic multistep escrow.
+
+        Locks funds upfront for all steps, releases per-step on success,
+        and refunds remaining on failure. This ensures that if step N fails,
+        the buyer only pays for steps 0..N-1.
 
         Each step is a dict with:
             - service_type (str): Required. Service type to call.
@@ -507,30 +511,112 @@ class BudgetSession:
         if not self._active:
             raise AlancoinError("Session is not active", code="session_inactive")
 
-        results: List[ServiceResult] = []
-        prev_output = None
+        # Phase 1: Discovery — find services and accumulate prices
+        discovered = []  # list of (service, params_template)
+        total_price = Decimal("0")
 
         for i, step in enumerate(steps):
             service_type = step.get("service_type")
             if not service_type:
                 raise ValidationError(f"Step {i}: missing 'service_type'")
 
-            params = dict(step.get("params", {}))
+            price_limit = step.get("max_price") or self._budget.max_per_tx
+            listings = self._client.discover(
+                service_type=service_type,
+                max_price=price_limit,
+            )
+            if not listings:
+                raise AlancoinError(
+                    f"Step {i}: no {service_type} services found under ${price_limit}",
+                    code="no_services",
+                )
+            service = self._select_service(listings, prefer)
+            price_dec = _parse_decimal(service.price, "service price")
+            total_price += price_dec
+            discovered.append((service, dict(step.get("params", {}))))
 
-            # Resolve $prev references
+        # Budget check for entire pipeline
+        if self._total_spent + total_price > _parse_decimal(self._budget.max_total, "max_total"):
+            raise AlancoinError(
+                f"Pipeline total ${total_price} would exceed budget "
+                f"(spent: ${self._total_spent}, limit: ${self._budget.max_total})",
+                code="budget_exceeded",
+            )
+
+        # Phase 2: Lock — create multistep escrow with planned step manifest
+        planned_steps = [
+            {"sellerAddr": svc.agent_address, "amount": svc.price}
+            for svc, _ in discovered
+        ]
+        mse_resp = self._client.create_multistep_escrow(
+            total_amount=str(total_price),
+            total_steps=len(steps),
+            planned_steps=planned_steps,
+        )
+        escrow_id = mse_resp.get("escrow", {}).get("id")
+        if not escrow_id:
+            raise AlancoinError("Failed to create multistep escrow", code="escrow_failed")
+
+        # Track spend against session budget
+        self._total_spent += total_price
+
+        # Phase 3: Execute — call each step, confirm on success, refund on failure
+        results: List[ServiceResult] = []
+        prev_output = None
+
+        for i, (service, params_template) in enumerate(discovered):
+            params = dict(params_template)
             if prev_output is not None:
                 params = self._resolve_refs(params, prev_output)
 
-            result = self.call_service(
-                service_type=service_type,
-                max_price=step.get("max_price"),
-                prefer=prefer,
-                **params,
-            )
-            results.append(result)
+            tx_result = {"escrowId": escrow_id, "amount": service.price, "step": i}
 
-            # Extract output for next step
-            prev_output = result.get("output", result._data)
+            try:
+                if service.endpoint:
+                    response_data = self._call_endpoint(service, tx_result, params)
+                    if "error" in response_data:
+                        raise AlancoinError(
+                            f"Step {i} endpoint returned error: {response_data.get('error')}",
+                            code="step_failed",
+                        )
+                else:
+                    response_data = {
+                        "paid": True,
+                        "amount": service.price,
+                        "to": service.agent_address,
+                        "service": service.name,
+                    }
+
+                # Confirm this step — release funds to seller
+                self._client.confirm_multistep_step(
+                    escrow_id=escrow_id,
+                    step_index=i,
+                    seller_addr=service.agent_address,
+                    amount=service.price,
+                )
+
+                result = ServiceResult(
+                    data=response_data,
+                    tx_hash=tx_result.get("txHash"),
+                    service=service,
+                    escrow_id=escrow_id,
+                )
+                results.append(result)
+                prev_output = result.get("output", result._data)
+
+            except Exception as e:
+                # Refund remaining locked funds
+                try:
+                    self._client.refund_multistep_escrow(escrow_id)
+                except Exception as refund_err:
+                    logger.warning(
+                        "Failed to refund multistep escrow %s: %s",
+                        escrow_id, refund_err,
+                    )
+                raise AlancoinError(
+                    f"Pipeline failed at step {i}: {e}",
+                    code="pipeline_step_failed",
+                ) from e
 
         return results
 
