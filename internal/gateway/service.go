@@ -19,6 +19,8 @@ type Service struct {
 	resolver  *Resolver
 	forwarder *Forwarder
 	ledger    LedgerService
+	recorder  TransactionRecorder
+	revenue   RevenueAccumulator
 	logger    *slog.Logger
 	locks     sync.Map // per-session mutex
 }
@@ -32,6 +34,18 @@ func NewService(store Store, resolver *Resolver, forwarder *Forwarder, ledger Le
 		ledger:    ledger,
 		logger:    logger,
 	}
+}
+
+// WithRecorder adds a transaction recorder for reputation integration.
+func (s *Service) WithRecorder(r TransactionRecorder) *Service {
+	s.recorder = r
+	return s
+}
+
+// WithRevenueAccumulator adds a revenue accumulator for stakes interception.
+func (s *Service) WithRevenueAccumulator(r RevenueAccumulator) *Service {
+	s.revenue = r
+	return s
 }
 
 // sessionLock returns a mutex for the given session ID.
@@ -187,6 +201,12 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			s.logger.Warn("forward failed after payment", "session", sessionID, "seller", candidate.AgentAddress, "error", err)
 			s.logRequest(ctx, session.ID, req.ServiceType, candidate.AgentAddress, candidate.Price, "forward_failed", 0, err.Error())
 
+			// Record failed transaction so seller's success rate drops
+			if s.recorder != nil {
+				_ = s.recorder.RecordTransaction(ctx, ref, session.AgentAddr,
+					candidate.AgentAddress, candidate.Price, candidate.ServiceID, "failed")
+			}
+
 			// Update session spend even though forward failed (payment was made)
 			newSpent := new(big.Int).Add(spentBig, priceBig)
 			session.TotalSpent = usdc.Format(newSpent)
@@ -212,6 +232,17 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		}
 
 		s.logRequest(ctx, session.ID, req.ServiceType, candidate.AgentAddress, candidate.Price, "success", fwdResp.LatencyMs, "")
+
+		// Record successful transaction for reputation
+		if s.recorder != nil {
+			_ = s.recorder.RecordTransaction(ctx, ref, session.AgentAddr,
+				candidate.AgentAddress, candidate.Price, candidate.ServiceID, "confirmed")
+		}
+
+		// Accumulate revenue for stakes
+		if s.revenue != nil {
+			_ = s.revenue.AccumulateRevenue(ctx, candidate.AgentAddress, candidate.Price, "gateway_proxy:"+ref)
+		}
 
 		return &ProxyResult{
 			Response:    fwdResp.Body,
@@ -309,4 +340,42 @@ func (s *Service) logRequest(ctx context.Context, sessionID, serviceType, agentC
 	if err := s.store.CreateLog(ctx, log); err != nil {
 		s.logger.Warn("failed to create gateway request log", "error", err)
 	}
+}
+
+// AutoCloseExpired closes an expired session without caller authorization.
+// Called by the Timer goroutine. Sets status to StatusExpired and releases unspent funds.
+func (s *Service) AutoCloseExpired(ctx context.Context, session *Session) error {
+	mu := s.sessionLock(session.ID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Re-read under lock
+	fresh, err := s.store.GetSession(ctx, session.ID)
+	if err != nil {
+		return err
+	}
+	if fresh.Status != StatusActive {
+		return ErrSessionClosed
+	}
+
+	// Release unspent hold
+	spentBig, _ := usdc.Parse(fresh.TotalSpent)
+	holdBig, _ := usdc.Parse(fresh.MaxTotal)
+	unused := new(big.Int).Sub(holdBig, spentBig)
+
+	if unused.Sign() > 0 {
+		unusedStr := usdc.Format(unused)
+		if err := s.ledger.ReleaseHold(ctx, fresh.AgentAddr, unusedStr, fresh.ID); err != nil {
+			return fmt.Errorf("failed to release unused hold: %w", err)
+		}
+	}
+
+	fresh.Status = StatusExpired
+	fresh.UpdatedAt = time.Now()
+
+	if err := s.store.UpdateSession(ctx, fresh); err != nil {
+		return fmt.Errorf("failed to update expired session: %w", err)
+	}
+
+	return nil
 }

@@ -677,3 +677,345 @@ func TestProxy_PaymentHeadersSentToService(t *testing.T) {
 		t.Errorf("expected Content-Type 'application/json', got %q", capturedHeaders.Get("Content-Type"))
 	}
 }
+
+// --- Mock Recorder ---
+
+type mockGatewayRecorder struct {
+	transactions []recordedGwTx
+}
+
+type recordedGwTx struct {
+	txHash, from, to, amount, serviceID, status string
+}
+
+func (r *mockGatewayRecorder) RecordTransaction(_ context.Context, txHash, from, to, amount, serviceID, status string) error {
+	r.transactions = append(r.transactions, recordedGwTx{txHash, from, to, amount, serviceID, status})
+	return nil
+}
+
+// --- Mock Revenue Accumulator ---
+
+type mockRevenue struct {
+	accumulated []revenueEntry
+}
+
+type revenueEntry struct {
+	agentAddr, amount, txRef string
+}
+
+func (r *mockRevenue) AccumulateRevenue(_ context.Context, agentAddr, amount, txRef string) error {
+	r.accumulated = append(r.accumulated, revenueEntry{agentAddr, amount, txRef})
+	return nil
+}
+
+// --- Timer / AutoClose / Recorder / Revenue Tests ---
+
+func TestAutoCloseExpired(t *testing.T) {
+	ml := newMockLedger()
+	svc := newTestServiceWithLogger(ml, &mockRegistry{})
+
+	ctx := context.Background()
+	session, err := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Manually expire it
+	s, _ := svc.store.GetSession(ctx, session.ID)
+	s.ExpiresAt = time.Now().Add(-time.Hour)
+	svc.store.UpdateSession(ctx, s)
+
+	// Auto-close
+	err = svc.AutoCloseExpired(ctx, s)
+	if err != nil {
+		t.Fatalf("auto close: %v", err)
+	}
+
+	updated, _ := svc.GetSession(ctx, session.ID)
+	if updated.Status != StatusExpired {
+		t.Errorf("expected expired, got %s", updated.Status)
+	}
+}
+
+func TestAutoCloseExpired_AlreadyClosed(t *testing.T) {
+	ml := newMockLedger()
+	svc := newTestServiceWithLogger(ml, &mockRegistry{})
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	// Close normally first
+	svc.CloseSession(ctx, session.ID, "0xbuyer")
+
+	s, _ := svc.store.GetSession(ctx, session.ID)
+	err := svc.AutoCloseExpired(ctx, s)
+	if err == nil {
+		t.Fatal("expected error for already closed session")
+	}
+}
+
+func TestAutoCloseExpired_ReleasesUnspent(t *testing.T) {
+	ml := newMockLedger()
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", Price: "2.00", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "5.00",
+	})
+
+	// Spend some
+	_, err := svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "test"})
+	if err != nil {
+		t.Fatalf("proxy: %v", err)
+	}
+
+	// Expire and auto-close
+	s, _ := svc.store.GetSession(ctx, session.ID)
+	s.ExpiresAt = time.Now().Add(-time.Hour)
+	svc.store.UpdateSession(ctx, s)
+
+	err = svc.AutoCloseExpired(ctx, s)
+	if err != nil {
+		t.Fatalf("auto close: %v", err)
+	}
+
+	updated, _ := svc.GetSession(ctx, session.ID)
+	if updated.Status != StatusExpired {
+		t.Errorf("expected expired, got %s", updated.Status)
+	}
+	// Hold for remaining 8.00 should have been released
+	if len(ml.holds) != 0 {
+		t.Errorf("expected all holds released, got %d", len(ml.holds))
+	}
+}
+
+func TestListExpired_MemoryStore(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	now := time.Now()
+	// Active and expired
+	store.CreateSession(ctx, &Session{
+		ID: "gw_expired", AgentAddr: "0xa", Status: StatusActive,
+		ExpiresAt: now.Add(-time.Hour), CreatedAt: now,
+	})
+	// Active and not expired
+	store.CreateSession(ctx, &Session{
+		ID: "gw_active", AgentAddr: "0xa", Status: StatusActive,
+		ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	})
+	// Closed (should not appear)
+	store.CreateSession(ctx, &Session{
+		ID: "gw_closed", AgentAddr: "0xa", Status: StatusClosed,
+		ExpiresAt: now.Add(-time.Hour), CreatedAt: now,
+	})
+
+	expired, err := store.ListExpired(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("list expired: %v", err)
+	}
+	if len(expired) != 1 {
+		t.Fatalf("expected 1 expired, got %d", len(expired))
+	}
+	if expired[0].ID != "gw_expired" {
+		t.Errorf("expected gw_expired, got %s", expired[0].ID)
+	}
+}
+
+func TestProxy_RecorderCalled(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	rec := &mockGatewayRecorder{}
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", Price: "0.50", Endpoint: server.URL},
+		},
+	}
+
+	svc := newTestServiceWithLogger(ml, reg)
+	svc.WithRecorder(rec)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	_, err := svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "translation"})
+	if err != nil {
+		t.Fatalf("proxy: %v", err)
+	}
+
+	if len(rec.transactions) != 1 {
+		t.Fatalf("expected 1 recorded transaction, got %d", len(rec.transactions))
+	}
+	tx := rec.transactions[0]
+	if tx.from != "0xbuyer" {
+		t.Errorf("expected from 0xbuyer, got %s", tx.from)
+	}
+	if tx.to != "0xseller" {
+		t.Errorf("expected to 0xseller, got %s", tx.to)
+	}
+	if tx.status != "confirmed" {
+		t.Errorf("expected status confirmed, got %s", tx.status)
+	}
+}
+
+func TestProxy_RecorderCalledOnForwardFailure(t *testing.T) {
+	failServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failServer.Close()
+
+	ml := newMockLedger()
+	rec := &mockGatewayRecorder{}
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xfail", ServiceID: "svc1", Price: "0.10", Endpoint: failServer.URL},
+		},
+	}
+
+	svc := newTestServiceWithLogger(ml, reg)
+	svc.WithRecorder(rec)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	_, _ = svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "test"})
+
+	if len(rec.transactions) != 1 {
+		t.Fatalf("expected 1 recorded transaction (failed), got %d", len(rec.transactions))
+	}
+	if rec.transactions[0].status != "failed" {
+		t.Errorf("expected status failed, got %s", rec.transactions[0].status)
+	}
+}
+
+func TestProxy_RevenueAccumulated(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	rev := &mockRevenue{}
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", Price: "0.50", Endpoint: server.URL},
+		},
+	}
+
+	svc := newTestServiceWithLogger(ml, reg)
+	svc.WithRevenueAccumulator(rev)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	_, err := svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "translation"})
+	if err != nil {
+		t.Fatalf("proxy: %v", err)
+	}
+
+	if len(rev.accumulated) != 1 {
+		t.Fatalf("expected 1 revenue entry, got %d", len(rev.accumulated))
+	}
+	entry := rev.accumulated[0]
+	if entry.agentAddr != "0xseller" {
+		t.Errorf("expected 0xseller, got %s", entry.agentAddr)
+	}
+	if entry.amount != "0.50" {
+		t.Errorf("expected 0.50, got %s", entry.amount)
+	}
+	if !strings.Contains(entry.txRef, "gateway_proxy:") {
+		t.Errorf("expected txRef to contain gateway_proxy: prefix, got %s", entry.txRef)
+	}
+}
+
+func TestProxy_RevenueNotAccumulatedOnFailure(t *testing.T) {
+	failServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failServer.Close()
+
+	ml := newMockLedger()
+	rev := &mockRevenue{}
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xfail", ServiceID: "svc1", Price: "0.10", Endpoint: failServer.URL},
+		},
+	}
+
+	svc := newTestServiceWithLogger(ml, reg)
+	svc.WithRevenueAccumulator(rev)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	_, _ = svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "test"})
+
+	if len(rev.accumulated) != 0 {
+		t.Errorf("expected 0 revenue entries on failure, got %d", len(rev.accumulated))
+	}
+}
+
+func TestTimerSweepsExpiredSessions(t *testing.T) {
+	ml := newMockLedger()
+	store := NewMemoryStore()
+	resolver := NewResolver(&mockRegistry{})
+	forwarder := NewForwarder(5 * time.Second)
+	svc := NewService(store, resolver, forwarder, ml, testLogger())
+
+	ctx := context.Background()
+
+	// Create an expired session directly in the store
+	now := time.Now()
+	store.CreateSession(ctx, &Session{
+		ID:         "gw_sweep",
+		AgentAddr:  "0xbuyer",
+		MaxTotal:   "5.00",
+		TotalSpent: "0.000000",
+		Status:     StatusActive,
+		ExpiresAt:  now.Add(-time.Minute),
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	})
+	// Hold the funds (simulate what CreateSession does)
+	ml.holds["gw_sweep"] = "5.00"
+
+	timer := NewTimer(svc, store, testLogger())
+
+	// Manually call sweep
+	timer.sweepExpired(ctx)
+
+	updated, _ := store.GetSession(ctx, "gw_sweep")
+	if updated.Status != StatusExpired {
+		t.Errorf("expected expired after sweep, got %s", updated.Status)
+	}
+	if len(ml.holds) != 0 {
+		t.Errorf("expected holds released, got %d", len(ml.holds))
+	}
+}

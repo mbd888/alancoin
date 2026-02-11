@@ -80,6 +80,7 @@ type Server struct {
 	streamService      *streams.Service
 	streamTimer        *streams.Timer
 	gatewayService     *gateway.Service
+	gatewayTimer       *gateway.Timer
 	negotiationService *negotiation.Service
 	negotiationTimer   *negotiation.Timer
 	stakesService      *stakes.Service
@@ -241,6 +242,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		gwResolver := gateway.NewResolver(&gatewayRegistryAdapter{s.registry})
 		gwForwarder := gateway.NewForwarder(0)
 		s.gatewayService = gateway.NewService(gwStore, gwResolver, gwForwarder, &gatewayLedgerAdapter{s.ledger}, s.logger)
+		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore, s.logger)
 		s.logger.Info("gateway enabled")
 
 		// Negotiation with PostgreSQL store (autonomous deal-making)
@@ -262,6 +264,8 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		revenueAdapter := &revenueAccumulatorAdapter{s.stakesService}
 		s.escrowService.WithRevenueAccumulator(revenueAdapter)
 		s.streamService.WithRevenueAccumulator(revenueAdapter)
+		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry}).
+			WithRevenueAccumulator(revenueAdapter)
 
 		// Reputation snapshots (PostgreSQL)
 		s.reputationStore = reputation.NewPostgresSnapshotStore(db)
@@ -336,6 +340,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		gwResolver2 := gateway.NewResolver(&gatewayRegistryAdapter{s.registry})
 		gwForwarder2 := gateway.NewForwarder(0)
 		s.gatewayService = gateway.NewService(gwStore2, gwResolver2, gwForwarder2, &gatewayLedgerAdapter{s.ledger}, s.logger)
+		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore2, s.logger)
 		s.logger.Info("gateway enabled (in-memory)")
 
 		// Negotiation with in-memory store (autonomous deal-making)
@@ -357,6 +362,8 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		revenueAdapter := &revenueAccumulatorAdapter{s.stakesService}
 		s.escrowService.WithRevenueAccumulator(revenueAdapter)
 		s.streamService.WithRevenueAccumulator(revenueAdapter)
+		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry}).
+			WithRevenueAccumulator(revenueAdapter)
 
 		// Reputation snapshots (in-memory)
 		s.reputationStore = reputation.NewMemorySnapshotStore()
@@ -1191,6 +1198,7 @@ func (s *Server) readinessHandler(c *gin.Context) {
 	checks["escrow_timer"] = timerStatus(s.escrowTimer)
 	checks["stream_timer"] = timerStatus(s.streamTimer)
 	checks["contract_timer"] = timerStatus(s.contractTimer)
+	checks["gateway_timer"] = timerStatus(s.gatewayTimer)
 	checks["negotiation_timer"] = timerStatus(s.negotiationTimer)
 
 	status := "ready"
@@ -1444,6 +1452,11 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.streamTimer.Start(runCtx)
 	}
 
+	// Start gateway session expiry timer
+	if s.gatewayTimer != nil {
+		go s.gatewayTimer.Start(runCtx)
+	}
+
 	// Start negotiation deadline timer
 	if s.negotiationTimer != nil {
 		go s.negotiationTimer.Start(runCtx)
@@ -1540,6 +1553,12 @@ func (s *Server) Shutdown() error {
 	if s.streamTimer != nil {
 		s.streamTimer.Stop()
 		s.logger.Info("stream timer stopped")
+	}
+
+	// Stop gateway timer
+	if s.gatewayTimer != nil {
+		s.gatewayTimer.Stop()
+		s.logger.Info("gateway timer stopped")
 	}
 
 	// Stop negotiation timer
@@ -2263,6 +2282,23 @@ func (a *contractFormerAdapter) FormContract(ctx context.Context, rfp *negotiati
 	}
 
 	return contract.ID, nil
+}
+
+// gatewayRecorderAdapter adapts registry.Store to gateway.TransactionRecorder
+type gatewayRecorderAdapter struct {
+	r registry.Store
+}
+
+func (a *gatewayRecorderAdapter) RecordTransaction(ctx context.Context, txHash, from, to, amount, serviceID, status string) error {
+	tx := &registry.Transaction{
+		TxHash:    txHash,
+		From:      from,
+		To:        to,
+		Amount:    amount,
+		ServiceID: serviceID,
+		Status:    status,
+	}
+	return a.r.RecordTransaction(ctx, tx)
 }
 
 // gatewayLedgerAdapter adapts ledger.Ledger to gateway.LedgerService

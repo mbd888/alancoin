@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // MemoryStore is an in-memory gateway store for demo/development mode.
@@ -75,6 +76,27 @@ func (m *MemoryStore) ListSessions(_ context.Context, agentAddr string, limit in
 
 	if len(result) > limit {
 		result = result[:limit]
+	}
+	return result, nil
+}
+
+func (m *MemoryStore) ListExpired(_ context.Context, before time.Time, limit int) ([]*Session, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []*Session
+	for _, s := range m.sessions {
+		if s.Status == StatusActive && !s.ExpiresAt.IsZero() && s.ExpiresAt.Before(before) {
+			cp := *s
+			if s.AllowedTypes != nil {
+				cp.AllowedTypes = make([]string, len(s.AllowedTypes))
+				copy(cp.AllowedTypes, s.AllowedTypes)
+			}
+			result = append(result, &cp)
+			if len(result) >= limit {
+				break
+			}
+		}
 	}
 	return result, nil
 }

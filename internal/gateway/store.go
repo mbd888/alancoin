@@ -1,6 +1,9 @@
 package gateway
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Store persists gateway session data.
 type Store interface {
@@ -8,6 +11,7 @@ type Store interface {
 	GetSession(ctx context.Context, id string) (*Session, error)
 	UpdateSession(ctx context.Context, session *Session) error
 	ListSessions(ctx context.Context, agentAddr string, limit int) ([]*Session, error)
+	ListExpired(ctx context.Context, before time.Time, limit int) ([]*Session, error)
 
 	CreateLog(ctx context.Context, log *RequestLog) error
 	ListLogs(ctx context.Context, sessionID string, limit int) ([]*RequestLog, error)

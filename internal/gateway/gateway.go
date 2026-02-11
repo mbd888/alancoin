@@ -115,6 +115,16 @@ type RegistryProvider interface {
 	ListServices(ctx context.Context, serviceType, maxPrice string) ([]ServiceCandidate, error)
 }
 
+// TransactionRecorder records transactions for reputation tracking.
+type TransactionRecorder interface {
+	RecordTransaction(ctx context.Context, txHash, from, to, amount, serviceID, status string) error
+}
+
+// RevenueAccumulator intercepts payments for revenue staking.
+type RevenueAccumulator interface {
+	AccumulateRevenue(ctx context.Context, agentAddr, amount, txRef string) error
+}
+
 // ServiceCandidate is a discovered service suitable for proxying.
 type ServiceCandidate struct {
 	AgentAddress    string  `json:"agentAddress"`
