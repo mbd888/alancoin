@@ -59,7 +59,7 @@ func (f *Forwarder) Forward(ctx context.Context, req ForwardRequest) (*ForwardRe
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Payment-Amount", req.Amount)
 	httpReq.Header.Set("X-Payment-From", req.FromAddr)
-	httpReq.Header.Set("X-Payment-TxHash", req.Reference)
+	httpReq.Header.Set("X-Payment-Ref", req.Reference)
 
 	start := time.Now()
 	resp, err := f.client.Do(httpReq)
@@ -67,7 +67,7 @@ func (f *Forwarder) Forward(ctx context.Context, req ForwardRequest) (*ForwardRe
 	if err != nil {
 		return nil, fmt.Errorf("http request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	limited := io.LimitReader(resp.Body, maxResponseSize)
 	respBody, err := io.ReadAll(limited)

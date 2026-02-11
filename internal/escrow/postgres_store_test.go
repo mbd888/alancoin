@@ -5,6 +5,7 @@ package escrow
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -32,7 +33,7 @@ func setupTestDB(t *testing.T) (*PostgresStore, *sql.DB, func()) {
 	store := NewPostgresStore(db)
 	ctx := context.Background()
 
-	// Ensure table exists (mirrors migration 003_escrow.sql)
+	// Ensure table exists (mirrors migration 003_escrow.sql + 021_escrow_arbitration.sql)
 	_, err = db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS escrows (
 			id               VARCHAR(36) PRIMARY KEY,
@@ -48,8 +49,30 @@ func setupTestDB(t *testing.T) (*PostgresStore, *sql.DB, func()) {
 			dispute_reason   TEXT,
 			resolution       TEXT,
 			created_at       TIMESTAMPTZ DEFAULT NOW(),
-			updated_at       TIMESTAMPTZ DEFAULT NOW()
+			updated_at       TIMESTAMPTZ DEFAULT NOW(),
+			dispute_evidence JSONB DEFAULT '[]',
+			arbitrator_addr  VARCHAR(42),
+			arbitration_deadline TIMESTAMPTZ,
+			partial_release_amount NUMERIC(20,6),
+			partial_refund_amount  NUMERIC(20,6),
+			dispute_window_until   TIMESTAMPTZ
 		)`)
+	if err != nil {
+		t.Fatalf("Failed to create escrows table: %v", err)
+	}
+
+	// Apply migration 021 columns if table already existed without them
+	for _, col := range []struct{ name, def string }{
+		{"dispute_evidence", "JSONB DEFAULT '[]'"},
+		{"arbitrator_addr", "VARCHAR(42)"},
+		{"arbitration_deadline", "TIMESTAMPTZ"},
+		{"partial_release_amount", "NUMERIC(20,6)"},
+		{"partial_refund_amount", "NUMERIC(20,6)"},
+		{"dispute_window_until", "TIMESTAMPTZ"},
+	} {
+		db.ExecContext(ctx, fmt.Sprintf(
+			"ALTER TABLE escrows ADD COLUMN IF NOT EXISTS %s %s", col.name, col.def))
+	}
 	if err != nil {
 		t.Fatalf("Failed to create escrows table: %v", err)
 	}
