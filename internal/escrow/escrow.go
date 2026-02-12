@@ -47,6 +47,19 @@ const (
 	StatusArbitrating Status = "arbitrating" // Arbitrator assigned, evidence being reviewed
 )
 
+// MoneyError wraps an error with funds-state context so callers know
+// whether their money is safe and what to do next.
+type MoneyError struct {
+	Err         error
+	FundsStatus string // no_change, locked_in_escrow, released_to_seller
+	Recovery    string // human-readable next step
+	Amount      string // amount involved
+	Reference   string // escrow ID for support
+}
+
+func (e *MoneyError) Error() string { return e.Err.Error() }
+func (e *MoneyError) Unwrap() error { return e.Err }
+
 // DefaultAutoRelease is the default time before auto-releasing to seller.
 const DefaultAutoRelease = 5 * time.Minute
 
@@ -301,15 +314,36 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Escrow, error
 	if err := s.ledger.EscrowLock(ctx, escrow.BuyerAddr, escrow.Amount, escrow.ID); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to lock escrow funds")
-		return nil, fmt.Errorf("failed to lock escrow funds: %w", err)
+		return nil, &MoneyError{
+			Err:         fmt.Errorf("failed to lock escrow funds: %w", err),
+			FundsStatus: "no_change",
+			Recovery:    "No funds were moved. Check your available balance and try again.",
+			Amount:      escrow.Amount,
+			Reference:   escrow.ID,
+		}
 	}
 
 	if err := s.store.Create(ctx, escrow); err != nil {
-		// Best-effort refund if store fails
-		_ = s.ledger.RefundEscrow(ctx, escrow.BuyerAddr, escrow.Amount, escrow.ID)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to create escrow record")
-		return nil, fmt.Errorf("failed to create escrow record: %w", err)
+		if refundErr := s.ledger.RefundEscrow(ctx, escrow.BuyerAddr, escrow.Amount, escrow.ID); refundErr != nil {
+			s.logger.Error("RefundEscrow failed after store error: funds stuck in escrow",
+				"escrow_id", escrow.ID, "amount", escrow.Amount, "error", refundErr)
+			return nil, &MoneyError{
+				Err:         fmt.Errorf("failed to create escrow record: %w", err),
+				FundsStatus: "locked_in_escrow",
+				Recovery:    "Escrow creation failed and refund also failed. Contact support with the reference to release your funds.",
+				Amount:      escrow.Amount,
+				Reference:   escrow.ID,
+			}
+		}
+		return nil, &MoneyError{
+			Err:         fmt.Errorf("failed to create escrow record: %w", err),
+			FundsStatus: "no_change",
+			Recovery:    "Escrow creation failed but your funds were returned. Safe to retry.",
+			Amount:      escrow.Amount,
+			Reference:   escrow.ID,
+		}
 	}
 
 	metrics.EscrowCreatedTotal.Inc()
@@ -393,7 +427,13 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 	if err := s.ledger.ReleaseEscrow(ctx, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ID); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to release escrow funds")
-		return nil, fmt.Errorf("failed to release escrow funds: %w", err)
+		return nil, &MoneyError{
+			Err:         fmt.Errorf("failed to release escrow funds: %w", err),
+			FundsStatus: "locked_in_escrow",
+			Recovery:    "Funds are still locked in escrow. The release to the seller failed. Contact support with the reference.",
+			Amount:      escrow.Amount,
+			Reference:   escrow.ID,
+		}
 	}
 
 	now := time.Now()
@@ -411,7 +451,13 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 				"escrow_id", escrow.ID, "seller", escrow.SellerAddr, "amount", escrow.Amount, "error", retryErr)
 			span.RecordError(retryErr)
 			span.SetStatus(codes.Error, "failed to update escrow after fund release")
-			return nil, fmt.Errorf("failed to update escrow after fund release (requires manual resolution): %w", err)
+			return nil, &MoneyError{
+				Err:         fmt.Errorf("failed to update escrow after fund release (requires manual resolution): %w", retryErr),
+				FundsStatus: "released_to_seller",
+				Recovery:    "Funds were successfully released to the seller but the escrow record could not be updated. No action needed regarding your funds.",
+				Amount:      escrow.Amount,
+				Reference:   escrow.ID,
+			}
 		}
 	}
 
@@ -543,7 +589,13 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 	if err := s.ledger.ReleaseEscrow(ctx, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ID); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to auto-release escrow")
-		return fmt.Errorf("failed to auto-release escrow: %w", err)
+		return &MoneyError{
+			Err:         fmt.Errorf("failed to auto-release escrow: %w", err),
+			FundsStatus: "locked_in_escrow",
+			Recovery:    "Funds are still locked in escrow. The auto-release to the seller failed. Contact support with the reference.",
+			Amount:      escrow.Amount,
+			Reference:   escrow.ID,
+		}
 	}
 
 	now := time.Now()
@@ -562,7 +614,14 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 				"escrow_id", escrow.ID, "seller", escrow.SellerAddr, "amount", escrow.Amount, "error", retryErr)
 			span.RecordError(retryErr)
 			span.SetStatus(codes.Error, "failed to update escrow after auto-release")
-			return fmt.Errorf("failed to update escrow after auto-release (requires manual resolution): %w", err)
+			// BUG FIX: was wrapping `err` instead of `retryErr`
+			return &MoneyError{
+				Err:         fmt.Errorf("failed to update escrow after auto-release (requires manual resolution): %w", retryErr),
+				FundsStatus: "released_to_seller",
+				Recovery:    "Funds were successfully auto-released to the seller but the escrow record could not be updated. No action needed regarding funds.",
+				Amount:      escrow.Amount,
+				Reference:   escrow.ID,
+			}
 		}
 	}
 

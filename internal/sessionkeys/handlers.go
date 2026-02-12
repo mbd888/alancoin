@@ -463,8 +463,11 @@ func (h *Handler) Transact(c *gin.Context) {
 			// Phase 1: Place hold (available → pending)
 			if err := h.balance.Hold(c.Request.Context(), address, req.Amount, keyID); err != nil {
 				c.JSON(http.StatusPaymentRequired, gin.H{
-					"error":   "insufficient_balance",
-					"message": "Agent has insufficient balance",
+					"error":        "insufficient_balance",
+					"message":      "Agent has insufficient balance",
+					"funds_status": "no_change",
+					"recovery":     "No funds were moved. Check your available balance and try again.",
+					"amount":       req.Amount,
 				})
 				return
 			}
@@ -479,8 +482,12 @@ func (h *Handler) Transact(c *gin.Context) {
 				h.logger.Error("demo ConfirmHold failed: funds stuck in pending",
 					"agent", address, "amount", req.Amount, "keyId", keyID, "error", err)
 				c.JSON(http.StatusInternalServerError, gin.H{
-					"error":   "ledger_error",
-					"message": "Failed to confirm balance hold",
+					"error":        "ledger_error",
+					"message":      "Failed to confirm balance hold",
+					"funds_status": "held_pending",
+					"recovery":     "Your funds are held in pending state. Contact support with the reference to release them.",
+					"reference":    keyID,
+					"amount":       req.Amount,
 				})
 				return
 			}
@@ -490,8 +497,12 @@ func (h *Handler) Transact(c *gin.Context) {
 				h.logger.Error("demo Deposit failed: sender debited but recipient not credited",
 					"from", address, "to", req.To, "amount", req.Amount, "txHash", txHash, "error", err)
 				c.JSON(http.StatusInternalServerError, gin.H{
-					"error":   "ledger_error",
-					"message": "Failed to credit recipient",
+					"error":        "ledger_error",
+					"message":      "Your account was debited but the recipient was not credited",
+					"funds_status": "sender_debited",
+					"recovery":     "Your funds were debited but not delivered. Do NOT retry. Contact support with the reference for manual resolution.",
+					"reference":    txHash,
+					"amount":       req.Amount,
 				})
 				return
 			}
@@ -500,16 +511,27 @@ func (h *Handler) Transact(c *gin.Context) {
 			result, err := h.wallet.Transfer(c.Request.Context(), common.HexToAddress(req.To), amountBig)
 			if err != nil {
 				// Release the hold since transfer failed
+				resp := gin.H{
+					"error":   "transfer_failed",
+					"message": "On-chain transfer failed",
+					"amount":  req.Amount,
+				}
 				if h.balance != nil {
 					if relErr := h.balance.ReleaseHold(c.Request.Context(), address, req.Amount, keyID); relErr != nil {
 						h.logger.Warn("ReleaseHold failed after transfer error: funds may be stuck in pending",
 							"agent", address, "amount", req.Amount, "keyId", keyID, "error", relErr)
+						resp["funds_status"] = "held_pending"
+						resp["recovery"] = "On-chain transfer failed and hold release also failed. Contact support with the reference to release your funds."
+						resp["reference"] = keyID
+					} else {
+						resp["funds_status"] = "no_change"
+						resp["recovery"] = "On-chain transfer failed but your funds were returned. Safe to retry."
 					}
+				} else {
+					resp["funds_status"] = "no_change"
+					resp["recovery"] = "On-chain transfer failed. Safe to retry."
 				}
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"error":   "transfer_failed",
-					"message": "On-chain transfer failed",
-				})
+				c.JSON(http.StatusInternalServerError, resp)
 				return
 			}
 
@@ -522,11 +544,14 @@ func (h *Handler) Transact(c *gin.Context) {
 					h.logger.Error("ConfirmHold failed after on-chain transfer: funds in pending but transfer succeeded",
 						"agent", address, "amount", req.Amount, "keyId", keyID, "txHash", result.TxHash, "error", confirmErr)
 					c.JSON(http.StatusInternalServerError, gin.H{
-						"status":  "partial_failure",
-						"error":   "ledger_sync_failed",
-						"message": "On-chain transfer succeeded but ledger update failed - contact support",
-						"txHash":  result.TxHash,
-						"amount":  req.Amount,
+						"status":       "partial_failure",
+						"error":        "ledger_sync_failed",
+						"message":      "On-chain transfer succeeded but ledger update failed",
+						"funds_status": "transferred_onchain",
+						"recovery":     "Your on-chain transfer succeeded but the ledger was not updated. Do NOT retry or you will be charged twice. Contact support with the reference.",
+						"reference":    keyID,
+						"txHash":       result.TxHash,
+						"amount":       req.Amount,
 					})
 					return
 				}
@@ -571,13 +596,18 @@ func (h *Handler) Transact(c *gin.Context) {
 		if !executed {
 			// No transfer happened, safe to fail
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":   "usage_tracking_failed",
-				"message": "Failed to record usage",
+				"error":        "usage_tracking_failed",
+				"message":      "Failed to record usage",
+				"funds_status": "no_change",
+				"recovery":     "No funds were moved. Safe to retry.",
 			})
 			return
 		}
 		// Transfer already executed -- log the error but still return success
-		// to avoid client retries that would double-spend
+		// to avoid client retries that would double-spend.
+		// The warning field below tells the caller that usage tracking is inaccurate.
+		h.logger.Warn("RecordUsage failed after executed transfer: usage tracking inaccurate",
+			"keyId", keyID, "amount", req.Amount, "error", usageErr)
 	}
 
 	// Reload key to get updated usage
@@ -651,6 +681,11 @@ func (h *Handler) Transact(c *gin.Context) {
 			"depth":       key.Depth,
 			"label":       key.DelegationLabel,
 		}
+	}
+
+	// Flag usage tracking failure on successful transfer
+	if usageErr != nil && executed {
+		response["warning"] = "Transaction succeeded but usage tracking failed. Budget/nonce state may be inaccurate."
 	}
 
 	if executed {

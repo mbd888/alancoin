@@ -253,13 +253,26 @@ class BudgetSession:
                 code="budget_exceeded",
             )
 
-        result = self._skm.transact(
-            self._client,
-            self._client.address,
-            to,
-            amount,
-            service_id=service_id,
-        )
+        try:
+            result = self._skm.transact(
+                self._client,
+                self._client.address,
+                to,
+                amount,
+                service_id=service_id,
+            )
+        except AlancoinError:
+            raise  # Already has details from server
+        except Exception as e:
+            raise AlancoinError(
+                f"Transaction failed: {e}",
+                code="transact_failed",
+                details={
+                    "funds_status": "unknown",
+                    "recovery": "Could not determine transaction outcome. Check your balance before retrying.",
+                    "amount": amount,
+                },
+            ) from e
 
         self._total_spent += amount_dec
         self._tx_count += 1
@@ -371,6 +384,11 @@ class BudgetSession:
                     self._client.confirm_escrow(escrow_id)
                 except Exception as e:
                     logger.warning("Escrow confirmation failed for %s: %s - funds may be stuck", escrow_id, e)
+                    response_data["_escrow_warning"] = {
+                        "escrow_id": escrow_id,
+                        "funds_status": "locked_in_escrow",
+                        "recovery": f"Service succeeded but escrow {escrow_id} was not confirmed. Funds may auto-release to seller or require manual confirmation.",
+                    }
 
             return ServiceResult(
                 data=response_data,
@@ -606,17 +624,33 @@ class BudgetSession:
 
             except Exception as e:
                 # Refund remaining locked funds
+                refund_ok = False
                 try:
                     self._client.refund_multistep_escrow(escrow_id)
+                    refund_ok = True
                 except Exception as refund_err:
                     logger.warning(
                         "Failed to refund multistep escrow %s: %s",
                         escrow_id, refund_err,
                     )
-                raise AlancoinError(
-                    f"Pipeline failed at step {i}: {e}",
-                    code="pipeline_step_failed",
-                ) from e
+                if refund_ok:
+                    raise AlancoinError(
+                        f"Pipeline failed at step {i}: {e}",
+                        code="pipeline_step_failed",
+                        details={
+                            "funds_status": "refunded",
+                            "recovery": "Pipeline failed and remaining funds were refunded. Steps already confirmed were paid to their sellers.",
+                        },
+                    ) from e
+                else:
+                    raise AlancoinError(
+                        f"Pipeline failed at step {i}: {e}",
+                        code="pipeline_step_failed",
+                        details={
+                            "funds_status": "locked_in_escrow",
+                            "recovery": f"Pipeline failed and refund also failed. Funds may be locked in escrow {escrow_id}. Contact support.",
+                        },
+                    ) from e
 
         return results
 
@@ -869,13 +903,14 @@ class BudgetSession:
             logger.warning(
                 "Service endpoint call failed for %s: %s", service.endpoint, e
             )
-            # Payment was already made — return error context (no internal details)
+            # Payment was already made — return error context with funds status
             return {
                 "error": "endpoint_call_failed",
                 "paid": True,
                 "amount": service.price,
                 "endpoint": service.endpoint,
-                "note": "Payment succeeded but endpoint call failed",
+                "funds_status": "spent",
+                "recovery": "Payment succeeded but the service endpoint failed to respond. You can dispute this transaction if escrow was used.",
             }
 
 

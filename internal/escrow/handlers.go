@@ -11,6 +11,23 @@ import (
 	"github.com/mbd888/alancoin/internal/validation"
 )
 
+// moneyFields extracts funds-state context from a MoneyError if present.
+// Returns extra fields to merge into the JSON error response.
+func moneyFields(err error) gin.H {
+	var me *MoneyError
+	if errors.As(err, &me) {
+		h := gin.H{"funds_status": me.FundsStatus, "recovery": me.Recovery}
+		if me.Amount != "" {
+			h["amount"] = me.Amount
+		}
+		if me.Reference != "" {
+			h["reference"] = me.Reference
+		}
+		return h
+	}
+	return nil
+}
+
 // ScopeChecker verifies that a session key possesses a required scope.
 type ScopeChecker interface {
 	ValidateScope(ctx context.Context, keyID, scope string) error
@@ -98,10 +115,20 @@ func (h *Handler) CreateEscrow(c *gin.Context) {
 
 	escrow, err := h.service.Create(c.Request.Context(), req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrInvalidAmount) {
+			status = http.StatusBadRequest
+		}
+		resp := gin.H{
 			"error":   "escrow_failed",
 			"message": "Failed to create escrow",
-		})
+		}
+		if extra := moneyFields(err); extra != nil {
+			for k, v := range extra {
+				resp[k] = v
+			}
+		}
+		c.JSON(status, resp)
 		return
 	}
 
@@ -206,7 +233,13 @@ func (h *Handler) ConfirmEscrow(c *gin.Context) {
 			status = http.StatusConflict
 			code = "invalid_state"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		resp := gin.H{"error": code, "message": err.Error()}
+		if extra := moneyFields(err); extra != nil {
+			for k, v := range extra {
+				resp[k] = v
+			}
+		}
+		c.JSON(status, resp)
 		return
 	}
 
@@ -359,7 +392,13 @@ func (h *Handler) ResolveArbitration(c *gin.Context) {
 			status = http.StatusBadRequest
 			code = "invalid_amount"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		resp := gin.H{"error": code, "message": err.Error()}
+		if extra := moneyFields(err); extra != nil {
+			for k, v := range extra {
+				resp[k] = v
+			}
+		}
+		c.JSON(status, resp)
 		return
 	}
 

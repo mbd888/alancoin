@@ -3,12 +3,23 @@
 
 class AlancoinError(Exception):
     """Base exception for Alancoin errors."""
-    
-    def __init__(self, message: str, code: str = None, status_code: int = None):
+
+    def __init__(self, message: str, code: str = None, status_code: int = None, details: dict = None):
         super().__init__(message)
         self.message = message
         self.code = code
         self.status_code = status_code
+        self.details = details or {}
+
+    @property
+    def funds_status(self) -> str:
+        """Funds safety status from server (e.g., 'no_change', 'held_pending')."""
+        return self.details.get("funds_status", "")
+
+    @property
+    def recovery(self) -> str:
+        """Recovery guidance from server."""
+        return self.details.get("recovery", "")
 
     def __str__(self):
         if self.code:

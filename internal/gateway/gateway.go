@@ -143,6 +143,19 @@ type ReceiptIssuer interface {
 	IssueReceipt(ctx context.Context, path, reference, from, to, amount, serviceID, status, metadata string) error
 }
 
+// MoneyError wraps an error with funds-state context so callers know
+// whether their money is safe and what to do next.
+type MoneyError struct {
+	Err         error
+	FundsStatus string // no_change, held_pending, spent_not_delivered, held_safe, settled_safe
+	Recovery    string // human-readable next step
+	Amount      string // amount involved
+	Reference   string // session/escrow/tx ID for support
+}
+
+func (e *MoneyError) Error() string { return e.Err.Error() }
+func (e *MoneyError) Unwrap() error { return e.Err }
+
 // ServiceCandidate is a discovered service suitable for proxying.
 type ServiceCandidate struct {
 	AgentAddress    string  `json:"agentAddress"`

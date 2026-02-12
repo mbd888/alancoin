@@ -2172,10 +2172,14 @@ class Alancoin:
         if response.status_code >= 400:
             try:
                 data = response.json()
+                # Extract extra server fields (funds_status, recovery, etc.)
+                # beyond the standard error/message pair.
+                details = {k: v for k, v in data.items() if k not in ("error", "message")}
                 raise AlancoinError(
                     message=data.get("message", "Unknown error"),
                     code=data.get("error", "unknown"),
                     status_code=response.status_code,
+                    details=details if details else None,
                 )
             except (ValueError, KeyError):
                 raise AlancoinError(

@@ -10,6 +10,23 @@ import (
 	"github.com/mbd888/alancoin/internal/validation"
 )
 
+// moneyFields extracts funds-state context from a MoneyError if present.
+// Returns extra fields to merge into the JSON error response.
+func moneyFields(err error) gin.H {
+	var me *MoneyError
+	if errors.As(err, &me) {
+		h := gin.H{"funds_status": me.FundsStatus, "recovery": me.Recovery}
+		if me.Amount != "" {
+			h["amount"] = me.Amount
+		}
+		if me.Reference != "" {
+			h["reference"] = me.Reference
+		}
+		return h
+	}
+	return nil
+}
+
 // Handler provides HTTP endpoints for the gateway.
 type Handler struct {
 	service *Service
@@ -112,7 +129,13 @@ func (h *Handler) CreateSession(c *gin.Context) {
 			code = "invalid_amount"
 			msg = err.Error()
 		}
-		c.JSON(status, gin.H{"error": code, "message": msg})
+		resp := gin.H{"error": code, "message": msg}
+		if extra := moneyFields(err); extra != nil {
+			for k, v := range extra {
+				resp[k] = v
+			}
+		}
+		c.JSON(status, resp)
 		return
 	}
 
@@ -188,7 +211,13 @@ func (h *Handler) CloseSession(c *gin.Context) {
 			status = http.StatusConflict
 			code = "already_closed"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		resp := gin.H{"error": code, "message": err.Error()}
+		if extra := moneyFields(err); extra != nil {
+			for k, v := range extra {
+				resp[k] = v
+			}
+		}
+		c.JSON(status, resp)
 		return
 	}
 
@@ -229,7 +258,13 @@ func (h *Handler) Proxy(c *gin.Context) {
 			status = http.StatusBadGateway
 			code = "proxy_failed"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		resp := gin.H{"error": code, "message": err.Error()}
+		if extra := moneyFields(err); extra != nil {
+			for k, v := range extra {
+				resp[k] = v
+			}
+		}
+		c.JSON(status, resp)
 		return
 	}
 

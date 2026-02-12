@@ -125,13 +125,34 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr string, req Creat
 
 	// Hold the full budget from the buyer
 	if err := s.ledger.Hold(ctx, session.AgentAddr, session.MaxTotal, session.ID); err != nil {
-		return nil, fmt.Errorf("failed to hold gateway funds: %w", err)
+		return nil, &MoneyError{
+			Err:         fmt.Errorf("failed to hold gateway funds: %w", err),
+			FundsStatus: "no_change",
+			Recovery:    "No funds were moved. Check your available balance and try again.",
+			Amount:      session.MaxTotal,
+			Reference:   session.ID,
+		}
 	}
 
 	if err := s.store.CreateSession(ctx, session); err != nil {
-		// Best-effort release if store fails
-		_ = s.ledger.ReleaseHold(ctx, session.AgentAddr, session.MaxTotal, session.ID)
-		return nil, fmt.Errorf("failed to create gateway session: %w", err)
+		if relErr := s.ledger.ReleaseHold(ctx, session.AgentAddr, session.MaxTotal, session.ID); relErr != nil {
+			s.logger.Error("ReleaseHold failed after store error: funds stuck in pending",
+				"session", session.ID, "amount", session.MaxTotal, "error", relErr)
+			return nil, &MoneyError{
+				Err:         fmt.Errorf("failed to create gateway session: %w", err),
+				FundsStatus: "held_pending",
+				Recovery:    "Session creation failed and hold release also failed. Contact support with the reference to release your funds.",
+				Amount:      session.MaxTotal,
+				Reference:   session.ID,
+			}
+		}
+		return nil, &MoneyError{
+			Err:         fmt.Errorf("failed to create gateway session: %w", err),
+			FundsStatus: "no_change",
+			Recovery:    "Session creation failed but your funds were returned. Safe to retry.",
+			Amount:      session.MaxTotal,
+			Reference:   session.ID,
+		}
 	}
 
 	return session, nil
@@ -239,7 +260,13 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		// Settle base price: buyer pending → seller available
 		if err := s.ledger.SettleHold(ctx, session.AgentAddr, candidate.AgentAddress, candidate.Price, ref); err != nil {
 			s.logger.Error("settle hold failed", "session", sessionID, "seller", candidate.AgentAddress, "error", err)
-			lastErr = err
+			lastErr = &MoneyError{
+				Err:         err,
+				FundsStatus: "held_safe",
+				Recovery:    "Payment settlement failed but your funds are safely held. The gateway will try the next available service.",
+				Amount:      candidate.Price,
+				Reference:   ref,
+			}
 			retries++
 			continue
 		}
@@ -306,7 +333,13 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 
 			remaining = new(big.Int).Sub(holdBig, newSpent)
 			spentBig = newSpent
-			lastErr = err
+			lastErr = &MoneyError{
+				Err:         err,
+				FundsStatus: "spent_not_delivered",
+				Recovery:    "Payment was made but the service failed to deliver. The seller's reputation has been penalized. You may dispute this transaction.",
+				Amount:      totalCostStr,
+				Reference:   ref,
+			}
 			retries++
 			continue
 		}
@@ -351,6 +384,16 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 	}
 
 	if lastErr != nil {
+		// Propagate MoneyError through ErrProxyFailed so handlers can extract funds_status
+		if me, ok := lastErr.(*MoneyError); ok {
+			return nil, &MoneyError{
+				Err:         fmt.Errorf("%w: %v", ErrProxyFailed, me.Err),
+				FundsStatus: me.FundsStatus,
+				Recovery:    me.Recovery,
+				Amount:      me.Amount,
+				Reference:   me.Reference,
+			}
+		}
 		return nil, fmt.Errorf("%w: %v", ErrProxyFailed, lastErr)
 	}
 	return nil, ErrProxyFailed
@@ -383,7 +426,13 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 	if unused.Sign() > 0 {
 		unusedStr := usdc.Format(unused)
 		if err := s.ledger.ReleaseHold(ctx, session.AgentAddr, unusedStr, session.ID); err != nil {
-			return nil, fmt.Errorf("failed to release unused hold: %w", err)
+			return nil, &MoneyError{
+				Err:         fmt.Errorf("failed to release unused hold: %w", err),
+				FundsStatus: "held_pending",
+				Recovery:    "Session close failed because the unused hold could not be released. Contact support with the reference to release your funds.",
+				Amount:      unusedStr,
+				Reference:   session.ID,
+			}
 		}
 	}
 
@@ -393,7 +442,13 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 	if err := s.store.UpdateSession(ctx, session); err != nil {
 		s.logger.Error("CRITICAL: gateway session funds settled but status update failed",
 			"session", sessionID, "error", err)
-		return nil, fmt.Errorf("failed to update session after close: %w", err)
+		return nil, &MoneyError{
+			Err:         fmt.Errorf("failed to update session after close: %w", err),
+			FundsStatus: "settled_safe",
+			Recovery:    "All funds were correctly settled but the session status could not be updated. No action needed regarding your funds.",
+			Amount:      session.TotalSpent,
+			Reference:   session.ID,
+		}
 	}
 
 	s.cleanupLock(session.ID)
