@@ -34,7 +34,6 @@ import (
 	"github.com/mbd888/alancoin/internal/ledger"
 	"github.com/mbd888/alancoin/internal/logging"
 	"github.com/mbd888/alancoin/internal/metrics"
-	"github.com/mbd888/alancoin/internal/negotiation"
 	"github.com/mbd888/alancoin/internal/paywall"
 	"github.com/mbd888/alancoin/internal/ratelimit"
 	"github.com/mbd888/alancoin/internal/realtime"
@@ -44,7 +43,6 @@ import (
 	"github.com/mbd888/alancoin/internal/risk"
 	"github.com/mbd888/alancoin/internal/security"
 	"github.com/mbd888/alancoin/internal/sessionkeys"
-	"github.com/mbd888/alancoin/internal/stakes"
 	"github.com/mbd888/alancoin/internal/streams"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/validation"
@@ -83,10 +81,6 @@ type Server struct {
 	streamTimer            *streams.Timer
 	gatewayService         *gateway.Service
 	gatewayTimer           *gateway.Timer
-	negotiationService     *negotiation.Service
-	negotiationTimer       *negotiation.Timer
-	stakesService          *stakes.Service
-	stakesDistributor      *stakes.Distributor
 	receiptService         *receipts.Service
 	reputationStore        reputation.SnapshotStore
 	reputationWorker       *reputation.Worker
@@ -253,27 +247,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore, s.logger)
 		s.logger.Info("gateway enabled")
 
-		// Negotiation with PostgreSQL store (autonomous deal-making)
-		negotiationStore := negotiation.NewPostgresStore(db)
-		reputationProvForNeg := reputation.NewRegistryProvider(s.registry)
-		s.negotiationService = negotiation.NewService(negotiationStore, reputationProvForNeg).
-			WithContractFormer(&contractFormerAdapter{s.contractService}).
-			WithLedger(&negotiationLedgerAdapter{s.ledger})
-		s.negotiationTimer = negotiation.NewTimer(s.negotiationService, s.logger)
-		s.logger.Info("negotiation enabled (postgres)")
-
-		// Stakes with PostgreSQL store (agent revenue staking)
-		stakesStore := stakes.NewPostgresStore(db)
-		s.stakesService = stakes.NewService(stakesStore, &stakesLedgerAdapter{s.ledger})
-		s.stakesDistributor = stakes.NewDistributor(s.stakesService, s.logger)
-		s.logger.Info("stakes enabled (postgres)")
-
-		// Wire revenue interception into payment flows
-		revenueAdapter := &revenueAccumulatorAdapter{s.stakesService}
-		s.escrowService.WithRevenueAccumulator(revenueAdapter)
-		s.streamService.WithRevenueAccumulator(revenueAdapter)
-		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry}).
-			WithRevenueAccumulator(revenueAdapter)
+		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
 
 		// Wire receipt issuer into all payment paths
 		if s.receiptService != nil {
@@ -407,27 +381,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore2, s.logger)
 		s.logger.Info("gateway enabled (in-memory)")
 
-		// Negotiation with in-memory store (autonomous deal-making)
-		negotiationStore := negotiation.NewMemoryStore()
-		reputationProvForNeg := reputation.NewRegistryProvider(s.registry)
-		s.negotiationService = negotiation.NewService(negotiationStore, reputationProvForNeg).
-			WithContractFormer(&contractFormerAdapter{s.contractService}).
-			WithLedger(&negotiationLedgerAdapter{s.ledger})
-		s.negotiationTimer = negotiation.NewTimer(s.negotiationService, s.logger)
-		s.logger.Info("negotiation enabled (in-memory)")
-
-		// Stakes with in-memory store (agent revenue staking)
-		stakesStore := stakes.NewMemoryStore()
-		s.stakesService = stakes.NewService(stakesStore, &stakesLedgerAdapter{s.ledger})
-		s.stakesDistributor = stakes.NewDistributor(s.stakesService, s.logger)
-		s.logger.Info("stakes enabled (in-memory)")
-
-		// Wire revenue interception into payment flows
-		revenueAdapter := &revenueAccumulatorAdapter{s.stakesService}
-		s.escrowService.WithRevenueAccumulator(revenueAdapter)
-		s.streamService.WithRevenueAccumulator(revenueAdapter)
-		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry}).
-			WithRevenueAccumulator(revenueAdapter)
+		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
 
 		// Wire receipt issuer into all payment paths
 		if s.receiptService != nil {
@@ -806,11 +760,6 @@ func (s *Server) setupRoutes() {
 		sessionHandler = sessionHandler.WithEvents(&realtimeEventEmitter{s.realtimeHub})
 	}
 
-	// Add revenue accumulator for stakes interception
-	if s.stakesService != nil {
-		sessionHandler = sessionHandler.WithRevenueAccumulator(&revenueAccumulatorAdapter{s.stakesService})
-	}
-
 	// Add risk scoring engine for anomaly detection
 	if s.riskEngine != nil {
 		sessionHandler = sessionHandler.WithRiskScorer(s.riskEngine)
@@ -1075,38 +1024,6 @@ func (s *Server) setupRoutes() {
 		receiptHandler.RegisterRoutes(v1)
 	}
 
-	// Negotiation routes (autonomous deal-making between agents)
-	if s.negotiationService != nil {
-		negotiationHandler := negotiation.NewHandler(s.negotiationService)
-
-		// Public routes - anyone can browse RFPs and bids
-		negotiationHandler.RegisterRoutes(v1)
-
-		// Protected routes - only authenticated agents can publish/bid/counter/select/cancel
-		protectedNeg := v1.Group("")
-		protectedNeg.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
-		negotiationHandler.RegisterProtectedRoutes(protectedNeg)
-
-		// Admin routes - analytics
-		adminNeg := v1.Group("")
-		adminNeg.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr), auth.RequireAdmin())
-		negotiationHandler.RegisterAdminRoutes(adminNeg)
-	}
-
-	// Stakes routes (agent revenue staking / investment)
-	if s.stakesService != nil {
-		stakeAnalytics := stakes.NewStakeAnalyticsService(s.stakesService.Store())
-		stakesHandler := stakes.NewHandler(s.stakesService).WithAnalytics(stakeAnalytics)
-
-		// Public routes - anyone can browse offerings and portfolios
-		stakesHandler.RegisterRoutes(v1)
-
-		// Protected routes - only authenticated agents can create/invest/trade
-		protectedStakes := v1.Group("")
-		protectedStakes.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
-		stakesHandler.RegisterProtectedRoutes(protectedStakes)
-	}
-
 	// Timeline feed
 	v1.GET("/timeline", s.getTimeline)
 
@@ -1361,8 +1278,6 @@ func (s *Server) readinessHandler(c *gin.Context) {
 	checks["stream_timer"] = timerStatus(s.streamTimer)
 	checks["contract_timer"] = timerStatus(s.contractTimer)
 	checks["gateway_timer"] = timerStatus(s.gatewayTimer)
-	checks["negotiation_timer"] = timerStatus(s.negotiationTimer)
-
 	status := "ready"
 	httpStatus := http.StatusOK
 	if !allOK {
@@ -1612,16 +1527,6 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.gatewayTimer.Start(runCtx)
 	}
 
-	// Start negotiation deadline timer
-	if s.negotiationTimer != nil {
-		go s.negotiationTimer.Start(runCtx)
-	}
-
-	// Start stakes distribution timer
-	if s.stakesDistributor != nil {
-		go s.stakesDistributor.Start(runCtx)
-	}
-
 	// Start reputation snapshot worker
 	if s.reputationWorker != nil {
 		go s.reputationWorker.Start(runCtx)
@@ -1719,18 +1624,6 @@ func (s *Server) Shutdown() error {
 	if s.gatewayTimer != nil {
 		s.gatewayTimer.Stop()
 		s.logger.Info("gateway timer stopped")
-	}
-
-	// Stop negotiation timer
-	if s.negotiationTimer != nil {
-		s.negotiationTimer.Stop()
-		s.logger.Info("negotiation timer stopped")
-	}
-
-	// Stop stakes distributor
-	if s.stakesDistributor != nil {
-		s.stakesDistributor.Stop()
-		s.logger.Info("stakes distributor stopped")
 	}
 
 	// Stop reputation worker
@@ -2032,27 +1925,6 @@ func (a *streamLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount
 	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
 }
 
-// negotiationLedgerAdapter adapts ledger.Ledger to negotiation.LedgerService
-type negotiationLedgerAdapter struct {
-	l *ledger.Ledger
-}
-
-func (a *negotiationLedgerAdapter) Hold(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.Hold(ctx, agentAddr, amount, reference)
-}
-
-func (a *negotiationLedgerAdapter) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.ConfirmHold(ctx, agentAddr, amount, reference)
-}
-
-func (a *negotiationLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
-}
-
-func (a *negotiationLedgerAdapter) Deposit(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.Deposit(ctx, agentAddr, amount, reference)
-}
-
 // registryChecker implements watcher.AgentChecker
 type registryChecker struct {
 	r registry.Store
@@ -2279,80 +2151,6 @@ func (e *realtimeEventEmitter) EmitSessionKeyUsed(keyID, agentAddr, amount strin
 			},
 		})
 	}
-}
-
-// revenueAccumulatorAdapter adapts stakes.Service to the RevenueAccumulator
-// interface used by sessionkeys, escrow, and streams.
-type revenueAccumulatorAdapter struct {
-	stakes *stakes.Service
-}
-
-func (a *revenueAccumulatorAdapter) AccumulateRevenue(ctx context.Context, agentAddr, amount, txRef string) error {
-	return a.stakes.AccumulateRevenue(ctx, agentAddr, amount, txRef)
-}
-
-// stakesLedgerAdapter adapts ledger.Ledger to stakes.LedgerService
-type stakesLedgerAdapter struct {
-	l *ledger.Ledger
-}
-
-func (a *stakesLedgerAdapter) EscrowLock(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.EscrowLock(ctx, agentAddr, amount, reference)
-}
-
-func (a *stakesLedgerAdapter) ReleaseEscrow(ctx context.Context, fromAddr, toAddr, amount, reference string) error {
-	return a.l.ReleaseEscrow(ctx, fromAddr, toAddr, amount, reference)
-}
-
-func (a *stakesLedgerAdapter) RefundEscrow(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.RefundEscrow(ctx, agentAddr, amount, reference)
-}
-
-func (a *stakesLedgerAdapter) Deposit(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.Deposit(ctx, agentAddr, amount, reference)
-}
-
-func (a *stakesLedgerAdapter) Hold(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.Hold(ctx, agentAddr, amount, reference)
-}
-
-func (a *stakesLedgerAdapter) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.ConfirmHold(ctx, agentAddr, amount, reference)
-}
-
-func (a *stakesLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
-}
-
-// contractFormerAdapter adapts contracts.Service to negotiation.ContractFormer
-type contractFormerAdapter struct {
-	contracts *contracts.Service
-}
-
-func (a *contractFormerAdapter) FormContract(ctx context.Context, rfp *negotiation.RFP, bid *negotiation.Bid) (string, error) {
-	contract, err := a.contracts.Propose(ctx, contracts.ProposeRequest{
-		BuyerAddr:      rfp.BuyerAddr,
-		SellerAddr:     bid.SellerAddr,
-		ServiceType:    rfp.ServiceType,
-		PricePerCall:   bid.PricePerCall,
-		BuyerBudget:    bid.TotalBudget,
-		Duration:       bid.Duration,
-		MinVolume:      rfp.MinVolume,
-		SellerPenalty:  bid.SellerPenalty,
-		MaxLatencyMs:   bid.MaxLatencyMs,
-		MinSuccessRate: bid.SuccessRate,
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to propose contract: %w", err)
-	}
-
-	// Auto-accept on behalf of the seller (they agreed via their bid)
-	_, err = a.contracts.Accept(ctx, contract.ID, bid.SellerAddr)
-	if err != nil {
-		return contract.ID, fmt.Errorf("contract proposed but accept failed: %w", err)
-	}
-
-	return contract.ID, nil
 }
 
 // gatewayRecorderAdapter adapts registry.Store to gateway.TransactionRecorder

@@ -113,66 +113,6 @@ var (
 		Help: "Current number of goroutines.",
 	})
 
-	// --- Negotiation metrics ---
-
-	// RFPsPublishedTotal counts RFPs published.
-	RFPsPublishedTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "alancoin",
-		Name:      "rfps_published_total",
-		Help:      "Total RFPs published.",
-	})
-
-	// BidsPlacedTotal counts bids placed.
-	BidsPlacedTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "alancoin",
-		Name:      "bids_placed_total",
-		Help:      "Total bids placed on RFPs.",
-	})
-
-	// RFPsAwardedTotal counts RFPs awarded.
-	RFPsAwardedTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "alancoin",
-		Name:      "rfps_awarded_total",
-		Help:      "Total RFPs awarded to a winning bid.",
-	})
-
-	// RFPsExpiredTotal counts RFPs that expired.
-	RFPsExpiredTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "alancoin",
-		Name:      "rfps_expired_total",
-		Help:      "Total RFPs that expired without a winner.",
-	})
-
-	// BidScoreHistogram observes bid scores.
-	BidScoreHistogram = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: "alancoin",
-		Name:      "bid_score",
-		Help:      "Distribution of bid scores (0.0–1.0).",
-		Buckets:   []float64{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
-	})
-
-	// TimeToAwardSeconds observes time from RFP creation to award.
-	TimeToAwardSeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: "alancoin",
-		Name:      "time_to_award_seconds",
-		Help:      "Time from RFP publication to winner selection in seconds.",
-		Buckets:   []float64{60, 300, 900, 3600, 14400, 43200, 86400, 259200, 604800},
-	})
-
-	// BidsWithdrawnTotal counts bids withdrawn.
-	BidsWithdrawnTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "alancoin",
-		Name:      "bids_withdrawn_total",
-		Help:      "Total bids withdrawn by sellers.",
-	})
-
-	// BondsForfeitedTotal counts bonds forfeited.
-	BondsForfeitedTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "alancoin",
-		Name:      "bonds_forfeited_total",
-		Help:      "Total bid bonds forfeited due to withdrawal penalties.",
-	})
-
 	// --- Escrow metrics (extended) ---
 
 	EscrowCreatedTotal = prometheus.NewCounter(prometheus.CounterOpts{
@@ -204,32 +144,6 @@ var (
 		Name:      "escrow_duration_seconds",
 		Help:      "Time from escrow creation to resolution in seconds.",
 		Buckets:   []float64{10, 30, 60, 120, 300, 600, 1800, 3600, 86400},
-	})
-
-	// --- Stakes metrics ---
-
-	StakesRevenueAccumulatedTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "alancoin",
-		Name:      "stakes_revenue_accumulated_total",
-		Help:      "Total revenue accumulated for stake distributions.",
-	})
-
-	StakesDistributionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "alancoin",
-		Name:      "stakes_distributions_total",
-		Help:      "Total stake distribution cycles completed.",
-	})
-
-	StakesDistributionFailuresTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "alancoin",
-		Name:      "stakes_distribution_failures_total",
-		Help:      "Total stake distribution failures.",
-	})
-
-	StakesUndistributedBalance = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "alancoin",
-		Name:      "stakes_undistributed_balance",
-		Help:      "Current undistributed revenue across all stakes.",
 	})
 
 	// --- Session key metrics (extended) ---
@@ -270,23 +184,11 @@ func init() {
 		DBWaitCount,
 		DBWaitDuration,
 		GoroutineCount,
-		RFPsPublishedTotal,
-		BidsPlacedTotal,
-		RFPsAwardedTotal,
-		RFPsExpiredTotal,
-		BidScoreHistogram,
-		TimeToAwardSeconds,
-		BidsWithdrawnTotal,
-		BondsForfeitedTotal,
 		EscrowCreatedTotal,
 		EscrowConfirmedTotal,
 		EscrowDisputedTotal,
 		EscrowAutoReleasedTotal,
 		EscrowDuration,
-		StakesRevenueAccumulatedTotal,
-		StakesDistributionsTotal,
-		StakesDistributionFailuresTotal,
-		StakesUndistributedBalance,
 		SessionKeyTransactionsTotal,
 		SessionKeyRiskScore,
 		RiskBlocksTotal,

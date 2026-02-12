@@ -40,7 +40,6 @@ const (
 	EventAgentJoined EventType = "agent_joined"
 	EventMilestone   EventType = "milestone"
 	EventPriceAlert  EventType = "price_alert"
-	EventNegotiation EventType = "negotiation"
 )
 
 // Event represents a real-time event

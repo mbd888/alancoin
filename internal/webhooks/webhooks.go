@@ -35,16 +35,6 @@ const (
 	// Session key budget/expiration alerts
 	EventSessionKeyBudgetWarning EventType = "session_key.budget_warning"
 	EventSessionKeyExpiring      EventType = "session_key.expiring"
-
-	// Negotiation events
-	EventRFPPublished EventType = "rfp.published"
-	EventRFPAwarded   EventType = "rfp.awarded"
-	EventRFPExpired   EventType = "rfp.expired"
-	EventRFPCancelled EventType = "rfp.cancelled"
-	EventBidPlaced    EventType = "bid.placed"
-	EventBidAccepted  EventType = "bid.accepted"
-	EventBidRejected  EventType = "bid.rejected"
-	EventBidCountered EventType = "bid.countered"
 )
 
 // Event represents a webhook event
