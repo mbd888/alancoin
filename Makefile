@@ -99,7 +99,7 @@ test-unit: ## Run unit tests
 
 test-integration: ## Run integration tests (requires testnet)
 	@echo "$(GREEN)Running integration tests...$(NC)"
-	$(GOTEST) -v -race -run Integration ./test/integration/...
+	$(GOTEST) -v -race -run Integration ./...
 
 test-coverage: ## Run tests with coverage
 	@echo "$(GREEN)Running tests with coverage...$(NC)"
