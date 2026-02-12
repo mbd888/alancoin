@@ -292,18 +292,18 @@ func TestProxy_RetryOnForwardFailure(t *testing.T) {
 		t.Errorf("expected 1 retry, got %d", result.Retries)
 	}
 
-	// Payment was settled for both the failed and successful service
-	if len(ml.settlements) != 2 {
-		t.Errorf("expected 2 settlements (failed + successful), got %d", len(ml.settlements))
+	// Only the successful service should be settled — failed forward = no payment
+	if len(ml.settlements) != 1 {
+		t.Errorf("expected 1 settlement (successful only), got %d", len(ml.settlements))
 	}
 
-	// Session spend reflects both payments (0.10 failed + 0.10 success)
+	// Session spend reflects only the successful payment
 	updated, _ := svc.GetSession(context.Background(), session.ID)
-	if updated.TotalSpent != "0.200000" {
-		t.Errorf("expected 0.200000 total spent (two payments), got %s", updated.TotalSpent)
+	if updated.TotalSpent != "0.100000" {
+		t.Errorf("expected 0.100000 total spent (one payment), got %s", updated.TotalSpent)
 	}
-	if updated.RequestCount != 2 {
-		t.Errorf("expected 2 request count (failed + success), got %d", updated.RequestCount)
+	if updated.RequestCount != 1 {
+		t.Errorf("expected 1 request count (success only), got %d", updated.RequestCount)
 	}
 }
 
@@ -900,6 +900,9 @@ func TestProxy_RecorderCalledOnForwardFailure(t *testing.T) {
 	}
 	if rec.transactions[0].status != "failed" {
 		t.Errorf("expected status failed, got %s", rec.transactions[0].status)
+	}
+	if rec.transactions[0].amount != "0" {
+		t.Errorf("expected amount 0 (no payment on forward failure), got %s", rec.transactions[0].amount)
 	}
 }
 

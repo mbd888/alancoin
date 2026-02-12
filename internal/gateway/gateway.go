@@ -3,7 +3,7 @@
 // Flow:
 //  1. Agent creates session → funds moved: available → pending (hold)
 //  2. Agent sends proxy requests → gateway discovers, pays, and forwards
-//  3. Per request: ConfirmHold(buyer, price) + Deposit(seller, price) + HTTP forward
+//  3. Per request: HTTP forward → on success: SettleHold(buyer→seller, price)
 //  4. Session closed → ReleaseHold remaining unspent funds
 package gateway
 

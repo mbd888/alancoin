@@ -242,18 +242,62 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			continue
 		}
 
-		// Payment: settle from buyer's held funds to seller atomically per-request.
-		// Each SettleHold debits buyer's pending and credits seller's available in one transaction.
+		// Build reference for this request.
 		ref := fmt.Sprintf("%s:req:%d:%s", session.ID, session.RequestCount+1, candidate.ServiceID)
 		totalCostStr := usdc.Format(totalCostBig)
 
+		// Forward HTTP request FIRST — only pay on delivery.
+		start := time.Now()
+		fwdResp, fwdErr := s.forwarder.Forward(ctx, ForwardRequest{
+			Endpoint:  candidate.Endpoint,
+			Params:    req.Params,
+			FromAddr:  session.AgentAddr,
+			Amount:    candidate.Price,
+			Reference: ref,
+		})
+		latencyMs := time.Since(start).Milliseconds()
+
+		// Determine call status for contract recording
+		callStatus := "success"
+		if fwdErr != nil {
+			callStatus = "failed"
+		}
+
+		// Auto-record into micro-contract if verified
+		if isVerified && s.contracts != nil {
+			contractID, cErr := s.contracts.EnsureContract(ctx,
+				session.AgentAddr, candidate.AgentAddress, req.ServiceType,
+				candidate.Price, guaranteedRate, slaWindow)
+			if cErr == nil && contractID != "" {
+				_ = s.contracts.RecordCall(ctx, contractID, callStatus, int(latencyMs))
+			}
+		}
+
+		if fwdErr != nil {
+			// Forward failed — no payment was made. Try next candidate.
+			s.logger.Warn("forward failed, trying next candidate", "session", sessionID, "seller", candidate.AgentAddress, "error", fwdErr)
+			s.logRequest(ctx, session.ID, req.ServiceType, candidate.AgentAddress, "0", "forward_failed", 0, fwdErr.Error())
+
+			// Record failed forward for reputation (no money moved)
+			if s.recorder != nil {
+				_ = s.recorder.RecordTransaction(ctx, ref, session.AgentAddr,
+					candidate.AgentAddress, "0", candidate.ServiceID, "failed")
+			}
+
+			lastErr = fwdErr
+			retries++
+			continue
+		}
+
+		// Forward succeeded — now settle payment.
 		// Settle base price: buyer pending → seller available
 		if err := s.ledger.SettleHold(ctx, session.AgentAddr, candidate.AgentAddress, candidate.Price, ref); err != nil {
-			s.logger.Error("settle hold failed", "session", sessionID, "seller", candidate.AgentAddress, "error", err)
+			s.logger.Error("CRITICAL: settle failed after successful forward — service delivered but seller not paid",
+				"session", sessionID, "seller", candidate.AgentAddress, "error", err)
 			lastErr = &MoneyError{
 				Err:         err,
 				FundsStatus: "held_safe",
-				Recovery:    "Payment settlement failed but your funds are safely held. The gateway will try the next available service.",
+				Recovery:    "Service was delivered but payment settlement failed. Your funds are safely held. Contact support with the reference.",
 				Amount:      candidate.Price,
 				Reference:   ref,
 			}
@@ -268,80 +312,13 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			premiumStr := usdc.Format(premiumBig)
 			if err := s.ledger.SettleHold(ctx, session.AgentAddr, s.guaranteeFundAddr, premiumStr, "gpremium:"+ref); err != nil {
 				// Non-fatal: base payment succeeded, premium settle is best-effort.
-				// Do NOT add premium to settledCostBig — it was not debited from pending.
 				s.logger.Warn("guarantee premium settle failed", "session", sessionID, "premium", premiumStr, "error", err)
 			} else {
 				settledCostBig.Add(settledCostBig, premiumBig)
 			}
 		}
 
-		// Forward HTTP request
-		start := time.Now()
-		fwdResp, err := s.forwarder.Forward(ctx, ForwardRequest{
-			Endpoint:  candidate.Endpoint,
-			Params:    req.Params,
-			FromAddr:  session.AgentAddr,
-			Amount:    candidate.Price,
-			Reference: ref,
-		})
-		latencyMs := time.Since(start).Milliseconds()
-
-		// Determine call status for contract recording
-		callStatus := "success"
-		if err != nil {
-			callStatus = "failed"
-		}
-
-		// Auto-record into micro-contract if verified
-		if isVerified && s.contracts != nil {
-			contractID, cErr := s.contracts.EnsureContract(ctx,
-				session.AgentAddr, candidate.AgentAddress, req.ServiceType,
-				candidate.Price, guaranteedRate, slaWindow)
-			if cErr == nil && contractID != "" {
-				_ = s.contracts.RecordCall(ctx, contractID, callStatus, int(latencyMs))
-			}
-		}
-
-		if err != nil {
-			// Payment already happened. Service failed — reputation issue.
-			s.logger.Warn("forward failed after payment", "session", sessionID, "seller", candidate.AgentAddress, "error", err)
-			s.logRequest(ctx, session.ID, req.ServiceType, candidate.AgentAddress, totalCostStr, "forward_failed", 0, err.Error())
-
-			// Record failed transaction so seller's success rate drops
-			if s.recorder != nil {
-				_ = s.recorder.RecordTransaction(ctx, ref, session.AgentAddr,
-					candidate.AgentAddress, candidate.Price, candidate.ServiceID, "failed")
-			}
-
-			// Issue receipt for failed forward (payment was still made)
-			if s.receiptIssuer != nil {
-				_ = s.receiptIssuer.IssueReceipt(ctx, "gateway", ref, session.AgentAddr,
-					candidate.AgentAddress, candidate.Price, candidate.ServiceID, "failed", "forward_failed")
-			}
-
-			// Update session spend even though forward failed (payment was made).
-			// Use settledCostBig (not totalCostBig) to match what was actually debited from pending.
-			newSpent := new(big.Int).Add(spentBig, settledCostBig)
-			session.TotalSpent = usdc.Format(newSpent)
-			session.RequestCount++
-			session.UpdatedAt = time.Now()
-			_ = s.store.UpdateSession(ctx, session)
-
-			remaining = new(big.Int).Sub(holdBig, newSpent)
-			spentBig = newSpent
-			lastErr = &MoneyError{
-				Err:         err,
-				FundsStatus: "spent_not_delivered",
-				Recovery:    "Payment was made but the service failed to deliver. The seller's reputation has been penalized. You may dispute this transaction.",
-				Amount:      totalCostStr,
-				Reference:   ref,
-			}
-			retries++
-			continue
-		}
-
 		// Success — update session.
-		// Use settledCostBig to match what was actually debited from pending.
 		newSpent := new(big.Int).Add(spentBig, settledCostBig)
 		session.TotalSpent = usdc.Format(newSpent)
 		session.RequestCount++
