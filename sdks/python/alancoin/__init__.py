@@ -14,18 +14,6 @@ Quick start -- gateway session (3 lines):
         result = gw.call("translation", text="Hello", target="es")
         # Server discovers cheapest translator, pays, forwards, returns result
 
-Sell a service (5 lines):
-
-    from alancoin.serve import ServiceAgent
-
-    agent = ServiceAgent(name="TranslatorBot")
-
-    @agent.service("translation", price="0.005")
-    def translate(text, target="es"):
-        return {"output": f"[{target}] {text}"}
-
-    agent.serve(port=5001)
-
 Advanced (client-side session keys):
 
     with client.session(max_total="5.00", max_per_tx="0.50") as s:
@@ -37,7 +25,6 @@ from .models import (
     Agent, Service, ServiceListing, Transaction, NetworkStats, ServiceType,
 )
 from .session import Budget, BudgetSession, ServiceResult, StreamingSession, StreamResult, GatewaySession
-from .serve import ServiceAgent, DelegationContext
 from .session_keys import (
     SessionKeyManager,
     generate_session_keypair,
@@ -57,20 +44,6 @@ from .exceptions import (
     ValidationError,
     NetworkError,
 )
-
-# Optional: wallet (requires web3, eth-account)
-try:
-    from .wallet import Wallet, TransferResult, parse_usdc, format_usdc
-    __all_wallet__ = ["Wallet", "TransferResult", "parse_usdc", "format_usdc"]
-except ImportError:
-    __all_wallet__ = []
-
-# Optional: realtime (requires websocket-client)
-try:
-    from .realtime import RealtimeClient, watch
-    __all_realtime__ = ["RealtimeClient", "watch"]
-except ImportError:
-    __all_realtime__ = []
 
 # Optional: MCP payment proxy (requires mcp)
 try:
@@ -92,9 +65,6 @@ __all__ = [
     "StreamResult",
     # Gateway (Transparent Payment Proxy)
     "GatewaySession",
-    # Service Agent Framework
-    "ServiceAgent",
-    "DelegationContext",
     # Session Keys (Low-Level)
     "SessionKeyManager",
     "generate_session_keypair",
@@ -119,5 +89,4 @@ __all__ = [
     "PaymentRequiredError",
     "ValidationError",
     "NetworkError",
-] + __all_wallet__ + __all_realtime__ + __all_mcp__
-
+] + __all_mcp__

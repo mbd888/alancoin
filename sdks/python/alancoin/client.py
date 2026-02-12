@@ -20,7 +20,6 @@ from .exceptions import (
 )
 
 if TYPE_CHECKING:
-    from .wallet import Wallet, TransferResult
     from .session import Budget, BudgetSession
 
 
@@ -62,21 +61,18 @@ class Alancoin:
         self,
         base_url: str = "http://localhost:8080",
         api_key: Optional[str] = None,
-        wallet: Optional["Wallet"] = None,
         timeout: int = 30,
     ):
         """
         Initialize the Alancoin client.
-        
+
         Args:
             base_url: Alancoin API URL
             api_key: API key for authentication (optional for now)
-            wallet: Wallet for payments (optional)
             timeout: Request timeout in seconds
         """
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self.wallet = wallet
         self.timeout = timeout
         self._session = requests.Session()
         
@@ -85,67 +81,6 @@ class Alancoin:
         
         self._session.headers["Content-Type"] = "application/json"
         self._session.headers["User-Agent"] = "alancoin-python/0.1.0"
-
-    # -------------------------------------------------------------------------
-    # Payment Operations
-    # -------------------------------------------------------------------------
-
-    def pay(
-        self,
-        to: str,
-        amount: str,
-        wait_for_confirmation: bool = True,
-    ) -> "TransferResult":
-        """
-        Pay another agent.
-        
-        Requires a wallet to be configured.
-        
-        Args:
-            to: Recipient wallet address
-            amount: Amount in USDC (e.g., "0.001")
-            wait_for_confirmation: Wait for tx to be mined
-            
-        Returns:
-            TransferResult with tx hash and details
-            
-        Raises:
-            PaymentError: If payment fails
-            ValidationError: If no wallet configured
-        """
-        if not self.wallet:
-            raise ValidationError(
-                "No wallet configured. Pass a Wallet to Alancoin() to enable payments."
-            )
-        
-        return self.wallet.transfer(
-            to=to,
-            amount=amount,
-            wait_for_confirmation=wait_for_confirmation,
-        )
-
-    def balance(self, address: str = None) -> str:
-        """
-        Get USDC balance.
-        
-        Requires a wallet to be configured.
-        
-        Args:
-            address: Address to check (defaults to own wallet)
-            
-        Returns:
-            Balance as string (e.g., "1.50")
-        """
-        if not self.wallet:
-            raise ValidationError(
-                "No wallet configured. Pass a Wallet to Alancoin() to check balances."
-            )
-        return self.wallet.balance(address)
-
-    @property
-    def address(self) -> Optional[str]:
-        """Get wallet address (if wallet configured)."""
-        return self.wallet.address if self.wallet else None
 
     # -------------------------------------------------------------------------
     # Platform Info
@@ -816,68 +751,6 @@ class Alancoin:
             Delegation tree with nested children
         """
         return self._request("GET", f"/v1/sessions/{key_id}/tree")
-
-    # -------------------------------------------------------------------------
-    # Gas Abstraction
-    # -------------------------------------------------------------------------
-
-    def estimate_gas(
-        self,
-        from_address: str,
-        to_address: str,
-        amount: str,
-    ) -> dict:
-        """
-        Estimate gas cost for a transaction.
-        
-        Gas is sponsored by the platform - agents only pay USDC.
-        This returns the USDC cost of gas so you can show the total.
-        
-        Args:
-            from_address: Sender address
-            to_address: Recipient address
-            amount: Transfer amount in USDC
-            
-        Returns:
-            Gas estimate including:
-            - gasCostUsdc: Gas fee in USDC
-            - totalWithGas: Amount + gas fee
-            - gasCostEth: Actual ETH cost (for reference)
-            - ethPriceUsd: ETH/USD rate used
-            
-        Example:
-            estimate = client.estimate_gas(
-                from_address=wallet.address,
-                to_address="0x...",
-                amount="1.00"
-            )
-            print(f"Total with gas: ${estimate['estimate']['totalWithGas']}")
-        """
-        return self._request(
-            "POST",
-            "/v1/gas/estimate",
-            json={
-                "from": from_address,
-                "to": to_address,
-                "amount": amount,
-            },
-        )
-
-    def gas_status(self) -> dict:
-        """
-        Get gas sponsorship status.
-        
-        Returns:
-            Status including:
-            - sponsorshipEnabled: Whether gas sponsorship is active
-            - dailySpending: Current daily gas spend vs limit
-            
-        Example:
-            status = client.gas_status()
-            if status['sponsorshipEnabled']:
-                print("Gas is sponsored - agents pay USDC only")
-        """
-        return self._request("GET", "/v1/gas/status")
 
     # -------------------------------------------------------------------------
     # Platform Balance (Ledger)
@@ -1676,35 +1549,6 @@ class Alancoin:
             f"/v1/gateway/sessions/{session_id}/logs",
             params={"limit": limit},
         )
-
-    # -------------------------------------------------------------------------
-    # AI-Powered Search
-    # -------------------------------------------------------------------------
-
-    def search(self, query: str) -> dict:
-        """
-        Natural language search for services.
-        
-        Instead of structured queries, just describe what you need:
-        - "find me a cheap translator"
-        - "best rated inference service under $0.01"
-        - "who has the best reputation for code review?"
-        
-        Args:
-            query: Natural language search query
-            
-        Returns:
-            Search results with recommendations:
-            - recommendation: AI-generated suggestion
-            - results: Matching services sorted by relevance
-            
-        Example:
-            results = client.search("find me a cheap translator")
-            print(results['recommendation'])
-            for svc in results['results']:
-                print(f"{svc['agentName']}: {svc['serviceName']} - ${svc['price']}")
-        """
-        return self._request("GET", "/v1/search", params={"q": query})
 
     # -------------------------------------------------------------------------
     # Sessions (High-Level API)

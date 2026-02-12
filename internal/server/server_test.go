@@ -1,78 +1,33 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/mbd888/alancoin/internal/config"
-	"github.com/mbd888/alancoin/internal/wallet"
 )
 
 func init() {
 	gin.SetMode(gin.TestMode)
 }
 
-// mockWallet implements wallet.WalletService for testing
-type mockWallet struct{}
-
-func (m *mockWallet) Transfer(ctx context.Context, to common.Address, amount *big.Int) (*wallet.TransferResult, error) {
-	return &wallet.TransferResult{TxHash: "0xmock", From: "0xplatform", To: to.Hex(), Amount: "1.00"}, nil
-}
-
-func (m *mockWallet) WaitForConfirmation(ctx context.Context, txHash string, timeout time.Duration) (*wallet.TransferResult, error) {
-	return &wallet.TransferResult{TxHash: txHash}, nil
-}
-
-func (m *mockWallet) BalanceOf(ctx context.Context, addr common.Address) (*big.Int, error) {
-	return big.NewInt(1000000), nil
-}
-
-func (m *mockWallet) VerifyPayment(ctx context.Context, from string, minAmount string, txHash string) (bool, error) {
-	return true, nil
-}
-
-func (m *mockWallet) Address() string {
-	return "0x0000000000000000000000000000000000000001"
-}
-
-func (m *mockWallet) Balance(ctx context.Context) (string, error) {
-	return "1.000000", nil
-}
-
-func (m *mockWallet) WaitForConfirmationAny(ctx context.Context, txHash string, timeout time.Duration) (interface{}, error) {
-	return nil, nil
-}
-
-func (m *mockWallet) Close() error {
-	return nil
-}
-
 // testConfig returns a minimal config for testing
 func testConfig() *config.Config {
 	return &config.Config{
-		Port:         "0",
-		Env:          "development",
-		LogLevel:     "error",
-		RPCURL:       "https://sepolia.base.org",
-		ChainID:      84532,
-		PrivateKey:   "0000000000000000000000000000000000000000000000000000000000000001",
-		USDCContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-		DefaultPrice: "0.001",
+		Port:     "0",
+		Env:      "development",
+		LogLevel: "error",
 	}
 }
 
-// newTestServer creates a server with mock dependencies
+// newTestServer creates a server with in-memory dependencies (demo mode)
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
-	s, err := New(testConfig(), WithWallet(&mockWallet{}))
+	s, err := New(testConfig())
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -181,26 +136,6 @@ func TestCoreRoutesRegistered(t *testing.T) {
 		if !routeSet[e] {
 			t.Errorf("Core route %s not registered", e)
 		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Dashboard page test
-// ---------------------------------------------------------------------------
-
-func TestDashboardEndpoint(t *testing.T) {
-	s := newTestServer(t)
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/", nil)
-	s.router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected 200 for dashboard, got %d", w.Code)
-	}
-
-	if w.Header().Get("Content-Type") == "" {
-		t.Error("Expected Content-Type header")
 	}
 }
 

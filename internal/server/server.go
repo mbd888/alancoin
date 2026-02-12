@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,19 +19,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq" // PostgreSQL driver
 	"github.com/mbd888/alancoin/internal/auth"
 	"github.com/mbd888/alancoin/internal/config"
-	"github.com/mbd888/alancoin/internal/discovery"
 	"github.com/mbd888/alancoin/internal/escrow"
-	"github.com/mbd888/alancoin/internal/gas"
 	"github.com/mbd888/alancoin/internal/gateway"
 	"github.com/mbd888/alancoin/internal/ledger"
 	"github.com/mbd888/alancoin/internal/logging"
 	"github.com/mbd888/alancoin/internal/metrics"
-	"github.com/mbd888/alancoin/internal/paywall"
 	"github.com/mbd888/alancoin/internal/ratelimit"
 	"github.com/mbd888/alancoin/internal/realtime"
 	"github.com/mbd888/alancoin/internal/receipts"
@@ -43,8 +38,6 @@ import (
 	"github.com/mbd888/alancoin/internal/streams"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/validation"
-	"github.com/mbd888/alancoin/internal/wallet"
-	"github.com/mbd888/alancoin/internal/watcher"
 	"github.com/mbd888/alancoin/internal/webhooks"
 )
 
@@ -55,15 +48,12 @@ import (
 // Server wraps the HTTP server and dependencies
 type Server struct {
 	cfg                    *config.Config
-	wallet                 wallet.WalletService
 	registry               registry.Store
 	sessionMgr             *sessionkeys.Manager
 	authMgr                *auth.Manager
 	ledger                 *ledger.Ledger
-	depositWatcher         *watcher.Watcher
 	webhooks               *webhooks.Dispatcher
 	realtimeHub            *realtime.Hub
-	paymaster              gas.Paymaster
 	escrowService          *escrow.Service
 	escrowTimer            *escrow.Timer
 	multiStepEscrowService *escrow.MultiStepService
@@ -97,13 +87,6 @@ type Option func(*Server)
 func WithLogger(logger *slog.Logger) Option {
 	return func(s *Server) {
 		s.logger = logger
-	}
-}
-
-// WithWallet sets a custom wallet (for testing)
-func WithWallet(w wallet.WalletService) Option {
-	return func(s *Server) {
-		s.wallet = w
 	}
 }
 
@@ -302,54 +285,6 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.reputationStore = reputation.NewMemorySnapshotStore()
 		s.logger.Info("reputation snapshots enabled (in-memory)")
 
-		// guaranteeFundAddr set after wallet is created (below)
-	}
-
-	// Create wallet if not injected
-	if s.wallet == nil {
-		w, err := wallet.New(wallet.Config{
-			RPCURL:       cfg.RPCURL,
-			PrivateKey:   cfg.PrivateKey,
-			ChainID:      cfg.ChainID,
-			USDCContract: cfg.USDCContract,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to create wallet: %w", err)
-		}
-		s.wallet = w
-	}
-
-	// Create paymaster for gas abstraction
-	paymasterCfg := gas.DefaultConfig()
-	walletAddr := ""
-	if s.wallet != nil {
-		walletAddr = s.wallet.Address()
-	}
-	paymaster, err := gas.NewPlatformPaymaster(cfg.RPCURL, walletAddr, paymasterCfg)
-	if err != nil {
-		s.logger.Warn("failed to initialize paymaster, gas estimation disabled", "error", err)
-	} else {
-		s.paymaster = paymaster
-		s.logger.Info("gas abstraction enabled", "ethPrice", paymasterCfg.ETHPriceUSD, "wallet", walletAddr)
-	}
-
-	// Create deposit watcher (auto-credits agent balances when they deposit)
-	if s.ledger != nil && s.wallet != nil && cfg.RPCURL != "" {
-		watcherCfg := watcher.DefaultConfig()
-		watcherCfg.RPCURL = cfg.RPCURL
-		watcherCfg.USDCContract = common.HexToAddress(cfg.USDCContract)
-		watcherCfg.PlatformAddress = common.HexToAddress(s.wallet.Address())
-
-		w, err := watcher.New(watcherCfg, s.ledger, &registryChecker{s.registry}, s.logger)
-		if err != nil {
-			s.logger.Warn("failed to create deposit watcher", "error", err)
-		} else {
-			s.depositWatcher = w
-			s.logger.Info("deposit watcher configured",
-				"platform", watcherCfg.PlatformAddress.Hex(),
-				"usdc", watcherCfg.USDCContract.Hex(),
-			)
-		}
 	}
 
 	s.logger.Info("API authentication enabled")
@@ -505,17 +440,6 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/health/ready", s.readinessHandler)
 	s.router.GET("/metrics", metrics.Handler())
 
-	// PUBLIC PAGES - The "app" layer (what people browse)
-	s.router.GET("/", dashboardHandler)                                                       // Main dashboard (the polished view)
-	s.router.GET("/debug", debugPageHandler)                                                  // Debug page to diagnose issues
-	s.router.GET("/feed", feedPageHandler)                                                    // Raw transaction feed
-	s.router.GET("/timeline", timelinePageHandler)                                            // Real-time timeline (the magic)
-	s.router.GET("/agents", agentsPageHandler)                                                // Agent directory
-	s.router.GET("/services", servicesPageHandler)                                            // Service marketplace
-	s.router.GET("/agent/:address", validation.AddressParamMiddleware(), agentProfileHandler) // Individual agent profiles
-	s.router.GET("/docs", s.docsRedirectHandler)                                              // Redirect to GitHub/docs
-	s.router.Static("/assets", "./assets")                                                    // Static assets (logo, etc.)
-
 	// WebSocket for real-time streaming
 	s.router.GET("/ws", func(c *gin.Context) {
 		s.realtimeHub.HandleWebSocket(c.Writer, c.Request)
@@ -523,7 +447,6 @@ func (s *Server) setupRoutes() {
 
 	// API info endpoints
 	s.router.GET("/api", s.infoHandler)
-	s.router.GET("/wallet", s.walletInfoHandler)
 
 	// V1 API group
 	v1 := s.router.Group("/v1")
@@ -538,12 +461,6 @@ func (s *Server) setupRoutes() {
 	// Wire reputation impact tracking into escrow (dispute/confirm outcomes)
 	s.escrowService.WithReputationImpactor(reputationProvider)
 
-	// Wire on-chain transaction verifier so POST /transactions checks receipts.
-	// Only in production (with DB) — in demo mode, transactions are auto-confirmed.
-	if s.wallet != nil && s.db != nil {
-		registryHandler.SetVerifier(&walletVerifierAdapter{s.wallet})
-	}
-
 	// PUBLIC ROUTES (no auth required)
 	// These are the discovery/read endpoints
 	v1.GET("/platform", s.platformHandler)
@@ -554,10 +471,6 @@ func (s *Server) setupRoutes() {
 	v1.GET("/network/stats", cacheControl(60), registryHandler.GetNetworkStats)
 	v1.GET("/network/stats/enhanced", cacheControl(60), s.enhancedStatsHandler) // Demo-friendly extended stats
 	v1.GET("/feed", cacheControl(10), registryHandler.GetPublicFeed)
-
-	// AI-powered natural language search
-	v1.GET("/search", s.naturalLanguageSearch)
-	v1.POST("/search", s.naturalLanguageSearch)
 
 	// REGISTRATION (public but returns API key)
 	v1.POST("/agents", s.registerAgentWithAPIKey)
@@ -592,29 +505,10 @@ func (s *Server) setupRoutes() {
 
 	// Session key routes (bounded autonomy - the differentiator)
 	// Session key creation requires auth, but using a session key doesn't
-	var sessionHandler *sessionkeys.Handler
-	if s.wallet != nil {
-		// Enable real on-chain execution with balance checking
-		var balanceAdapter sessionkeys.BalanceService
-		if s.ledger != nil {
-			balanceAdapter = &ledgerAdapter{s.ledger}
-		}
-		sessionHandler = sessionkeys.NewHandlerWithExecution(
-			s.sessionMgr,
-			&walletAdapter{s.wallet},
-			&registryAdapter{s.registry},
-			balanceAdapter,
-			s.logger,
-		)
-	} else {
-		// Dry-run mode (validation only, no execution)
-		sessionHandler = sessionkeys.NewHandler(s.sessionMgr, s.logger)
-	}
+	sessionHandler := sessionkeys.NewHandler(s.sessionMgr, s.logger)
 
-	// In demo mode (no DB), skip on-chain transfers and use ledger-only accounting
-	if s.db == nil {
-		sessionHandler = sessionHandler.WithDemoMode()
-	}
+	// Always use demo mode (ledger-only accounting, no on-chain transfers)
+	sessionHandler = sessionHandler.WithDemoMode()
 
 	// Add real-time event emitter
 	if s.realtimeHub != nil {
@@ -677,13 +571,7 @@ func (s *Server) setupRoutes() {
 
 	// Ledger routes (agent balances)
 	if s.ledger != nil {
-		var ledgerHandler *ledger.Handler
-		if s.wallet != nil {
-			// Enable real withdrawals
-			ledgerHandler = ledger.NewHandlerWithWithdrawals(s.ledger, &withdrawalAdapter{s.wallet}, s.logger)
-		} else {
-			ledgerHandler = ledger.NewHandler(s.ledger, s.logger)
-		}
+		ledgerHandler := ledger.NewHandler(s.ledger, s.logger)
 		v1.GET("/agents/:address/balance", ledgerHandler.GetBalance)
 		v1.GET("/agents/:address/ledger", ledgerHandler.GetHistory)
 
@@ -703,12 +591,6 @@ func (s *Server) setupRoutes() {
 		adminLedger.Use(auth.Middleware(s.authMgr), auth.RequireAdmin())
 		ledgerHandler.RegisterAdminRoutes(adminLedger)
 
-	}
-
-	// Gas abstraction routes (agents pay USDC only, gas is sponsored)
-	if s.paymaster != nil {
-		gasHandler := gas.NewHandler(s.paymaster)
-		gasHandler.RegisterRoutes(v1)
 	}
 
 	// Reputation routes (the network moat - agents build reputation over time)
@@ -806,93 +688,6 @@ func (s *Server) setupRoutes() {
 
 	// Timeline feed
 	v1.GET("/timeline", s.getTimeline)
-
-	// Paywall config
-	paywallCfg := paywall.Config{
-		Wallet:              s.wallet,
-		DefaultPrice:        s.cfg.DefaultPrice,
-		Chain:               "base-sepolia",
-		ChainID:             s.cfg.ChainID,
-		Contract:            s.cfg.USDCContract,
-		RequireConfirmation: false,
-		ConfirmationTimeout: 30 * time.Second,
-		ValidFor:            5 * time.Minute,
-		OnPaymentReceived: func(proof *paywall.PaymentProof, route string) {
-			s.logger.Info("payment received",
-				"tx_hash", proof.TxHash,
-				"from", proof.From,
-				"route", route,
-			)
-			// Record transaction in registry
-			s.recordPayment(proof)
-		},
-		OnPaymentFailed: func(proof *paywall.PaymentProof, err error) {
-			s.logger.Warn("payment failed",
-				"tx_hash", proof.TxHash,
-				"error", err,
-			)
-		},
-	}
-
-	// Paid API routes (demo endpoints)
-	paid := s.router.Group("/api/v1")
-	paid.Use(paywall.Middleware(paywallCfg))
-	{
-		paid.GET("/joke", s.jokeHandler)
-		paid.POST("/echo", s.echoHandler)
-	}
-
-	// Premium endpoint with custom price
-	s.router.GET("/api/v1/premium",
-		paywall.MiddlewareWithPrice(paywallCfg, "0.01", "Premium content"),
-		s.premiumHandler,
-	)
-}
-
-// recordPayment records a payment in the registry (builds the data moat)
-func (s *Server) recordPayment(proof *paywall.PaymentProof) {
-	ctx := context.Background()
-
-	// Paywall already verified the payment on-chain before calling this callback
-	tx := &registry.Transaction{
-		TxHash: proof.TxHash,
-		From:   proof.From,
-		To:     s.wallet.Address(),
-		Status: "verified",
-	}
-	if err := s.registry.RecordTransaction(ctx, tx); err != nil {
-		s.logger.Error("failed to record transaction", "error", err)
-	}
-
-	// Broadcast to realtime clients
-	if s.realtimeHub != nil {
-		s.realtimeHub.BroadcastTransaction(map[string]interface{}{
-			"txHash":      proof.TxHash,
-			"from":        proof.From,
-			"to":          s.wallet.Address(),
-			"serviceType": "payment",
-			"status":      "confirmed",
-		})
-	}
-
-	// Dispatch webhook to receiver
-	if s.webhooks != nil {
-		txHashID := proof.TxHash
-		if len(txHashID) > 16 {
-			txHashID = txHashID[:16]
-		}
-		event := &webhooks.Event{
-			ID:        "evt_" + txHashID,
-			Type:      webhooks.EventPaymentReceived,
-			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"txHash": proof.TxHash,
-				"from":   proof.From,
-				"to":     s.wallet.Address(),
-			},
-		}
-		_ = s.webhooks.DispatchToAgent(ctx, s.wallet.Address(), event)
-	}
 }
 
 // registerAgentWithAPIKey handles POST /v1/agents
@@ -996,14 +791,15 @@ type HealthResponse struct {
 func (s *Server) healthHandler(c *gin.Context) {
 	checks := make(map[string]string)
 
-	// Check wallet connectivity
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
-	defer cancel()
-
-	if _, err := s.wallet.BalanceOf(ctx, common.Address{}); err != nil {
-		checks["rpc"] = "unhealthy"
-	} else {
-		checks["rpc"] = "healthy"
+	// DB check
+	if s.db != nil {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+		defer cancel()
+		if err := s.db.PingContext(ctx); err != nil {
+			checks["database"] = "unhealthy"
+		} else {
+			checks["database"] = "healthy"
+		}
 	}
 
 	status := "healthy"
@@ -1081,10 +877,6 @@ func timerStatus(t interface{}) string {
 	return "unknown"
 }
 
-func (s *Server) docsRedirectHandler(c *gin.Context) {
-	c.Redirect(http.StatusTemporaryRedirect, "https://github.com/mbd888/alancoin")
-}
-
 func (s *Server) infoHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"name":        "Alancoin",
@@ -1095,92 +887,18 @@ func (s *Server) infoHandler(c *gin.Context) {
 	})
 }
 
-// platformHandler returns platform info including deposit address
+// platformHandler returns platform info
 func (s *Server) platformHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"platform": gin.H{
-			"name":           "Alancoin",
-			"version":        "0.1.0",
-			"depositAddress": s.wallet.Address(),
-			"chain":          "base-sepolia",
-			"chainId":        s.cfg.ChainID,
-			"usdcContract":   s.cfg.USDCContract,
+			"name":    "Alancoin",
+			"version": "0.1.0",
 		},
 		"instructions": gin.H{
-			"deposit":  "Send USDC to depositAddress. Balance is auto-credited within 30 seconds.",
-			"withdraw": "POST /v1/agents/{address}/withdraw with API key auth",
-			"spend":    "Create a session key, then POST to /v1/agents/{address}/sessions/{keyId}/transact",
+			"deposit": "POST /v1/admin/deposits with admin auth",
+			"spend":   "Create a session key, then POST to /v1/agents/{address}/sessions/{keyId}/transact",
+			"gateway": "POST /v1/gateway/sessions to create a gateway session",
 		},
-	})
-}
-
-func (s *Server) walletInfoHandler(c *gin.Context) {
-	ctx := c.Request.Context()
-
-	balance, err := s.wallet.Balance(ctx)
-	if err != nil {
-		logging.L(ctx).Error("failed to get balance", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "balance_error",
-			"message": "Failed to retrieve wallet balance",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"address":  s.wallet.Address(),
-		"balance":  balance,
-		"currency": "USDC",
-		"chain":    "base-sepolia",
-		"chain_id": s.cfg.ChainID,
-	})
-}
-
-var jokes = []string{
-	"Why do programmers prefer dark mode? Because light attracts bugs.",
-	"There are only 10 types of people: those who understand binary and those who don't.",
-	"A SQL query walks into a bar, walks up to two tables and asks... 'Can I join you?'",
-	"Why do Java developers wear glasses? Because they don't C#.",
-	"!false - It's funny because it's true.",
-}
-
-func (s *Server) jokeHandler(c *gin.Context) {
-	proof := paywall.GetPaymentProof(c)
-	joke := jokes[time.Now().Unix()%int64(len(jokes))]
-
-	c.JSON(http.StatusOK, gin.H{
-		"joke":       joke,
-		"paid":       true,
-		"payment_tx": proof.TxHash,
-	})
-}
-
-func (s *Server) echoHandler(c *gin.Context) {
-	var body map[string]interface{}
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "invalid_json",
-			"message": "Request body must be valid JSON",
-		})
-		return
-	}
-
-	proof := paywall.GetPaymentProof(c)
-
-	c.JSON(http.StatusOK, gin.H{
-		"echo":       body,
-		"paid":       true,
-		"payment_tx": proof.TxHash,
-	})
-}
-
-func (s *Server) premiumHandler(c *gin.Context) {
-	proof := paywall.GetPaymentProof(c)
-
-	c.JSON(http.StatusOK, gin.H{
-		"content":    "This is premium content worth $0.01",
-		"paid":       true,
-		"payment_tx": proof.TxHash,
 	})
 }
 
@@ -1216,23 +934,6 @@ func (s *Server) enhancedStatsHandler(c *gin.Context) {
 		}
 	}
 
-	// Add gas sponsorship stats
-	if s.paymaster != nil {
-		spent, limit := s.paymaster.GetDailySpending()
-		enhanced["gasSponsoredToday"] = spent
-		enhanced["gasDailyLimit"] = limit
-
-		// Get paymaster balance
-		balance, err := s.paymaster.GetBalance(ctx)
-		if err == nil {
-			// Format as ETH
-			balanceETH := new(big.Float).SetInt(balance)
-			balanceETH.Quo(balanceETH, big.NewFloat(1e18))
-			f, _ := balanceETH.Float64()
-			enhanced["paymasterBalance"] = fmt.Sprintf("%.4f ETH", f)
-		}
-	}
-
 	c.JSON(http.StatusOK, enhanced)
 }
 
@@ -1262,19 +963,11 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() {
 		s.logger.Info("starting server",
 			"port", s.cfg.Port,
-			"wallet", s.wallet.Address(),
 		)
 		if err := s.httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- err
 		}
 	}()
-
-	// Start deposit watcher
-	if s.depositWatcher != nil {
-		if err := s.depositWatcher.Start(runCtx); err != nil {
-			s.logger.Error("failed to start deposit watcher", "error", err)
-		}
-	}
 
 	// Start realtime hub
 	if s.realtimeHub != nil {
@@ -1402,12 +1095,6 @@ func (s *Server) Shutdown() error {
 		s.logger.Info("rate limiter stopped")
 	}
 
-	// Stop deposit watcher
-	if s.depositWatcher != nil {
-		s.depositWatcher.Stop()
-		s.logger.Info("deposit watcher stopped")
-	}
-
 	// Flush tracing spans
 	if s.tracerShutdown != nil {
 		if err := s.tracerShutdown(ctx); err != nil {
@@ -1415,11 +1102,6 @@ func (s *Server) Shutdown() error {
 		} else {
 			s.logger.Info("tracer shutdown complete")
 		}
-	}
-
-	// Close wallet connection
-	if err := s.wallet.Close(); err != nil {
-		s.logger.Error("wallet close error", "error", err)
 	}
 
 	// Close database connection pool
@@ -1524,87 +1206,6 @@ func generateRequestID() string {
 	return hex.EncodeToString(bytes)
 }
 
-// -----------------------------------------------------------------------------
-// Session Key Adapters (for real on-chain execution)
-// -----------------------------------------------------------------------------
-
-// walletAdapter adapts wallet.WalletService to sessionkeys.WalletService
-type walletAdapter struct {
-	w wallet.WalletService
-}
-
-func (a *walletAdapter) Transfer(ctx context.Context, to common.Address, amount *big.Int) (*sessionkeys.TransferResult, error) {
-	result, err := a.w.Transfer(ctx, to, amount)
-	if err != nil {
-		return nil, err
-	}
-	return &sessionkeys.TransferResult{
-		TxHash: result.TxHash,
-		From:   result.From,
-		To:     result.To,
-		Amount: result.Amount,
-	}, nil
-}
-
-// registryAdapter adapts registry.Store to sessionkeys.TransactionRecorder
-type registryAdapter struct {
-	r registry.Store
-}
-
-func (a *registryAdapter) RecordTransaction(ctx context.Context, txHash, from, to, amount, serviceID string) error {
-	tx := &registry.Transaction{
-		TxHash:    txHash,
-		From:      from,
-		To:        to,
-		Amount:    amount,
-		ServiceID: serviceID,
-		Status:    "pending", // Recorded as pending; confirmed by deposit watcher or verification
-	}
-	return a.r.RecordTransaction(ctx, tx)
-}
-
-// walletVerifierAdapter adapts wallet.WalletService to registry.TxVerifier
-type walletVerifierAdapter struct {
-	w wallet.WalletService
-}
-
-func (a *walletVerifierAdapter) VerifyPayment(ctx context.Context, from string, minAmount string, txHash string) (bool, error) {
-	return a.w.VerifyPayment(ctx, from, minAmount, txHash)
-}
-
-// ledgerAdapter adapts ledger.Ledger to sessionkeys.BalanceService
-type ledgerAdapter struct {
-	l *ledger.Ledger
-}
-
-func (a *ledgerAdapter) CanSpend(ctx context.Context, agentAddr, amount string) (bool, error) {
-	return a.l.CanSpend(ctx, agentAddr, amount)
-}
-
-func (a *ledgerAdapter) Spend(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.Spend(ctx, agentAddr, amount, reference)
-}
-
-func (a *ledgerAdapter) Refund(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.Refund(ctx, agentAddr, amount, reference)
-}
-
-func (a *ledgerAdapter) Deposit(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.Deposit(ctx, agentAddr, amount, reference)
-}
-
-func (a *ledgerAdapter) Hold(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.Hold(ctx, agentAddr, amount, reference)
-}
-
-func (a *ledgerAdapter) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.ConfirmHold(ctx, agentAddr, amount, reference)
-}
-
-func (a *ledgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
-}
-
 // escrowLedgerAdapter adapts ledger.Ledger to escrow.LedgerService
 type escrowLedgerAdapter struct {
 	l *ledger.Ledger
@@ -1641,29 +1242,6 @@ func (a *streamLedgerAdapter) SettleHold(ctx context.Context, buyerAddr, sellerA
 
 func (a *streamLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
 	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
-}
-
-// registryChecker implements watcher.AgentChecker
-type registryChecker struct {
-	r registry.Store
-}
-
-func (c *registryChecker) IsAgent(ctx context.Context, address string) bool {
-	agent, err := c.r.GetAgent(ctx, address)
-	return err == nil && agent != nil
-}
-
-// withdrawalAdapter adapts wallet to ledger.WithdrawalExecutor
-type withdrawalAdapter struct {
-	w wallet.WalletService
-}
-
-func (a *withdrawalAdapter) Transfer(ctx context.Context, to common.Address, amount *big.Int) (string, error) {
-	result, err := a.w.Transfer(ctx, to, amount)
-	if err != nil {
-		return "", err
-	}
-	return result.TxHash, nil
 }
 
 // TimelineItem represents an item in the unified timeline
@@ -1714,105 +1292,6 @@ func sortTimelineItems(items []TimelineItem) {
 			}
 		}
 	}
-}
-
-// naturalLanguageSearch handles AI-powered service discovery
-// GET/POST /v1/search?q=find me a cheap translator
-func (s *Server) naturalLanguageSearch(c *gin.Context) {
-	query := c.Query("q")
-	if query == "" {
-		// Try POST body
-		var req struct {
-			Query string `json:"query"`
-		}
-		if err := c.ShouldBindJSON(&req); err == nil {
-			query = req.Query
-		}
-	}
-
-	if query == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "missing_query",
-			"message": "Provide a search query with ?q= or {\"query\": \"...\"}",
-			"examples": []string{
-				"find me a cheap translator",
-				"best rated inference service",
-				"code review under $1",
-			},
-		})
-		return
-	}
-
-	// Create discovery engine with registry adapter
-	engine := discovery.NewEngine(&registryServiceProvider{s.registry})
-
-	results, recommendation, err := engine.Recommend(c.Request.Context(), query, 10)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "search_failed",
-			"message": "Search failed: " + err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"query":          query,
-		"recommendation": recommendation,
-		"results":        results,
-		"count":          len(results),
-	})
-}
-
-// registryServiceProvider adapts registry to discovery.ServiceProvider
-type registryServiceProvider struct {
-	r registry.Store
-}
-
-func (p *registryServiceProvider) ListAllServices(ctx context.Context) ([]discovery.SearchResult, error) {
-	// Get all services from registry
-	services, err := p.r.ListServices(ctx, registry.AgentQuery{Limit: 1000})
-	if err != nil {
-		return nil, err
-	}
-
-	var results []discovery.SearchResult
-	for _, svc := range services {
-		// Get agent stats for reputation
-		agent, _ := p.r.GetAgent(ctx, svc.AgentAddress)
-
-		var rep float64 = 50 // Default
-		var successRate = 0.95
-		var txCount int
-
-		if agent != nil {
-			rep = float64(agent.Stats.TransactionCount) / 10 // Simple reputation calc
-			if rep > 100 {
-				rep = 100
-			}
-			successRate = agent.Stats.SuccessRate
-			txCount = int(agent.Stats.TransactionCount)
-		}
-
-		var priceFloat float64
-		if svc.Price != "" {
-			_, _ = fmt.Sscanf(svc.Price, "%f", &priceFloat)
-		}
-
-		results = append(results, discovery.SearchResult{
-			ServiceID:    svc.ID,
-			ServiceName:  svc.Name,
-			ServiceType:  svc.Type,
-			AgentAddress: svc.AgentAddress,
-			AgentName:    svc.AgentName,
-			Price:        svc.Price,
-			PriceFloat:   priceFloat,
-			Reputation:   rep,
-			SuccessRate:  successRate,
-			TxCount:      txCount,
-		})
-	}
-
-	return results, nil
 }
 
 // realtimeEventEmitter adapts realtime.Hub to sessionkeys.EventEmitter

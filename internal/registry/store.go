@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/mbd888/alancoin/internal/idgen"
-	"github.com/mbd888/alancoin/internal/wallet"
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 // -----------------------------------------------------------------------------
@@ -313,15 +313,15 @@ func (m *MemoryStore) ListServices(ctx context.Context, query AgentQuery) ([]Ser
 
 			// Filter by price range
 			if query.MinPrice != "" {
-				minAmount, _ := wallet.ParseUSDC(query.MinPrice)
-				svcAmount, _ := wallet.ParseUSDC(svc.Price)
+				minAmount, _ := usdc.Parse(query.MinPrice)
+				svcAmount, _ := usdc.Parse(svc.Price)
 				if minAmount != nil && svcAmount != nil && svcAmount.Cmp(minAmount) < 0 {
 					continue
 				}
 			}
 			if query.MaxPrice != "" {
-				maxAmount, _ := wallet.ParseUSDC(query.MaxPrice)
-				svcAmount, _ := wallet.ParseUSDC(svc.Price)
+				maxAmount, _ := usdc.Parse(query.MaxPrice)
+				svcAmount, _ := usdc.Parse(svc.Price)
 				if maxAmount != nil && svcAmount != nil && svcAmount.Cmp(maxAmount) > 0 {
 					continue
 				}
@@ -337,8 +337,8 @@ func (m *MemoryStore) ListServices(ctx context.Context, query AgentQuery) ([]Ser
 
 	// Sort by price (cheapest first)
 	sort.Slice(results, func(i, j int) bool {
-		priceI, _ := wallet.ParseUSDC(results[i].Price)
-		priceJ, _ := wallet.ParseUSDC(results[j].Price)
+		priceI, _ := usdc.Parse(results[i].Price)
+		priceJ, _ := usdc.Parse(results[j].Price)
 		if priceI == nil || priceJ == nil {
 			return false
 		}
@@ -383,22 +383,22 @@ func (m *MemoryStore) RecordTransaction(ctx context.Context, tx *Transaction) er
 
 	// Update volume and agent stats
 	if tx.Status == "confirmed" {
-		txAmount, _ := wallet.ParseUSDC(tx.Amount)
+		txAmount, _ := usdc.Parse(tx.Amount)
 
 		// Update network volume
-		currentVolume, _ := wallet.ParseUSDC(m.stats.TotalVolume)
+		currentVolume, _ := usdc.Parse(m.stats.TotalVolume)
 		if currentVolume != nil && txAmount != nil {
 			currentVolume.Add(currentVolume, txAmount)
-			m.stats.TotalVolume = wallet.FormatUSDC(currentVolume)
+			m.stats.TotalVolume = usdc.Format(currentVolume)
 		}
 
 		// Update sender stats (TotalSent)
 		fromAddr := strings.ToLower(tx.From)
 		if fromAgent, exists := m.agents[fromAddr]; exists {
-			fromSent, _ := wallet.ParseUSDC(fromAgent.Stats.TotalSent)
+			fromSent, _ := usdc.Parse(fromAgent.Stats.TotalSent)
 			if fromSent != nil && txAmount != nil {
 				fromSent.Add(fromSent, txAmount)
-				fromAgent.Stats.TotalSent = wallet.FormatUSDC(fromSent)
+				fromAgent.Stats.TotalSent = usdc.Format(fromSent)
 			}
 			fromAgent.Stats.TransactionCount++
 			fromAgent.Stats.LastActive = time.Now()
@@ -407,10 +407,10 @@ func (m *MemoryStore) RecordTransaction(ctx context.Context, tx *Transaction) er
 		// Update receiver stats (TotalReceived)
 		toAddr := strings.ToLower(tx.To)
 		if toAgent, exists := m.agents[toAddr]; exists {
-			toReceived, _ := wallet.ParseUSDC(toAgent.Stats.TotalReceived)
+			toReceived, _ := usdc.Parse(toAgent.Stats.TotalReceived)
 			if toReceived != nil && txAmount != nil {
 				toReceived.Add(toReceived, txAmount)
-				toAgent.Stats.TotalReceived = wallet.FormatUSDC(toReceived)
+				toAgent.Stats.TotalReceived = usdc.Format(toReceived)
 			}
 			toAgent.Stats.TransactionCount++
 			toAgent.Stats.LastActive = time.Now()
