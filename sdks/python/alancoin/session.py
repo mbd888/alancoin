@@ -940,6 +940,7 @@ class StreamingSession:
         self._tick_count = 0
         self._spent = Decimal("0")
         self._active = False
+        self._lock = threading.Lock()
 
     # -- Properties -----------------------------------------------------------
 
@@ -976,7 +977,12 @@ class StreamingSession:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self._active:
-            self.close()
+            try:
+                self.close()
+            except Exception as e:
+                logger.warning(
+                    "Failed to close stream %s: %s", self._stream_id, e
+                )
         return False
 
     def _open(self):
@@ -1024,8 +1030,9 @@ class StreamingSession:
         Raises:
             AlancoinError: If stream is closed or hold is exhausted.
         """
-        if not self._active:
-            raise AlancoinError("Stream is not active", code="stream_inactive")
+        with self._lock:
+            if not self._active:
+                raise AlancoinError("Stream is not active", code="stream_inactive")
 
         resp = self._client.tick_stream(
             stream_id=self._stream_id,
@@ -1036,8 +1043,9 @@ class StreamingSession:
         tick_data = resp.get("tick", {})
         stream_data = resp.get("stream", {})
 
-        self._tick_count = stream_data.get("tickCount", self._tick_count + 1)
-        self._spent = Decimal(stream_data.get("spentAmount", str(self._spent)))
+        with self._lock:
+            self._tick_count = stream_data.get("tickCount", self._tick_count + 1)
+            self._spent = Decimal(stream_data.get("spentAmount", str(self._spent)))
 
         return StreamResult(
             tick=tick_data,
@@ -1061,14 +1069,15 @@ class StreamingSession:
         Returns:
             Settled stream with final amounts.
         """
-        if not self._active:
-            raise AlancoinError("Stream is not active", code="stream_inactive")
+        with self._lock:
+            if not self._active:
+                raise AlancoinError("Stream is not active", code="stream_inactive")
+            self._active = False
 
         resp = self._client.close_stream(
             stream_id=self._stream_id,
             reason=reason,
         )
-        self._active = False
 
         stream = resp.get("stream", {})
         logger.info(
