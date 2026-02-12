@@ -44,6 +44,7 @@ func (h *Handler) RegisterProtectedRoutes(r *gin.RouterGroup) {
 	r.GET("/gateway/sessions/:id", h.GetSession)
 	r.DELETE("/gateway/sessions/:id", h.CloseSession)
 	r.GET("/gateway/sessions/:id/logs", h.ListLogs)
+	r.POST("/gateway/call", h.SingleCall)
 }
 
 // RegisterProxyRoute sets up the proxy endpoint (gateway token auth).
@@ -224,9 +225,6 @@ func (h *Handler) CloseSession(c *gin.Context) {
 		case errors.Is(err, ErrUnauthorized):
 			status = http.StatusForbidden
 			code = "forbidden"
-		case errors.Is(err, ErrSessionClosed):
-			status = http.StatusConflict
-			code = "already_closed"
 		}
 		resp := gin.H{"error": code, "message": err.Error()}
 		if extra := moneyFields(err); extra != nil {
@@ -238,7 +236,12 @@ func (h *Handler) CloseSession(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"session": session})
+	c.JSON(http.StatusOK, gin.H{
+		"session":       session,
+		"totalSpent":    session.TotalSpent,
+		"totalRefunded": session.Remaining(),
+		"requestCount":  session.RequestCount,
+	})
 }
 
 // Proxy handles POST /v1/gateway/proxy
@@ -285,14 +288,54 @@ func (h *Handler) Proxy(c *gin.Context) {
 		return
 	}
 
-	// Include session spend state so SDK can track without extra round-trips.
-	resp := gin.H{"result": result}
-	if session, sErr := h.service.GetSession(c.Request.Context(), sessionID); sErr == nil {
-		resp["totalSpent"] = session.TotalSpent
-		resp["remaining"] = session.Remaining()
-		resp["requestCount"] = session.RequestCount
+	c.JSON(http.StatusOK, gin.H{
+		"result":     result,
+		"totalSpent": result.TotalSpent,
+		"remaining":  result.Remaining,
+		"budgetLow":  result.BudgetLow,
+	})
+}
+
+// SingleCall handles POST /v1/gateway/call
+// One-shot: create session -> proxy -> close in a single HTTP call.
+func (h *Handler) SingleCall(c *gin.Context) {
+	var req SingleCallRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "Invalid request body: maxPrice and serviceType are required",
+		})
+		return
 	}
-	c.JSON(http.StatusOK, resp)
+
+	agentAddr := c.GetString("authAgentAddr")
+
+	result, err := h.service.SingleCall(c.Request.Context(), agentAddr, req)
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := "call_failed"
+		switch {
+		case errors.Is(err, ErrInvalidAmount):
+			status = http.StatusBadRequest
+			code = "invalid_amount"
+		case errors.Is(err, ErrNoServiceAvailable):
+			status = http.StatusNotFound
+			code = "no_service"
+		case errors.Is(err, ErrProxyFailed):
+			status = http.StatusBadGateway
+			code = "proxy_failed"
+		}
+		resp := gin.H{"error": code, "message": err.Error()}
+		if extra := moneyFields(err); extra != nil {
+			for k, v := range extra {
+				resp[k] = v
+			}
+		}
+		c.JSON(status, resp)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"result": result})
 }
 
 // ListLogs handles GET /v1/gateway/sessions/:id/logs

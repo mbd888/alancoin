@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,8 @@ import (
 	"github.com/mbd888/alancoin/internal/syncutil"
 	"github.com/mbd888/alancoin/internal/usdc"
 )
+
+var validServiceType = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,100}$`)
 
 // idempotencyEntry caches a proxy result for deduplication.
 // The done channel is closed when processing completes, waking any waiters.
@@ -26,16 +29,19 @@ type idempotencyEntry struct {
 // idempotencyCache is a bounded TTL cache for proxy result deduplication.
 // It supports in-flight dedup: concurrent requests with the same key wait
 // for the first to complete rather than both processing.
+// Max 10000 entries; expired entries are swept by the Timer.
 type idempotencyCache struct {
 	mu      sync.Mutex
 	entries map[string]*idempotencyEntry
 	ttl     time.Duration
+	maxSize int
 }
 
 func newIdempotencyCache(ttl time.Duration) *idempotencyCache {
 	return &idempotencyCache{
 		entries: make(map[string]*idempotencyEntry),
 		ttl:     ttl,
+		maxSize: 10000,
 	}
 }
 
@@ -82,6 +88,13 @@ func (c *idempotencyCache) getOrReserve(ctx context.Context, sessionID, idempote
 		}
 	}
 
+	// Reject if cache is at capacity (prevents unbounded growth).
+	if len(c.entries) >= c.maxSize {
+		c.mu.Unlock()
+		// Process normally without idempotency — better than rejecting the request.
+		return nil, nil, false
+	}
+
 	// Reserve the key for this goroutine.
 	c.entries[k] = &idempotencyEntry{
 		done:      make(chan struct{}),
@@ -123,6 +136,28 @@ func (c *idempotencyCache) cancel(sessionID, idempotencyKey string) {
 	}
 }
 
+// sweep removes all expired entries. Called by the Timer goroutine.
+func (c *idempotencyCache) sweep() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	removed := 0
+	for k, entry := range c.entries {
+		if now.After(entry.expiresAt) {
+			delete(c.entries, k)
+			removed++
+		}
+	}
+	return removed
+}
+
+// size returns the current number of entries.
+func (c *idempotencyCache) size() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.entries)
+}
+
 // Service implements gateway business logic.
 type Service struct {
 	store         Store
@@ -139,6 +174,11 @@ type Service struct {
 	// Key: sessionID, Value: *big.Int (sum of reserved amounts).
 	// Accessed under per-session lock (s.locks) for correctness.
 	pendingSpend sync.Map
+}
+
+// SweepIdempotencyCache removes expired entries. Called by the Timer.
+func (s *Service) SweepIdempotencyCache() int {
+	return s.idemCache.sweep()
 }
 
 // NewService creates a new gateway service.
@@ -206,12 +246,12 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr string, req Creat
 		return nil, fmt.Errorf("%w: maxPerRequest", ErrInvalidAmount)
 	}
 
-	if len(req.AllowedTypes) > 20 {
-		return nil, fmt.Errorf("%w: allowedTypes exceeds maximum of 20 entries", ErrInvalidAmount)
+	if len(req.AllowedTypes) > 100 {
+		return nil, fmt.Errorf("%w: allowedTypes exceeds maximum of 100 entries", ErrInvalidAmount)
 	}
 	for _, t := range req.AllowedTypes {
-		if len(t) > 100 {
-			return nil, fmt.Errorf("%w: service type exceeds maximum length of 100", ErrInvalidAmount)
+		if !validServiceType.MatchString(t) {
+			return nil, fmt.Errorf("%w: invalid service type %q (must match [a-zA-Z0-9_-]{1,100})", ErrInvalidAmount, t)
 		}
 	}
 
@@ -224,6 +264,17 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr string, req Creat
 	if expiresIn <= 0 {
 		expiresIn = time.Hour
 	}
+	if req.ExpiresInSec > 0 && req.ExpiresInSec < 60 {
+		return nil, fmt.Errorf("%w: expiresInSecs must be at least 60", ErrInvalidAmount)
+	}
+	if req.ExpiresInSec > 86400 {
+		return nil, fmt.Errorf("%w: expiresInSecs must be at most 86400 (24h)", ErrInvalidAmount)
+	}
+
+	warnAt := req.WarnAtPercent
+	if warnAt < 0 || warnAt > 100 {
+		warnAt = 0
+	}
 
 	now := time.Now()
 	session := &Session{
@@ -235,6 +286,7 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr string, req Creat
 		RequestCount:  0,
 		Strategy:      strategy,
 		AllowedTypes:  req.AllowedTypes,
+		WarnAtPercent: warnAt,
 		Status:        StatusActive,
 		ExpiresAt:     now.Add(expiresIn),
 		CreatedAt:     now,
@@ -289,8 +341,8 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr string, req Creat
 // The pendingSpend reservation in 2a prevents concurrent requests from
 // over-allocating budget. Each request's reservation is visible to others.
 func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest) (*ProxyResult, error) {
-	if len(req.ServiceType) > 100 {
-		return nil, fmt.Errorf("%w: service type exceeds maximum length of 100", ErrNoServiceAvailable)
+	if !validServiceType.MatchString(req.ServiceType) {
+		return nil, fmt.Errorf("%w: invalid service type %q (must match [a-zA-Z0-9_-]{1,100})", ErrNoServiceAvailable, req.ServiceType)
 	}
 
 	// Idempotency: if the client provides a key, check cache or reserve for processing.
@@ -535,11 +587,27 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 				candidate.AgentAddress, candidate.Price, candidate.ServiceID, "confirmed", "")
 		}
 
+		// Compute budget state for the response.
+		remainingBig := new(big.Int).Sub(holdBig, newSpent)
+		if remainingBig.Sign() < 0 {
+			remainingBig.SetInt64(0)
+		}
+		budgetLow := false
+		if session.WarnAtPercent > 0 && holdBig.Sign() > 0 {
+			threshold := new(big.Int).Mul(holdBig, big.NewInt(int64(100-session.WarnAtPercent)))
+			threshold.Div(threshold, big.NewInt(100))
+			// budgetLow if spent exceeds (100-warn)% of budget
+			budgetLow = newSpent.Cmp(threshold) >= 0
+		}
+
 		result := &ProxyResult{
 			Response:    fwdResp.Body,
 			ServiceUsed: candidate.AgentAddress,
 			ServiceName: candidate.ServiceName,
 			AmountPaid:  priceStr,
+			TotalSpent:  usdc.Format(newSpent),
+			Remaining:   usdc.Format(remainingBig),
+			BudgetLow:   budgetLow,
 			LatencyMs:   fwdResp.LatencyMs,
 			Retries:     retries,
 		}
@@ -584,8 +652,9 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 		return nil, ErrUnauthorized
 	}
 
+	// Idempotent: if already closed/expired, return current state without error.
 	if session.Status != StatusActive {
-		return nil, ErrSessionClosed
+		return session, nil
 	}
 
 	// Release only the unused portion, accounting for in-flight reservations.
@@ -608,6 +677,11 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 				Reference:   session.ID,
 			}
 		}
+	}
+
+	// Clean up pendingSpend entry if zero (no in-flight requests).
+	if pending.Sign() == 0 {
+		s.pendingSpend.Delete(sessionID)
 	}
 
 	session.Status = StatusClosed
@@ -643,6 +717,44 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 	}
 
 	return session, nil
+}
+
+// SingleCall creates an ephemeral session, proxies one request, and closes.
+// This is the simplest path: one HTTP call does everything.
+func (s *Service) SingleCall(ctx context.Context, agentAddr string, req SingleCallRequest) (*SingleCallResult, error) {
+	// Create ephemeral session sized to maxPrice.
+	session, err := s.CreateSession(ctx, agentAddr, CreateSessionRequest{
+		MaxTotal:      req.MaxPrice,
+		MaxPerRequest: req.MaxPrice,
+		ExpiresInSec:  300, // 5 minute safety net
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Proxy the request.
+	proxyResult, proxyErr := s.Proxy(ctx, session.ID, ProxyRequest{
+		ServiceType: req.ServiceType,
+		Params:      req.Params,
+	})
+
+	// Always close the session to release any unspent hold.
+	if _, closeErr := s.CloseSession(ctx, session.ID, agentAddr); closeErr != nil {
+		s.logger.Warn("failed to close ephemeral gateway session",
+			"session", session.ID, "error", closeErr)
+	}
+
+	if proxyErr != nil {
+		return nil, proxyErr
+	}
+
+	return &SingleCallResult{
+		Response:    proxyResult.Response,
+		ServiceUsed: proxyResult.ServiceUsed,
+		ServiceName: proxyResult.ServiceName,
+		AmountPaid:  proxyResult.AmountPaid,
+		LatencyMs:   proxyResult.LatencyMs,
+	}, nil
 }
 
 // GetSession returns a session by ID.
@@ -711,6 +823,11 @@ func (s *Service) AutoCloseExpired(ctx context.Context, session *Session) error 
 		if err := s.ledger.ReleaseHold(ctx, fresh.AgentAddr, unusedStr, fresh.ID); err != nil {
 			return fmt.Errorf("failed to release unused hold: %w", err)
 		}
+	}
+
+	// Clean up pendingSpend entry if zero.
+	if pending.Sign() == 0 {
+		s.pendingSpend.Delete(fresh.ID)
 	}
 
 	fresh.Status = StatusExpired

@@ -361,7 +361,7 @@ func TestCloseSession_WrongOwner(t *testing.T) {
 	}
 }
 
-func TestCloseSession_AlreadyClosed(t *testing.T) {
+func TestCloseSession_Idempotent(t *testing.T) {
 	ml := newMockLedger()
 	svc := newTestService(ml, &mockRegistry{})
 
@@ -370,11 +370,22 @@ func TestCloseSession_AlreadyClosed(t *testing.T) {
 		MaxPerRequest: "1.00",
 	})
 
-	svc.CloseSession(context.Background(), session.ID, "0xbuyer")
+	// First close
+	closed1, err := svc.CloseSession(context.Background(), session.ID, "0xbuyer")
+	if err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+	if closed1.Status != StatusClosed {
+		t.Errorf("expected closed, got %s", closed1.Status)
+	}
 
-	_, err := svc.CloseSession(context.Background(), session.ID, "0xbuyer")
-	if err == nil {
-		t.Fatal("expected error for already closed session")
+	// Second close — should be idempotent (return current state, no error)
+	closed2, err := svc.CloseSession(context.Background(), session.ID, "0xbuyer")
+	if err != nil {
+		t.Fatalf("second close should not error (idempotent), got: %v", err)
+	}
+	if closed2.Status != StatusClosed {
+		t.Errorf("expected closed, got %s", closed2.Status)
 	}
 }
 
@@ -1372,5 +1383,195 @@ func TestProxy_ConcurrentIdempotencyDedup(t *testing.T) {
 	updated, _ := svc.GetSession(ctx, session.ID)
 	if updated.TotalSpent != "0.100000" {
 		t.Errorf("expected 0.100000, got %s", updated.TotalSpent)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Single-shot call tests
+// ---------------------------------------------------------------------------
+
+func TestSingleCall_Success(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"result": "done"})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "translate", Price: "0.50", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	result, err := svc.SingleCall(context.Background(), "0xbuyer", SingleCallRequest{
+		MaxPrice:    "1.00",
+		ServiceType: "translation",
+		Params:      map[string]interface{}{"text": "hello"},
+	})
+	if err != nil {
+		t.Fatalf("single call: %v", err)
+	}
+	if result.AmountPaid != "0.500000" {
+		t.Errorf("expected 0.500000 paid, got %s", result.AmountPaid)
+	}
+	if result.ServiceUsed != "0xseller" {
+		t.Errorf("expected 0xseller, got %s", result.ServiceUsed)
+	}
+
+	// Session should have been closed (ephemeral)
+	sessions, _ := svc.ListSessions(context.Background(), "0xbuyer", 10)
+	for _, s := range sessions {
+		if s.Status == StatusActive {
+			t.Error("expected no active sessions after single call")
+		}
+	}
+}
+
+func TestSingleCall_NoService(t *testing.T) {
+	ml := newMockLedger()
+	reg := &mockRegistry{services: nil}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	_, err := svc.SingleCall(context.Background(), "0xbuyer", SingleCallRequest{
+		MaxPrice:    "1.00",
+		ServiceType: "translation",
+	})
+	if err == nil {
+		t.Fatal("expected error for no services")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Input validation tests
+// ---------------------------------------------------------------------------
+
+func TestCreateSession_InvalidServiceType(t *testing.T) {
+	ml := newMockLedger()
+	svc := newTestService(ml, &mockRegistry{})
+
+	_, err := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+		AllowedTypes:  []string{"valid-type", "invalid type with spaces"},
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid service type")
+	}
+}
+
+func TestCreateSession_ExpiryTooShort(t *testing.T) {
+	ml := newMockLedger()
+	svc := newTestService(ml, &mockRegistry{})
+
+	_, err := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+		ExpiresInSec:  10, // Too short (min 60)
+	})
+	if err == nil {
+		t.Fatal("expected error for short expiry")
+	}
+}
+
+func TestCreateSession_ExpiryTooLong(t *testing.T) {
+	ml := newMockLedger()
+	svc := newTestService(ml, &mockRegistry{})
+
+	_, err := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+		ExpiresInSec:  100000, // Too long (max 86400)
+	})
+	if err == nil {
+		t.Fatal("expected error for long expiry")
+	}
+}
+
+func TestProxy_InvalidServiceType(t *testing.T) {
+	ml := newMockLedger()
+	reg := &mockRegistry{}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	session, _ := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	_, err := svc.Proxy(context.Background(), session.ID, ProxyRequest{
+		ServiceType: "invalid type!",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid service type in proxy")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Budget warning tests
+// ---------------------------------------------------------------------------
+
+func TestProxy_BudgetLow(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.90", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	session, _ := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "1.00",
+		MaxPerRequest: "1.00",
+		WarnAtPercent: 20, // Warn when < 20% remaining
+	})
+
+	// Spend $0.90 of $1.00 → remaining $0.10 = 10% → below 20% threshold
+	result, err := svc.Proxy(context.Background(), session.ID, ProxyRequest{
+		ServiceType: "test",
+	})
+	if err != nil {
+		t.Fatalf("proxy: %v", err)
+	}
+	if !result.BudgetLow {
+		t.Error("expected budgetLow=true when remaining is 10% (below 20% threshold)")
+	}
+	if result.TotalSpent != "0.900000" {
+		t.Errorf("expected totalSpent 0.900000, got %s", result.TotalSpent)
+	}
+	if result.Remaining != "0.100000" {
+		t.Errorf("expected remaining 0.100000, got %s", result.Remaining)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Idempotency cache sweep test
+// ---------------------------------------------------------------------------
+
+func TestIdempotencyCacheSweep(t *testing.T) {
+	cache := newIdempotencyCache(50 * time.Millisecond) // 50ms TTL
+
+	// Reserve and complete an entry
+	_, _, found := cache.getOrReserve(context.Background(), "s1", "key1")
+	if found {
+		t.Fatal("should not find entry on first call")
+	}
+	cache.complete("s1", "key1", &ProxyResult{AmountPaid: "0.10"})
+
+	// Should be in cache
+	if cache.size() != 1 {
+		t.Errorf("expected 1 entry, got %d", cache.size())
+	}
+
+	// Wait for TTL to expire
+	time.Sleep(60 * time.Millisecond)
+
+	// Sweep should remove expired entry
+	removed := cache.sweep()
+	if removed != 1 {
+		t.Errorf("expected 1 removed, got %d", removed)
+	}
+	if cache.size() != 0 {
+		t.Errorf("expected 0 entries after sweep, got %d", cache.size())
 	}
 }

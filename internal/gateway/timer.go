@@ -93,4 +93,9 @@ func (t *Timer) sweepExpired(ctx context.Context) {
 			"held", session.MaxTotal,
 		)
 	}
+
+	// Sweep expired idempotency cache entries to prevent unbounded growth.
+	if removed := t.service.SweepIdempotencyCache(); removed > 0 {
+		t.logger.Info("swept idempotency cache", "removed", removed)
+	}
 }

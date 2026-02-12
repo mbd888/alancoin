@@ -53,8 +53,9 @@ type Session struct {
 	MaxPerRequest string    `json:"maxPerRequest"` // Max per single proxy call
 	TotalSpent    string    `json:"totalSpent"`    // Accumulated spend
 	RequestCount  int       `json:"requestCount"`
-	Strategy      string    `json:"strategy"`               // cheapest, reputation, best_value
-	AllowedTypes  []string  `json:"allowedTypes,omitempty"` // Empty = all types allowed
+	Strategy      string    `json:"strategy"`                // cheapest, reputation, best_value
+	AllowedTypes  []string  `json:"allowedTypes,omitempty"`  // Empty = all types allowed
+	WarnAtPercent int       `json:"warnAtPercent,omitempty"` // Alert when remaining drops below this % (e.g., 20)
 	Status        Status    `json:"status"`
 	ExpiresAt     time.Time `json:"expiresAt"`
 	CreatedAt     time.Time `json:"createdAt"`
@@ -98,6 +99,9 @@ type ProxyResult struct {
 	ServiceUsed string                 `json:"serviceUsed"` // Agent address that served
 	ServiceName string                 `json:"serviceName"`
 	AmountPaid  string                 `json:"amountPaid"`
+	TotalSpent  string                 `json:"totalSpent"`
+	Remaining   string                 `json:"remaining"`
+	BudgetLow   bool                   `json:"budgetLow,omitempty"` // True when remaining < WarnAtPercent
 	LatencyMs   int64                  `json:"latencyMs"`
 	Retries     int                    `json:"retries"`
 }
@@ -122,6 +126,7 @@ type CreateSessionRequest struct {
 	Strategy      string   `json:"strategy"` // default: "cheapest"
 	AllowedTypes  []string `json:"allowedTypes,omitempty"`
 	ExpiresInSec  int      `json:"expiresInSecs,omitempty"` // 0 = 1 hour default
+	WarnAtPercent int      `json:"warnAtPercent,omitempty"` // Alert when remaining drops below this %
 }
 
 // LedgerService abstracts ledger operations.
@@ -158,6 +163,23 @@ type MoneyError struct {
 
 func (e *MoneyError) Error() string { return e.Err.Error() }
 func (e *MoneyError) Unwrap() error { return e.Err }
+
+// SingleCallRequest is the payload for a one-shot gateway call.
+// Creates an ephemeral session, proxies, and closes in one round trip.
+type SingleCallRequest struct {
+	MaxPrice    string                 `json:"maxPrice" binding:"required"`
+	ServiceType string                 `json:"serviceType" binding:"required"`
+	Params      map[string]interface{} `json:"params"`
+}
+
+// SingleCallResult wraps the proxy result with session lifecycle info.
+type SingleCallResult struct {
+	Response    map[string]interface{} `json:"response"`
+	ServiceUsed string                 `json:"serviceUsed"`
+	ServiceName string                 `json:"serviceName"`
+	AmountPaid  string                 `json:"amountPaid"`
+	LatencyMs   int64                  `json:"latencyMs"`
+}
 
 // ServiceCandidate is a discovered service suitable for proxying.
 type ServiceCandidate struct {
