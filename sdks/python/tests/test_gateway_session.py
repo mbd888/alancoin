@@ -50,10 +50,9 @@ class TestGatewayClientMethods:
             f"{self.BASE_URL}/v1/gateway/sessions",
             match=[
                 matchers.json_params_matcher({
-                    "budget": "10.00",
-                    "expiresIn": "2h",
-                    "allowedServices": ["translation", "inference"],
-                    "allowedRecipients": ["0xseller1", "0xseller2"],
+                    "maxTotal": "10.00",
+                    "expiresInSecs": 7200,
+                    "allowedTypes": ["translation", "inference"],
                     "maxPerRequest": "1.00",
                 })
             ],
@@ -72,7 +71,6 @@ class TestGatewayClientMethods:
             max_total="10.00",
             expires_in="2h",
             allowed_services=["translation", "inference"],
-            allowed_recipients=["0xseller1", "0xseller2"],
             max_per_tx="1.00",
         )
 
@@ -93,9 +91,17 @@ class TestGatewayClientMethods:
                 matchers.header_matcher({"X-Gateway-Token": "gw_token_123"}),
             ],
             json={
-                "output": "hola",
-                "cost": "0.50",
-                "serviceUsed": "0xseller",
+                "result": {
+                    "response": {"output": "hola"},
+                    "amountPaid": "0.500000",
+                    "serviceUsed": "0xseller",
+                    "serviceName": "translator",
+                    "latencyMs": 42,
+                    "retries": 0,
+                },
+                "totalSpent": "0.500000",
+                "remaining": "9.500000",
+                "requestCount": 1,
             },
             status=200,
         )
@@ -107,8 +113,8 @@ class TestGatewayClientMethods:
             target="es",
         )
 
-        assert result["output"] == "hola"
-        assert result["cost"] == "0.50"
+        assert result["result"]["response"]["output"] == "hola"
+        assert result["result"]["amountPaid"] == "0.500000"
 
     @responses.activate
     def test_close_gateway_session(self, client):
@@ -368,15 +374,22 @@ class TestGatewaySessionClass:
             status=201,
         )
 
-        # Proxy call
+        # Proxy call — server returns wrapped format
         responses.add(
             responses.POST,
             f"{self.BASE_URL}/v1/gateway/proxy",
             json={
-                "output": "translated text",
-                "cost": "0.50",
-                "serviceUsed": "0xseller",
-                "txHash": "0xabc",
+                "result": {
+                    "response": {"output": "translated text"},
+                    "amountPaid": "0.500000",
+                    "serviceUsed": "0xseller",
+                    "serviceName": "translator",
+                    "latencyMs": 42,
+                    "retries": 0,
+                },
+                "totalSpent": "0.500000",
+                "remaining": "4.500000",
+                "requestCount": 1,
             },
             status=200,
         )
@@ -393,9 +406,8 @@ class TestGatewaySessionClass:
             result = gw.call("translation", text="hello", target="es")
 
             assert result["output"] == "translated text"
-            assert result["cost"] == "0.50"
-            assert gw.total_spent == "0.50"
-            assert gw.remaining == "4.50"
+            assert gw.total_spent == "0.500000"
+            assert gw.remaining == "4.500000"
             assert gw.request_count == 1
 
     @responses.activate
@@ -421,7 +433,16 @@ class TestGatewaySessionClass:
         responses.add(
             responses.POST,
             f"{self.BASE_URL}/v1/gateway/proxy",
-            json={"output": "result1", "cost": "1.50"},
+            json={
+                "result": {
+                    "response": {"output": "result1"},
+                    "amountPaid": "1.500000",
+                    "serviceUsed": "0xseller",
+                },
+                "totalSpent": "1.500000",
+                "remaining": "8.500000",
+                "requestCount": 1,
+            },
             status=200,
         )
 
@@ -429,7 +450,16 @@ class TestGatewaySessionClass:
         responses.add(
             responses.POST,
             f"{self.BASE_URL}/v1/gateway/proxy",
-            json={"output": "result2", "cost": "2.25"},
+            json={
+                "result": {
+                    "response": {"output": "result2"},
+                    "amountPaid": "2.250000",
+                    "serviceUsed": "0xseller",
+                },
+                "totalSpent": "3.750000",
+                "remaining": "6.250000",
+                "requestCount": 2,
+            },
             status=200,
         )
 
@@ -443,13 +473,13 @@ class TestGatewaySessionClass:
 
         with client.gateway(max_total="10.00") as gw:
             gw.call("translation", text="hello")
-            assert gw.total_spent == "1.50"
-            assert gw.remaining == "8.50"
+            assert gw.total_spent == "1.500000"
+            assert gw.remaining == "8.500000"
             assert gw.request_count == 1
 
             gw.call("inference", text="analyze")
-            assert gw.total_spent == "3.75"
-            assert gw.remaining == "6.25"
+            assert gw.total_spent == "3.750000"
+            assert gw.remaining == "6.250000"
             assert gw.request_count == 2
 
     @responses.activate
@@ -582,15 +612,25 @@ class TestGatewaySessionClass:
             status=201,
         )
 
-        # Proxy call (happens on server, so local state is out of sync)
+        # Proxy call
         responses.add(
             responses.POST,
             f"{self.BASE_URL}/v1/gateway/proxy",
-            json={"output": "ok", "cost": "2.50"},
+            json={
+                "result": {
+                    "response": {"output": "ok"},
+                    "amountPaid": "2.500000",
+                    "serviceUsed": "0xseller",
+                },
+                "totalSpent": "2.500000",
+                "remaining": "7.500000",
+                "requestCount": 1,
+            },
             status=200,
         )
 
         # Refresh - simulates fetching updated state from server
+        # (e.g., another concurrent client spent more)
         responses.add(
             responses.GET,
             f"{self.BASE_URL}/v1/gateway/sessions/gw_refresh",
@@ -598,7 +638,7 @@ class TestGatewaySessionClass:
                 "session": {
                     "id": "gw_refresh",
                     "maxTotal": "10.00",
-                    "spentAmount": "5.00",  # Imagine another client spent more
+                    "totalSpent": "5.00",
                     "status": "active",
                 }
             },
@@ -615,12 +655,12 @@ class TestGatewaySessionClass:
 
         with client.gateway(max_total="10.00") as gw:
             gw.call("translation", text="hello")
-            assert gw.total_spent == "2.50"
+            assert gw.total_spent == "2.500000"
 
             # Refresh from server
             session_data = gw.refresh()
             assert gw.total_spent == "5.00"  # Updated from server
-            assert session_data["spentAmount"] == "5.00"
+            assert session_data["totalSpent"] == "5.00"
 
     @responses.activate
     def test_gateway_session_exception_in_context_still_closes(self, client):
@@ -664,10 +704,9 @@ class TestGatewaySessionClass:
             f"{self.BASE_URL}/v1/gateway/sessions",
             match=[
                 matchers.json_params_matcher({
-                    "budget": "15.00",
-                    "expiresIn": "3h",
-                    "allowedServices": ["translation"],
-                    "allowedRecipients": ["0xseller"],
+                    "maxTotal": "15.00",
+                    "expiresInSecs": 10800,
+                    "allowedTypes": ["translation"],
                     "maxPerRequest": "2.00",
                 })
             ],
@@ -694,7 +733,6 @@ class TestGatewaySessionClass:
             max_per_tx="2.00",
             expires_in="3h",
             allowed_services=["translation"],
-            allowed_recipients=["0xseller"],
         ) as gw:
             assert gw.session_id == "gw_params"
 
@@ -719,7 +757,16 @@ class TestGatewaySessionClass:
         responses.add(
             responses.POST,
             f"{self.BASE_URL}/v1/gateway/proxy",
-            json={"output": "ok", "cost": "3.50"},
+            json={
+                "result": {
+                    "response": {"output": "ok"},
+                    "amountPaid": "3.500000",
+                    "serviceUsed": "0xseller",
+                },
+                "totalSpent": "3.500000",
+                "remaining": "16.500000",
+                "requestCount": 1,
+            },
             status=200,
         )
 
@@ -740,6 +787,6 @@ class TestGatewaySessionClass:
 
             # After a call
             gw.call("test", param="value")
-            assert gw.total_spent == "3.50"
-            assert gw.remaining == "16.50"
+            assert gw.total_spent == "3.500000"
+            assert gw.remaining == "16.500000"
             assert gw.request_count == 1

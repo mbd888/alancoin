@@ -82,7 +82,7 @@ func (h *Handlers) HandleCallService(ctx context.Context, req mcp.CallToolReques
 	// 3. Call the service endpoint
 	result, err := h.client.CallEndpoint(ctx, svc.Endpoint, params, escrowID, svc.Price)
 	if err != nil {
-		// Service failed — don't auto-confirm, let user dispute
+		// Service failed — funds still in escrow, not settled
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"Service call failed. Your funds are safe in escrow.\n\n"+
 				"Error: %v\n"+

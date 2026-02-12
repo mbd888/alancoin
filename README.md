@@ -12,15 +12,15 @@ Alancoin is a transparent payment proxy for autonomous AI agents. An agent sends
 ```python
 from alancoin import Alancoin
 
-client = Alancoin("http://localhost:8080")
+client = Alancoin("http://localhost:8080", api_key="ak_...")
 
-with client.session(max_total="5.00", max_per_tx="0.50") as session:
-    result = session.call_service("translation", text="Hello world", target="es")
-    # -> {"translated": "Hola mundo"}
-    # $0.005 paid to TranslatorBot, escrowed and confirmed, all invisible
+with client.gateway(max_total="5.00") as gw:
+    result = gw.call("translation", text="Hello world", target="es")
+    # -> {"output": "Hola mundo", "_gateway": {"amountPaid": "0.005", ...}}
+    # Server discovered the cheapest translator, paid, forwarded, settled
 ```
 
-That's a budget-bounded session. It creates a cryptographic session key on entry, enforces spending limits on every call, and revokes the key on exit. Three lines to go from zero to paying for AI services.
+That's a gateway session. Server holds your budget, discovers services, handles payment, and returns the result. One round trip per call, no wallets or session keys on the client side.
 
 ## Why This Exists
 
@@ -70,32 +70,28 @@ The `@agent.service` decorator handles registration, payment verification (402 p
 
 ## Buy Services Three Ways
 
-### 1. Budget Session (recommended)
+### 1. Gateway Session (recommended)
 
-The simplest path. Create a session with spending constraints. Call services. The session handles discovery, payment, and cleanup.
+The simplest path. The server holds your budget, discovers services, handles payment, and returns results. One round trip per call.
 
 ```python
-with client.session(max_total="1.00", max_per_tx="0.25") as session:
-    # Single call
-    summary = session.call_service("summarization", text=long_document)
+with client.gateway(max_total="1.00") as gw:
+    # Single call -- server discovers, pays, forwards, settles
+    result = gw.call("translation", text="Hello world", target="es")
 
-    # Pipeline across multiple agents
-    result = session.pipeline([
-        {"type": "summarization", "params": {"text": document}},       # Agent A: $0.008
-        {"type": "translation", "params": {"text": "$prev.summary"}},  # Agent B: $0.005
-        {"type": "extraction", "params": {"text": "$prev.translated"}},# Agent C: $0.010
-    ])
+    # Chain calls manually -- each step's output feeds the next
+    summary = gw.call("inference", text=document, task="summarize")
+    translated = gw.call("translation", text=summary["output"], target="es")
+    entities = gw.call("inference", text=translated["output"], task="extract_entities")
     # Total: $0.023 across 3 agents, all within the $1.00 budget
 ```
-
-`$prev` passes the previous step's output to the next. `$prev.summary` accesses a specific field. The pipeline stops immediately if any step would exceed the budget.
 
 ### 2. Streaming Micropayments
 
 Pay per token, per sentence, per tick -- as value is delivered, not upfront.
 
 ```python
-with client.stream(seller="0xTranslator", hold_amount="1.00", price_per_tick="0.001") as stream:
+with client.stream(seller_addr="0xTranslator", hold_amount="1.00", price_per_tick="0.001") as stream:
     for chunk in document.chunks():
         result = stream.tick(metadata=chunk.id)
     # 350 ticks later: $0.35 to seller, $0.65 refunded to buyer
@@ -103,17 +99,14 @@ with client.stream(seller="0xTranslator", hold_amount="1.00", price_per_tick="0.
 
 The buyer holds funds at stream open. Each tick deducts from the hold. On close (or on exit from the context manager), spent funds settle to the seller and unspent funds return to the buyer. Stale streams auto-close if no tick arrives within the timeout.
 
-### 3. Direct Escrow
+### 3. Budget Session (advanced -- client-side session keys)
 
-For high-value or asynchronous work where the buyer needs to verify quality before releasing payment.
+For agents that need client-side cryptographic session keys and direct endpoint calls with escrow protection.
 
-```
-Buyer creates escrow ($5.00 for "Market Analysis Report")
-  -> Funds locked - neither party can touch them
-  -> Seller delivers the report
-  -> Buyer reviews and confirms -> funds release to seller
-  -> Or: buyer disputes -> funds return to buyer
-  -> Auto-release after timeout protects sellers from ghost buyers
+```python
+with client.session(max_total="1.00", max_per_tx="0.25") as session:
+    result = session.call_service("translation", text="Hello", target="es")
+    # Creates ECDSA session key, discovers, pays via escrow, calls endpoint, revokes key on exit
 ```
 
 ## Session Keys: Bounded Autonomy
@@ -314,21 +307,16 @@ pip install alancoin  # or: cd sdks/python && pip install -e .
 ```python
 from alancoin import Alancoin
 
-client = Alancoin("http://localhost:8080")
+client = Alancoin("http://localhost:8080", api_key="ak_...")
 
-# Register
-agent = client.register_agent("0xMyAgent", "ResearchBot")
+# Gateway session (recommended)
+with client.gateway(max_total="5.00") as gw:
+    result = gw.call("translation", text="Hello", target="es")
+    print(result["output"])
+    print(f"Spent: ${gw.total_spent}, Remaining: ${gw.remaining}")
 
-# Fund
-client.deposit("0xMyAgent", "100.00")
-
-# Spend
-with client.session(max_total="5.00", max_per_tx="1.00") as session:
-    result = session.call_service("translation", text="Hello", target="es")
-    print(result["translated"])
-
-# Stream
-with client.stream(seller="0xTranslator", hold_amount="1.00", price_per_tick="0.001") as s:
+# Streaming micropayments
+with client.stream(seller_addr="0xTranslator", hold_amount="1.00", price_per_tick="0.001") as s:
     for chunk in chunks:
         s.tick(metadata=chunk.id)
     print(f"Spent ${s.spent} for {s.tick_count} ticks")

@@ -685,22 +685,7 @@ func (r *mockGatewayRecorder) RecordTransaction(_ context.Context, txHash, from,
 	return nil
 }
 
-// --- Mock Revenue Accumulator ---
-
-type mockRevenue struct {
-	accumulated []revenueEntry
-}
-
-type revenueEntry struct {
-	agentAddr, amount, txRef string
-}
-
-func (r *mockRevenue) AccumulateRevenue(_ context.Context, agentAddr, amount, txRef string) error {
-	r.accumulated = append(r.accumulated, revenueEntry{agentAddr, amount, txRef})
-	return nil
-}
-
-// --- Timer / AutoClose / Recorder / Revenue Tests ---
+// --- Timer / AutoClose / Recorder Tests ---
 
 func TestAutoCloseExpired(t *testing.T) {
 	ml := newMockLedger()
@@ -906,77 +891,6 @@ func TestProxy_RecorderCalledOnForwardFailure(t *testing.T) {
 	}
 }
 
-func TestProxy_RevenueAccumulated(t *testing.T) {
-	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
-	defer server.Close()
-
-	ml := newMockLedger()
-	rev := &mockRevenue{}
-	reg := &mockRegistry{
-		services: []ServiceCandidate{
-			{AgentAddress: "0xseller", ServiceID: "svc1", Price: "0.50", Endpoint: server.URL},
-		},
-	}
-
-	svc := newTestServiceWithLogger(ml, reg)
-	svc.WithRevenueAccumulator(rev)
-
-	ctx := context.Background()
-	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
-		MaxTotal:      "10.00",
-		MaxPerRequest: "1.00",
-	})
-
-	_, err := svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "translation"})
-	if err != nil {
-		t.Fatalf("proxy: %v", err)
-	}
-
-	if len(rev.accumulated) != 1 {
-		t.Fatalf("expected 1 revenue entry, got %d", len(rev.accumulated))
-	}
-	entry := rev.accumulated[0]
-	if entry.agentAddr != "0xseller" {
-		t.Errorf("expected 0xseller, got %s", entry.agentAddr)
-	}
-	if entry.amount != "0.50" {
-		t.Errorf("expected 0.50, got %s", entry.amount)
-	}
-	if !strings.Contains(entry.txRef, "gateway_proxy:") {
-		t.Errorf("expected txRef to contain gateway_proxy: prefix, got %s", entry.txRef)
-	}
-}
-
-func TestProxy_RevenueNotAccumulatedOnFailure(t *testing.T) {
-	failServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer failServer.Close()
-
-	ml := newMockLedger()
-	rev := &mockRevenue{}
-	reg := &mockRegistry{
-		services: []ServiceCandidate{
-			{AgentAddress: "0xfail", ServiceID: "svc1", Price: "0.10", Endpoint: failServer.URL},
-		},
-	}
-
-	svc := newTestServiceWithLogger(ml, reg)
-	svc.WithRevenueAccumulator(rev)
-
-	ctx := context.Background()
-	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
-		MaxTotal:      "10.00",
-		MaxPerRequest: "1.00",
-	})
-
-	_, _ = svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "test"})
-
-	if len(rev.accumulated) != 0 {
-		t.Errorf("expected 0 revenue entries on failure, got %d", len(rev.accumulated))
-	}
-}
-
 func TestTimerSweepsExpiredSessions(t *testing.T) {
 	ml := newMockLedger()
 	store := NewMemoryStore()
@@ -1012,5 +926,151 @@ func TestTimerSweepsExpiredSessions(t *testing.T) {
 	}
 	if len(ml.holds) != 0 {
 		t.Errorf("expected holds released, got %d", len(ml.holds))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Idempotency tests
+// ---------------------------------------------------------------------------
+
+func TestProxy_IdempotencyKey_ReturnsCachedResult(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"call": callCount})
+	}))
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.10", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	// First call with idempotency key
+	r1, err := svc.Proxy(ctx, session.ID, ProxyRequest{
+		ServiceType:    "test",
+		IdempotencyKey: "key-1",
+	})
+	if err != nil {
+		t.Fatalf("first proxy: %v", err)
+	}
+
+	// Second call with SAME idempotency key — should return cached result
+	r2, err := svc.Proxy(ctx, session.ID, ProxyRequest{
+		ServiceType:    "test",
+		IdempotencyKey: "key-1",
+	})
+	if err != nil {
+		t.Fatalf("second proxy: %v", err)
+	}
+
+	// Should have the same result (same AmountPaid, etc.)
+	if r1.AmountPaid != r2.AmountPaid {
+		t.Errorf("expected same amount, got %s vs %s", r1.AmountPaid, r2.AmountPaid)
+	}
+
+	// Service should only have been called ONCE
+	if callCount != 1 {
+		t.Errorf("expected service called once, got %d", callCount)
+	}
+
+	// Only one settlement should exist
+	if len(ml.settlements) != 1 {
+		t.Errorf("expected 1 settlement (not double-charged), got %d", len(ml.settlements))
+	}
+
+	// Session spend should only reflect one charge
+	updated, _ := svc.GetSession(ctx, session.ID)
+	if updated.TotalSpent != "0.100000" {
+		t.Errorf("expected 0.100000 total spent (single charge), got %s", updated.TotalSpent)
+	}
+}
+
+func TestProxy_DifferentIdempotencyKey_ProcessesBoth(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.10", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	// Two calls with DIFFERENT keys — both should process
+	_, err := svc.Proxy(ctx, session.ID, ProxyRequest{
+		ServiceType:    "test",
+		IdempotencyKey: "key-A",
+	})
+	if err != nil {
+		t.Fatalf("first proxy: %v", err)
+	}
+
+	_, err = svc.Proxy(ctx, session.ID, ProxyRequest{
+		ServiceType:    "test",
+		IdempotencyKey: "key-B",
+	})
+	if err != nil {
+		t.Fatalf("second proxy: %v", err)
+	}
+
+	// Both should have settled
+	if len(ml.settlements) != 2 {
+		t.Errorf("expected 2 settlements, got %d", len(ml.settlements))
+	}
+
+	updated, _ := svc.GetSession(ctx, session.ID)
+	if updated.TotalSpent != "0.200000" {
+		t.Errorf("expected 0.200000, got %s", updated.TotalSpent)
+	}
+}
+
+func TestProxy_NoIdempotencyKey_ProcessesEveryTime(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.10", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	// Two calls without idempotency key — both should process
+	for i := 0; i < 3; i++ {
+		_, err := svc.Proxy(ctx, session.ID, ProxyRequest{
+			ServiceType: "test",
+		})
+		if err != nil {
+			t.Fatalf("proxy %d: %v", i, err)
+		}
+	}
+
+	if len(ml.settlements) != 3 {
+		t.Errorf("expected 3 settlements, got %d", len(ml.settlements))
 	}
 }

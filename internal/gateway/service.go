@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mbd888/alancoin/internal/idgen"
@@ -13,20 +14,59 @@ import (
 	"github.com/mbd888/alancoin/internal/usdc"
 )
 
+// idempotencyEntry caches a proxy result for deduplication.
+type idempotencyEntry struct {
+	result    *ProxyResult
+	err       error
+	expiresAt time.Time
+}
+
+// idempotencyCache is a bounded TTL cache for proxy result deduplication.
+type idempotencyCache struct {
+	entries sync.Map
+	ttl     time.Duration
+}
+
+func newIdempotencyCache(ttl time.Duration) *idempotencyCache {
+	return &idempotencyCache{ttl: ttl}
+}
+
+func (c *idempotencyCache) key(sessionID, idempotencyKey string) string {
+	return sessionID + ":" + idempotencyKey
+}
+
+func (c *idempotencyCache) get(sessionID, idempotencyKey string) (*ProxyResult, error, bool) {
+	v, ok := c.entries.Load(c.key(sessionID, idempotencyKey))
+	if !ok {
+		return nil, nil, false
+	}
+	entry := v.(*idempotencyEntry)
+	if time.Now().After(entry.expiresAt) {
+		c.entries.Delete(c.key(sessionID, idempotencyKey))
+		return nil, nil, false
+	}
+	return entry.result, entry.err, true
+}
+
+func (c *idempotencyCache) set(sessionID, idempotencyKey string, result *ProxyResult, err error) {
+	c.entries.Store(c.key(sessionID, idempotencyKey), &idempotencyEntry{
+		result:    result,
+		err:       err,
+		expiresAt: time.Now().Add(c.ttl),
+	})
+}
+
 // Service implements gateway business logic.
 type Service struct {
-	store             Store
-	resolver          *Resolver
-	forwarder         *Forwarder
-	ledger            LedgerService
-	recorder          TransactionRecorder
-	revenue           RevenueAccumulator
-	verification      VerificationChecker
-	contracts         ContractManager
-	receiptIssuer     ReceiptIssuer
-	guaranteeFundAddr string // platform address receiving guarantee premiums
-	logger            *slog.Logger
-	locks             syncutil.ShardedMutex
+	store         Store
+	resolver      *Resolver
+	forwarder     *Forwarder
+	ledger        LedgerService
+	recorder      TransactionRecorder
+	receiptIssuer ReceiptIssuer
+	logger        *slog.Logger
+	locks         syncutil.ShardedMutex
+	idemCache     *idempotencyCache
 }
 
 // NewService creates a new gateway service.
@@ -37,6 +77,7 @@ func NewService(store Store, resolver *Resolver, forwarder *Forwarder, ledger Le
 		forwarder: forwarder,
 		ledger:    ledger,
 		logger:    logger,
+		idemCache: newIdempotencyCache(10 * time.Minute),
 	}
 }
 
@@ -46,33 +87,9 @@ func (s *Service) WithRecorder(r TransactionRecorder) *Service {
 	return s
 }
 
-// WithRevenueAccumulator adds a revenue accumulator for stakes interception.
-func (s *Service) WithRevenueAccumulator(r RevenueAccumulator) *Service {
-	s.revenue = r
-	return s
-}
-
-// WithVerification adds a verification checker for guarantee premium handling.
-func (s *Service) WithVerification(v VerificationChecker) *Service {
-	s.verification = v
-	return s
-}
-
-// WithContracts adds a contract manager for auto-contract creation.
-func (s *Service) WithContracts(c ContractManager) *Service {
-	s.contracts = c
-	return s
-}
-
 // WithReceiptIssuer adds a receipt issuer for cryptographic payment proofs.
 func (s *Service) WithReceiptIssuer(r ReceiptIssuer) *Service {
 	s.receiptIssuer = r
-	return s
-}
-
-// WithGuaranteeFundAddr sets the platform address that receives guarantee premiums.
-func (s *Service) WithGuaranteeFundAddr(addr string) *Service {
-	s.guaranteeFundAddr = strings.ToLower(addr)
 	return s
 }
 
@@ -86,6 +103,15 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr string, req Creat
 	maxPerBig, ok := usdc.Parse(req.MaxPerRequest)
 	if !ok || maxPerBig.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: maxPerRequest", ErrInvalidAmount)
+	}
+
+	if len(req.AllowedTypes) > 20 {
+		return nil, fmt.Errorf("%w: allowedTypes exceeds maximum of 20 entries", ErrInvalidAmount)
+	}
+	for _, t := range req.AllowedTypes {
+		if len(t) > 100 {
+			return nil, fmt.Errorf("%w: service type exceeds maximum length of 100", ErrInvalidAmount)
+		}
 	}
 
 	strategy := req.Strategy
@@ -150,19 +176,37 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr string, req Creat
 }
 
 // Proxy handles a single proxy request within a session.
+//
+// Lock strategy: hold the per-session lock only for state reads and writes,
+// NOT during the HTTP forward (which can take up to 30s). This allows
+// concurrent proxy requests within the same session.
 func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest) (*ProxyResult, error) {
+	if len(req.ServiceType) > 100 {
+		return nil, fmt.Errorf("%w: service type exceeds maximum length of 100", ErrNoServiceAvailable)
+	}
+
+	// Idempotency: if the client provides a key and we've seen it before, return cached result.
+	if req.IdempotencyKey != "" {
+		if cached, cachedErr, ok := s.idemCache.get(sessionID, req.IdempotencyKey); ok {
+			return cached, cachedErr
+		}
+	}
+
+	// --- Phase 1: Lock, validate session, resolve candidates, snapshot state ---
 	unlock := s.locks.Lock(sessionID)
-	defer unlock()
 
 	session, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
+		unlock()
 		return nil, err
 	}
 
 	if session.Status != StatusActive {
+		unlock()
 		return nil, ErrSessionClosed
 	}
 	if session.IsExpired() {
+		unlock()
 		return nil, ErrSessionExpired
 	}
 
@@ -176,6 +220,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			}
 		}
 		if !allowed {
+			unlock()
 			return nil, fmt.Errorf("%w: service type %q not in allowed types", ErrNoServiceAvailable, req.ServiceType)
 		}
 	}
@@ -184,14 +229,19 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 	candidates, err := s.resolver.Resolve(ctx, req, session.Strategy, session.MaxPerRequest)
 	if err != nil {
 		s.logRequest(ctx, session.ID, req.ServiceType, "", "0", "no_service", 0, err.Error())
+		unlock()
 		return nil, err
 	}
 
-	spentBig, _ := usdc.Parse(session.TotalSpent)
+	// Snapshot budget state for candidate filtering.
 	holdBig, _ := usdc.Parse(session.MaxTotal)
-	remaining := new(big.Int).Sub(holdBig, spentBig)
 	maxPerBig, _ := usdc.Parse(session.MaxPerRequest)
+	agentAddr := session.AgentAddr
+	sessionIDCopy := session.ID
 
+	unlock() // Release lock before HTTP forwards
+
+	// --- Phase 2: Try candidates (UNLOCKED — HTTP forward can take 30s) ---
 	var lastErr error
 	retries := 0
 
@@ -201,86 +251,44 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			continue
 		}
 
-		// Check if candidate is verified → compute premium
-		var premiumBig *big.Int
-		var totalCostBig *big.Int
-		var isVerified bool
-		var guaranteedRate float64
-		var slaWindow int
+		// Check per-request limit (static, doesn't change)
+		if priceBig.Cmp(maxPerBig) > 0 {
+			continue
+		}
 
-		if s.verification != nil {
-			if v, vErr := s.verification.IsVerified(ctx, candidate.AgentAddress); vErr == nil && v {
-				isVerified = true
-				gr, pr, _ := s.verification.GetGuarantee(ctx, candidate.AgentAddress)
-				guaranteedRate = gr
-				slaWindow = 20 // default SLA window
-				if pr > 0 {
-					// Premium = price * premiumRate using basis points (avoids float64 precision loss)
-					basisPoints := int64(pr*10000 + 0.5)
-					premiumBig = new(big.Int).Mul(priceBig, big.NewInt(basisPoints))
-					premiumBig.Div(premiumBig, big.NewInt(10000))
-					if premiumBig.Sign() <= 0 {
-						premiumBig = big.NewInt(1) // minimum 1 micro-unit
-					}
-				}
+		// Quick budget check against snapshot (may be stale but avoids pointless forwards)
+		// The authoritative check happens under lock in Phase 3.
+		// We don't hold the lock here, so we do an optimistic read.
+		if sess, sErr := s.store.GetSession(ctx, sessionIDCopy); sErr == nil {
+			spent, _ := usdc.Parse(sess.TotalSpent)
+			rem := new(big.Int).Sub(holdBig, spent)
+			if priceBig.Cmp(rem) > 0 {
+				lastErr = ErrBudgetExceeded
+				continue
 			}
-		}
-
-		if premiumBig == nil {
-			premiumBig = new(big.Int)
-		}
-		totalCostBig = new(big.Int).Add(priceBig, premiumBig)
-
-		// Check per-request limit (against total cost including premium)
-		if totalCostBig.Cmp(maxPerBig) > 0 {
-			continue
-		}
-
-		// Check remaining budget
-		if totalCostBig.Cmp(remaining) > 0 {
-			lastErr = ErrBudgetExceeded
-			continue
 		}
 
 		// Build reference for this request.
-		ref := fmt.Sprintf("%s:req:%d:%s", session.ID, session.RequestCount+1, candidate.ServiceID)
-		totalCostStr := usdc.Format(totalCostBig)
+		ref := fmt.Sprintf("%s:req:%d:%s", sessionIDCopy, retries, candidate.ServiceID)
+		priceStr := usdc.Format(priceBig)
 
-		// Forward HTTP request FIRST — only pay on delivery.
-		start := time.Now()
+		// Forward HTTP request — UNLOCKED, can run concurrently with other proxy calls.
 		fwdResp, fwdErr := s.forwarder.Forward(ctx, ForwardRequest{
 			Endpoint:  candidate.Endpoint,
 			Params:    req.Params,
-			FromAddr:  session.AgentAddr,
+			FromAddr:  agentAddr,
 			Amount:    candidate.Price,
 			Reference: ref,
 		})
-		latencyMs := time.Since(start).Milliseconds()
-
-		// Determine call status for contract recording
-		callStatus := "success"
-		if fwdErr != nil {
-			callStatus = "failed"
-		}
-
-		// Auto-record into micro-contract if verified
-		if isVerified && s.contracts != nil {
-			contractID, cErr := s.contracts.EnsureContract(ctx,
-				session.AgentAddr, candidate.AgentAddress, req.ServiceType,
-				candidate.Price, guaranteedRate, slaWindow)
-			if cErr == nil && contractID != "" {
-				_ = s.contracts.RecordCall(ctx, contractID, callStatus, int(latencyMs))
-			}
-		}
 
 		if fwdErr != nil {
 			// Forward failed — no payment was made. Try next candidate.
 			s.logger.Warn("forward failed, trying next candidate", "session", sessionID, "seller", candidate.AgentAddress, "error", fwdErr)
-			s.logRequest(ctx, session.ID, req.ServiceType, candidate.AgentAddress, "0", "forward_failed", 0, fwdErr.Error())
+			s.logRequest(ctx, sessionIDCopy, req.ServiceType, candidate.AgentAddress, "0", "forward_failed", 0, fwdErr.Error())
 
 			// Record failed forward for reputation (no money moved)
 			if s.recorder != nil {
-				_ = s.recorder.RecordTransaction(ctx, ref, session.AgentAddr,
+				_ = s.recorder.RecordTransaction(ctx, ref, agentAddr,
 					candidate.AgentAddress, "0", candidate.ServiceID, "failed")
 			}
 
@@ -289,11 +297,41 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			continue
 		}
 
+		// --- Phase 3: Lock, re-validate budget, settle, update session ---
+		unlock = s.locks.Lock(sessionID)
+
+		// Re-read session under lock to get authoritative state.
+		session, err = s.store.GetSession(ctx, sessionIDCopy)
+		if err != nil {
+			unlock()
+			return nil, err
+		}
+		if session.Status != StatusActive {
+			unlock()
+			return nil, ErrSessionClosed
+		}
+
+		// Authoritative budget check — another concurrent request may have spent funds.
+		spentBig, _ := usdc.Parse(session.TotalSpent)
+		remaining := new(big.Int).Sub(holdBig, spentBig)
+		if priceBig.Cmp(remaining) > 0 {
+			unlock()
+			// Service was delivered but budget consumed by concurrent request.
+			// This is a rare race — log it but don't charge the buyer.
+			s.logger.Warn("budget consumed by concurrent request after successful forward",
+				"session", sessionID, "seller", candidate.AgentAddress, "price", candidate.Price)
+			lastErr = ErrBudgetExceeded
+			continue
+		}
+
+		// Update reference with authoritative request count.
+		ref = fmt.Sprintf("%s:req:%d:%s", session.ID, session.RequestCount+1, candidate.ServiceID)
+
 		// Forward succeeded — now settle payment.
-		// Settle base price: buyer pending → seller available
-		if err := s.ledger.SettleHold(ctx, session.AgentAddr, candidate.AgentAddress, candidate.Price, ref); err != nil {
+		if err := s.ledger.SettleHold(ctx, agentAddr, candidate.AgentAddress, candidate.Price, ref); err != nil {
 			s.logger.Error("CRITICAL: settle failed after successful forward — service delivered but seller not paid",
 				"session", sessionID, "seller", candidate.AgentAddress, "error", err)
+			unlock()
 			lastErr = &MoneyError{
 				Err:         err,
 				FundsStatus: "held_safe",
@@ -305,21 +343,8 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			continue
 		}
 
-		// Settle premium to guarantee fund.
-		// Track actual settled amount so TotalSpent matches what was debited from pending.
-		settledCostBig := new(big.Int).Set(priceBig)
-		if premiumBig.Sign() > 0 {
-			premiumStr := usdc.Format(premiumBig)
-			if err := s.ledger.SettleHold(ctx, session.AgentAddr, s.guaranteeFundAddr, premiumStr, "gpremium:"+ref); err != nil {
-				// Non-fatal: base payment succeeded, premium settle is best-effort.
-				s.logger.Warn("guarantee premium settle failed", "session", sessionID, "premium", premiumStr, "error", err)
-			} else {
-				settledCostBig.Add(settledCostBig, premiumBig)
-			}
-		}
-
 		// Success — update session.
-		newSpent := new(big.Int).Add(spentBig, settledCostBig)
+		newSpent := new(big.Int).Add(spentBig, priceBig)
 		session.TotalSpent = usdc.Format(newSpent)
 		session.RequestCount++
 		session.UpdatedAt = time.Now()
@@ -328,33 +353,36 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			s.logger.Error("failed to update session after successful proxy", "session", sessionID, "error", err)
 		}
 
-		s.logRequest(ctx, session.ID, req.ServiceType, candidate.AgentAddress, totalCostStr, "success", fwdResp.LatencyMs, "")
+		unlock() // Done with state — release lock
 
-		// Record successful transaction for reputation
+		// Fire-and-forget: logging, reputation, receipts (no lock needed)
+		s.logRequest(ctx, sessionIDCopy, req.ServiceType, candidate.AgentAddress, priceStr, "success", fwdResp.LatencyMs, "")
+
 		if s.recorder != nil {
-			_ = s.recorder.RecordTransaction(ctx, ref, session.AgentAddr,
+			_ = s.recorder.RecordTransaction(ctx, ref, agentAddr,
 				candidate.AgentAddress, candidate.Price, candidate.ServiceID, "confirmed")
 		}
 
-		// Accumulate revenue for stakes
-		if s.revenue != nil {
-			_ = s.revenue.AccumulateRevenue(ctx, candidate.AgentAddress, candidate.Price, "gateway_proxy:"+ref)
-		}
-
-		// Issue receipt for successful payment
 		if s.receiptIssuer != nil {
-			_ = s.receiptIssuer.IssueReceipt(ctx, "gateway", ref, session.AgentAddr,
+			_ = s.receiptIssuer.IssueReceipt(ctx, "gateway", ref, agentAddr,
 				candidate.AgentAddress, candidate.Price, candidate.ServiceID, "confirmed", "")
 		}
 
-		return &ProxyResult{
+		result := &ProxyResult{
 			Response:    fwdResp.Body,
 			ServiceUsed: candidate.AgentAddress,
 			ServiceName: candidate.ServiceName,
-			AmountPaid:  totalCostStr,
+			AmountPaid:  priceStr,
 			LatencyMs:   fwdResp.LatencyMs,
 			Retries:     retries,
-		}, nil
+		}
+
+		// Cache for idempotency so retries return the same result.
+		if req.IdempotencyKey != "" {
+			s.idemCache.set(sessionID, req.IdempotencyKey, result, nil)
+		}
+
+		return result, nil
 	}
 
 	if lastErr != nil {

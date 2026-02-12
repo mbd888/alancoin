@@ -3,6 +3,8 @@
 from typing import List, Optional, TYPE_CHECKING
 from urllib.parse import urljoin
 
+import re
+
 import requests
 
 from .models import Agent, Service, ServiceListing, Transaction, NetworkStats
@@ -22,24 +24,38 @@ if TYPE_CHECKING:
     from .session import Budget, BudgetSession
 
 
+_DURATION_RE = re.compile(r"^(\d+)\s*(s|m|h|d)$", re.IGNORECASE)
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _parse_duration_to_secs(s: str) -> int:
+    """Parse a duration string like '1h', '30m', '2d' to seconds."""
+    m = _DURATION_RE.match(s.strip())
+    if not m:
+        try:
+            return int(s)
+        except ValueError:
+            return 3600  # default 1h
+    return int(m.group(1)) * _DURATION_UNITS[m.group(2).lower()]
+
+
 class Alancoin:
     """
     Alancoin client for agent registration, discovery, and payments.
 
-    Quickstart (bounded session)::
+    Quickstart (gateway session)::
 
-        from alancoin import Alancoin, Wallet
+        from alancoin import Alancoin
 
-        client = Alancoin(api_key="ak_...", wallet=Wallet(private_key="0x..."))
+        client = Alancoin("http://localhost:8080", api_key="ak_...")
+
+        with client.gateway(max_total="5.00") as gw:
+            result = gw.call("translation", text="Hello", target="es")
+
+    Advanced (client-side session keys)::
 
         with client.session(max_total="5.00", max_per_tx="0.50") as s:
             result = s.call_service("translation", text="Hello", target="es")
-
-    Low-level usage::
-
-        client = Alancoin(base_url="http://localhost:8080")
-        agent = client.register(address="0x...", name="MyAgent")
-        services = client.discover(service_type="translation")
     """
     
     def __init__(
@@ -1560,22 +1576,24 @@ class Alancoin:
         Returns:
             Gateway session with id (also used as X-Gateway-Token)
         """
+        # Parse duration string (e.g. "1h", "30m", "2h") to seconds
+        expires_secs = _parse_duration_to_secs(expires_in)
+
         payload = {
-            "budget": max_total,
-            "expiresIn": expires_in,
+            "maxTotal": max_total,
+            "maxPerRequest": max_per_tx or max_total,
         }
+        if expires_secs > 0:
+            payload["expiresInSecs"] = expires_secs
         if allowed_services:
-            payload["allowedServices"] = allowed_services
-        if allowed_recipients:
-            payload["allowedRecipients"] = allowed_recipients
-        if max_per_tx:
-            payload["maxPerRequest"] = max_per_tx
+            payload["allowedTypes"] = allowed_services
         return self._request("POST", "/v1/gateway/sessions", json=payload)
 
     def gateway_proxy(
         self,
         token: str,
         service_type: str,
+        idempotency_key: str = None,
         **params,
     ) -> dict:
         """
@@ -1586,6 +1604,7 @@ class Alancoin:
         Args:
             token: Gateway session token (from create_gateway_session)
             service_type: Type of service to call
+            idempotency_key: Client-provided key to prevent double-charges on retry
             **params: Parameters forwarded to the service endpoint
 
         Returns:
@@ -1594,6 +1613,8 @@ class Alancoin:
         payload = {"serviceType": service_type}
         if params:
             payload["params"] = params
+        if idempotency_key:
+            payload["idempotencyKey"] = idempotency_key
         return self._request(
             "POST",
             "/v1/gateway/proxy",
@@ -1653,275 +1674,6 @@ class Alancoin:
         return self._request(
             "GET",
             f"/v1/gateway/sessions/{session_id}/logs",
-            params={"limit": limit},
-        )
-
-    # -------------------------------------------------------------------------
-    # Credit & Lending
-    # -------------------------------------------------------------------------
-
-    def apply_for_credit(self, agent_address: str) -> dict:
-        """
-        Apply for a credit line based on reputation.
-
-        The agent must meet minimum requirements (established tier or above,
-        30+ days on network, 10+ transactions, 95%+ success rate).
-
-        Args:
-            agent_address: The agent's wallet address
-
-        Returns:
-            Credit evaluation and (if approved) the new credit line
-
-        Example:
-            result = client.apply_for_credit(wallet.address)
-            if result.get('creditLine'):
-                print(f"Approved! Limit: ${result['creditLine']['creditLimit']}")
-        """
-        return self._request("POST", f"/v1/agents/{agent_address}/credit/apply")
-
-    def get_credit_line(self, agent_address: str) -> dict:
-        """
-        Get an agent's credit line status.
-
-        Args:
-            agent_address: The agent's wallet address
-
-        Returns:
-            Credit line details including limit, used, interest rate, and status
-        """
-        return self._request("GET", f"/v1/agents/{agent_address}/credit")
-
-    def repay_credit(self, agent_address: str, amount: str) -> dict:
-        """
-        Manually repay outstanding credit.
-
-        Deposits auto-repay credit, but this allows explicit repayment
-        from available balance.
-
-        Args:
-            agent_address: The agent's wallet address
-            amount: Amount in USDC to repay (e.g., "5.00")
-
-        Returns:
-            Updated credit line status
-        """
-        return self._request(
-            "POST",
-            f"/v1/agents/{agent_address}/credit/repay",
-            json={"amount": amount},
-        )
-
-    def review_credit(self, agent_address: str) -> dict:
-        """
-        Request a credit line re-evaluation.
-
-        Useful after reputation improves to get a higher limit or lower rate.
-
-        Args:
-            agent_address: The agent's wallet address
-
-        Returns:
-            New credit evaluation with updated terms
-        """
-        return self._request("POST", f"/v1/agents/{agent_address}/credit/review")
-
-    def list_active_credits(self, limit: int = 50) -> dict:
-        """
-        List all active credit lines on the platform.
-
-        Args:
-            limit: Maximum results to return (default 50)
-
-        Returns:
-            List of active credit lines
-        """
-        return self._request("GET", "/v1/credit/active", params={"limit": limit})
-
-    # -------------------------------------------------------------------------
-    # Contracts (Service Agreements with SLA Enforcement)
-    # -------------------------------------------------------------------------
-
-    def propose_contract(
-        self,
-        buyer_addr: str,
-        seller_addr: str,
-        service_type: str,
-        price_per_call: str,
-        buyer_budget: str,
-        duration: str,
-        min_volume: int = 1,
-        seller_penalty: str = "0",
-        max_latency_ms: int = 10000,
-        min_success_rate: float = 95.0,
-        sla_window_size: int = 20,
-    ) -> dict:
-        """
-        Propose a service contract with SLA terms.
-
-        Creates a time-bounded agreement with measurable SLAs. The seller
-        must accept before funds are locked.
-
-        Args:
-            buyer_addr: Buyer's wallet address
-            seller_addr: Seller's wallet address
-            service_type: Type of service (e.g., "translation")
-            price_per_call: Price per service call in USDC (e.g., "0.005")
-            buyer_budget: Total budget for the contract (e.g., "1.00")
-            duration: Contract duration (e.g., "7d", "24h")
-            min_volume: Minimum number of calls required
-            seller_penalty: Amount seller stakes as penalty (e.g., "0.10")
-            max_latency_ms: Maximum allowed latency per call
-            min_success_rate: Minimum success rate percentage (0-100)
-            sla_window_size: Number of recent calls for SLA window
-
-        Returns:
-            Created contract with status 'proposed'
-        """
-        payload = {
-            "buyerAddr": buyer_addr,
-            "sellerAddr": seller_addr,
-            "serviceType": service_type,
-            "pricePerCall": price_per_call,
-            "buyerBudget": buyer_budget,
-            "duration": duration,
-            "minVolume": min_volume,
-            "sellerPenalty": seller_penalty,
-            "maxLatencyMs": max_latency_ms,
-            "minSuccessRate": min_success_rate,
-            "slaWindowSize": sla_window_size,
-        }
-        return self._request("POST", "/v1/contracts", json=payload)
-
-    def get_contract(self, contract_id: str) -> dict:
-        """
-        Get a contract by ID.
-
-        Args:
-            contract_id: The contract ID
-
-        Returns:
-            Contract details including status, SLA terms, and tracking stats
-        """
-        return self._request("GET", f"/v1/contracts/{contract_id}")
-
-    def accept_contract(self, contract_id: str) -> dict:
-        """
-        Accept a proposed contract (seller action).
-
-        Locks buyer budget and seller penalty in escrow. Contract becomes active.
-
-        Args:
-            contract_id: The contract ID to accept
-
-        Returns:
-            Updated contract with status 'active'
-        """
-        return self._request("POST", f"/v1/contracts/{contract_id}/accept")
-
-    def reject_contract(self, contract_id: str) -> dict:
-        """
-        Reject a proposed contract (seller action).
-
-        No funds are moved.
-
-        Args:
-            contract_id: The contract ID to reject
-
-        Returns:
-            Updated contract with status 'rejected'
-        """
-        return self._request("POST", f"/v1/contracts/{contract_id}/reject")
-
-    def record_contract_call(
-        self,
-        contract_id: str,
-        status: str,
-        latency_ms: int = 0,
-        error_message: str = "",
-    ) -> dict:
-        """
-        Record a service call result within a contract.
-
-        On success, payment is micro-released to the seller. If the rolling
-        window success rate drops below the SLA threshold, the contract is
-        violated and the seller penalty is transferred to the buyer.
-
-        Args:
-            contract_id: The contract ID
-            status: Call result - "success" or "failed"
-            latency_ms: Call latency in milliseconds
-            error_message: Error message for failed calls
-
-        Returns:
-            Updated contract with new tracking stats
-        """
-        payload = {"status": status, "latencyMs": latency_ms}
-        if error_message:
-            payload["errorMessage"] = error_message
-        return self._request(
-            "POST",
-            f"/v1/contracts/{contract_id}/call",
-            json=payload,
-        )
-
-    def terminate_contract(self, contract_id: str, reason: str) -> dict:
-        """
-        Terminate a contract early.
-
-        If buyer terminates: remaining budget goes to seller, seller penalty returned.
-        If seller terminates: seller penalty forfeited to buyer, remaining budget refunded.
-
-        Args:
-            contract_id: The contract ID to terminate
-            reason: Reason for termination
-
-        Returns:
-            Updated contract with status 'terminated'
-        """
-        return self._request(
-            "POST",
-            f"/v1/contracts/{contract_id}/terminate",
-            json={"reason": reason},
-        )
-
-    def list_contracts(
-        self, agent_address: str, status: str = "", limit: int = 50
-    ) -> dict:
-        """
-        List contracts involving an agent.
-
-        Args:
-            agent_address: The agent's address
-            status: Filter by status (e.g., "active", "completed")
-            limit: Maximum contracts to return
-
-        Returns:
-            List of contracts
-        """
-        params = {"limit": limit}
-        if status:
-            params["status"] = status
-        return self._request(
-            "GET",
-            f"/v1/agents/{agent_address}/contracts",
-            params=params,
-        )
-
-    def list_contract_calls(self, contract_id: str, limit: int = 50) -> dict:
-        """
-        List calls within a contract.
-
-        Args:
-            contract_id: The contract ID
-            limit: Maximum calls to return
-
-        Returns:
-            List of contract calls
-        """
-        return self._request(
-            "GET",
-            f"/v1/contracts/{contract_id}/calls",
             params={"limit": limit},
         )
 

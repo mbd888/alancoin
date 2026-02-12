@@ -1,19 +1,23 @@
 """
 High-level session management for Alancoin agents.
 
-Provides bounded spending sessions with automatic session key lifecycle.
-This is the "3 lines of code" experience:
+Three session types:
 
-    from alancoin import Alancoin, Wallet
+1. GatewaySession (recommended) -- server holds budget, proxies calls:
 
-    client = Alancoin(api_key="ak_...", wallet=Wallet(private_key="0x..."))
+    with client.gateway(max_total="5.00") as gw:
+        result = gw.call("translation", text="Hello", target="es")
+
+2. StreamingSession -- micropayments per tick:
+
+    with client.stream(seller_addr="0x...", hold_amount="1.00", price_per_tick="0.0001") as s:
+        for token in tokens:
+            s.tick(metadata=token)
+
+3. BudgetSession (advanced) -- client-side session keys with escrow:
 
     with client.session(max_total="5.00", max_per_tx="0.50") as s:
         result = s.call_service("translation", text="Hello", target="es")
-
-Internally, session() creates a session key with the budget constraints,
-call_service() discovers → selects → pays → calls in one step, and the
-context manager revokes the session key on exit.
 """
 
 import logging
@@ -444,58 +448,6 @@ class BudgetSession:
             max_price=max_price or self._budget.max_per_tx,
         )
 
-    # -- Contracts (service agreements) ----------------------------------------
-
-    def propose_contract(
-        self,
-        seller_addr: str,
-        service_type: str,
-        price_per_call: str,
-        budget: str,
-        duration: str,
-        **sla_params,
-    ) -> dict:
-        """Propose a service contract within this session's budget.
-
-        Validates the contract budget fits within the session's remaining
-        budget before submitting the proposal.
-
-        Args:
-            seller_addr: Seller's wallet address.
-            service_type: Type of service (e.g., "translation").
-            price_per_call: Price per call in USDC (e.g., "0.005").
-            budget: Total contract budget in USDC (e.g., "1.00").
-            duration: Contract duration (e.g., "7d", "24h").
-            **sla_params: Optional SLA parameters (min_volume, seller_penalty,
-                max_latency_ms, min_success_rate, sla_window_size).
-
-        Returns:
-            Contract proposal response.
-
-        Raises:
-            AlancoinError: If session is inactive.
-            ValidationError: If budget exceeds session remaining.
-        """
-        if not self._active:
-            raise AlancoinError("Session is not active", code="session_inactive")
-
-        budget_dec = Decimal(budget)
-        remaining = Decimal(self._budget.max_total) - self._total_spent
-        if budget_dec > remaining:
-            raise ValidationError(
-                f"Contract budget {budget} exceeds session remaining {remaining}"
-            )
-
-        return self._client.propose_contract(
-            buyer_addr=self._client.address,
-            seller_addr=seller_addr,
-            service_type=service_type,
-            price_per_call=price_per_call,
-            buyer_budget=budget,
-            duration=duration,
-            **sla_params,
-        )
-
     # -- Pipeline (service composition) ----------------------------------------
 
     def pipeline(
@@ -837,24 +789,6 @@ class BudgetSession:
         if not self._active:
             raise AlancoinError("Session is not active", code="session_inactive")
         return self._client.dispute_escrow(escrow_id, reason)
-
-    # -- Credit-aware balance -------------------------------------------------
-
-    def get_effective_balance(self) -> str:
-        """Get effective balance including available credit.
-
-        Returns the sum of available platform balance plus unused credit line.
-        This is the total amount the agent could spend right now.
-
-        Returns:
-            Effective balance as a string (e.g., "55.00").
-        """
-        balance_resp = self._client.get_platform_balance(self._client.address)
-        balance = balance_resp.get("balance", {})
-        available = Decimal(balance.get("available", "0"))
-        credit_limit = Decimal(balance.get("creditLimit", "0"))
-        credit_used = Decimal(balance.get("creditUsed", "0"))
-        return str(available + (credit_limit - credit_used))
 
     # -- Internals ------------------------------------------------------------
 
@@ -1269,7 +1203,7 @@ class GatewaySession:
 
     # -- Proxy calls ----------------------------------------------------------
 
-    def call(self, service_type: str, **params) -> dict:
+    def call(self, service_type: str, idempotency_key: str = None, **params) -> dict:
         """Proxy a service call through the gateway.
 
         The server handles discover -> select -> pay -> forward -> settle
@@ -1277,6 +1211,7 @@ class GatewaySession:
 
         Args:
             service_type: Type of service ("translation", "inference", etc.).
+            idempotency_key: Client-provided key to prevent double-charges on retry.
             **params: Parameters forwarded to the service endpoint.
 
         Returns:
@@ -1294,18 +1229,31 @@ class GatewaySession:
         resp = self._client.gateway_proxy(
             token=self._session_id,
             service_type=service_type,
+            idempotency_key=idempotency_key,
             **params,
         )
 
-        # Update local tracking from server response
+        # Server wraps proxy result in {"result": {"response": {...}, "amountPaid": "0.005", ...}}
+        result = resp.get("result", {})
+
         with self._lock:
-            if "cost" in resp:
-                cost = _parse_decimal(resp["cost"], "cost")
+            amount_paid = result.get("amountPaid")
+            if amount_paid:
+                cost = _parse_decimal(amount_paid, "amountPaid")
                 if cost >= 0:
                     self._total_spent += cost
             self._request_count += 1
 
-        return resp
+        # Return the service's actual response with gateway metadata attached
+        service_response = result.get("response", {})
+        if isinstance(service_response, dict):
+            service_response["_gateway"] = {
+                "amountPaid": result.get("amountPaid"),
+                "serviceUsed": result.get("serviceUsed"),
+                "serviceName": result.get("serviceName"),
+                "latencyMs": result.get("latencyMs"),
+            }
+        return service_response
 
     # -- Close ----------------------------------------------------------------
 
@@ -1328,7 +1276,7 @@ class GatewaySession:
         logger.info(
             "Gateway session closed: %s (spent=%s, requests=%d)",
             self._session_id,
-            session.get("spentAmount", self.total_spent),
+            session.get("totalSpent", self.total_spent),
             self._request_count,
         )
         return resp
@@ -1355,7 +1303,7 @@ class GatewaySession:
         """
         resp = self._client.get_gateway_session(self._session_id)
         session = resp.get("session", {})
-        spent = session.get("spentAmount")
+        spent = session.get("totalSpent")
         if spent is not None:
             self._total_spent = Decimal(spent)
         self._active = session.get("status") == "active"

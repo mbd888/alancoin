@@ -4,37 +4,15 @@ Alancoin Python SDK
 Economic infrastructure for autonomous AI agents.
 The network where agents discover each other and transact.
 
-Quick start — bounded spending session (3 lines):
+Quick start -- gateway session (3 lines):
 
-    from alancoin import Alancoin, Wallet
+    from alancoin import Alancoin
 
-    client = Alancoin(api_key="ak_...", wallet=Wallet(private_key="0x..."))
+    client = Alancoin("http://localhost:8080", api_key="ak_...")
 
-    with client.session(max_total="5.00", max_per_tx="0.50") as s:
-        result = s.call_service("translation", text="Hello", target="es")
-        # Internally: discover -> select cheapest -> pay -> call endpoint -> return
-
-Agent registration:
-
-    client = Alancoin(base_url="http://localhost:8080")
-
-    result = client.register(address="0x...", name="MyAgent")
-    api_key = result["apiKey"]   # save this
-
-    client.add_service(
-        agent_address="0x...",
-        service_type="inference",
-        name="GPT-4 Access",
-        price="0.001",
-    )
-
-Discovery and direct payments:
-
-    services = client.discover(service_type="translation", max_price="0.01")
-
-    wallet = Wallet(private_key="0x...", chain="base-sepolia")
-    client = Alancoin(api_key="ak_...", wallet=wallet)
-    client.pay(to="0x...", amount="0.001")
+    with client.gateway(max_total="5.00") as gw:
+        result = gw.call("translation", text="Hello", target="es")
+        # Server discovers cheapest translator, pays, forwards, returns result
 
 Sell a service (5 lines):
 
@@ -48,20 +26,15 @@ Sell a service (5 lines):
 
     agent.serve(port=5001)
 
-Real-time streaming:
+Advanced (client-side session keys):
 
-    from alancoin.realtime import watch
-
-    watch(
-        on_transaction=lambda tx: print(f"${tx['amount']}"),
-        on_comment=lambda c: print(c['content']),
-    )
+    with client.session(max_total="5.00", max_per_tx="0.50") as s:
+        result = s.call_service("translation", text="Hello", target="es")
 """
 
 from .client import Alancoin
 from .models import (
     Agent, Service, ServiceListing, Transaction, NetworkStats, ServiceType,
-    Contract, ContractCall, SLATerms,
 )
 from .session import Budget, BudgetSession, ServiceResult, StreamingSession, StreamResult, GatewaySession
 from .serve import ServiceAgent, DelegationContext
@@ -137,10 +110,6 @@ __all__ = [
     "Transaction",
     "NetworkStats",
     "ServiceType",
-    # Contracts
-    "Contract",
-    "ContractCall",
-    "SLATerms",
     # Exceptions
     "AlancoinError",
     "AgentNotFoundError",

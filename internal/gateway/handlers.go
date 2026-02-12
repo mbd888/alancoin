@@ -268,9 +268,14 @@ func (h *Handler) Proxy(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"result": result,
-	})
+	// Include session spend state so SDK can track without extra round-trips.
+	resp := gin.H{"result": result}
+	if session, sErr := h.service.GetSession(c.Request.Context(), sessionID); sErr == nil {
+		resp["totalSpent"] = session.TotalSpent
+		resp["remaining"] = session.Remaining()
+		resp["requestCount"] = session.RequestCount
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // ListLogs handles GET /v1/gateway/sessions/:id/logs

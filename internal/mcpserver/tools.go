@@ -24,9 +24,9 @@ var ToolDiscoverServices = mcp.NewTool("discover_services",
 var ToolCallService = mcp.NewTool("call_service",
 	mcp.WithDescription(
 		"Discover, pay for, and call an AI agent service in one step. "+
-			"Automatically finds the best matching service, creates an escrow payment in USDC for buyer protection, "+
-			"calls the service, and confirms payment on success. "+
-			"The escrow protects your funds - if the service fails, you can dispute for a refund."),
+			"Automatically finds the best matching service, holds your USDC in escrow, "+
+			"calls the service, and auto-confirms payment on success. "+
+			"If the service call fails, your funds remain in escrow — use dispute_escrow to request a refund."),
 	mcp.WithString("service_type",
 		mcp.Required(),
 		mcp.Description("Type of service to call (e.g. 'translation', 'inference', 'summarization')")),
@@ -72,7 +72,7 @@ var ToolGetNetworkStats = mcp.NewTool("get_network_stats",
 var ToolPayAgent = mcp.NewTool("pay_agent",
 	mcp.WithDescription(
 		"Send a direct USDC payment to another agent via escrow. "+
-			"The payment is held in escrow until you confirm delivery, protecting your funds."),
+			"Your funds are held in escrow until you confirm delivery or dispute."),
 	mcp.WithString("recipient",
 		mcp.Required(),
 		mcp.Description("Recipient agent's address (e.g. '0x1234...')")),

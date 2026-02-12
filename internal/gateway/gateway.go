@@ -10,7 +10,10 @@ package gateway
 import (
 	"context"
 	"errors"
+	"math/big"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 // Errors
@@ -63,12 +66,30 @@ func (s *Session) IsExpired() bool {
 	return !s.ExpiresAt.IsZero() && time.Now().After(s.ExpiresAt)
 }
 
+// Remaining returns the unspent portion of the session budget as a USDC string.
+func (s *Session) Remaining() string {
+	spentBig, _ := usdc.Parse(s.TotalSpent)
+	totalBig, _ := usdc.Parse(s.MaxTotal)
+	if spentBig == nil {
+		spentBig = new(big.Int)
+	}
+	if totalBig == nil {
+		totalBig = new(big.Int)
+	}
+	rem := new(big.Int).Sub(totalBig, spentBig)
+	if rem.Sign() < 0 {
+		rem.SetInt64(0)
+	}
+	return usdc.Format(rem)
+}
+
 // ProxyRequest is the payload for a proxy call.
 type ProxyRequest struct {
-	ServiceType string                 `json:"serviceType" binding:"required"`
-	Params      map[string]interface{} `json:"params"`
-	MaxPrice    string                 `json:"maxPrice,omitempty"`    // Override per-request max
-	PreferAgent string                 `json:"preferAgent,omitempty"` // Preferred seller address
+	ServiceType    string                 `json:"serviceType" binding:"required"`
+	Params         map[string]interface{} `json:"params"`
+	MaxPrice       string                 `json:"maxPrice,omitempty"`       // Override per-request max
+	PreferAgent    string                 `json:"preferAgent,omitempty"`    // Preferred seller address
+	IdempotencyKey string                 `json:"idempotencyKey,omitempty"` // Client-provided dedup key
 }
 
 // ProxyResult is the response from a successful proxy call.
@@ -118,25 +139,6 @@ type RegistryProvider interface {
 // TransactionRecorder records transactions for reputation tracking.
 type TransactionRecorder interface {
 	RecordTransaction(ctx context.Context, txHash, from, to, amount, serviceID, status string) error
-}
-
-// RevenueAccumulator intercepts payments for revenue staking.
-type RevenueAccumulator interface {
-	AccumulateRevenue(ctx context.Context, agentAddr, amount, txRef string) error
-}
-
-// VerificationChecker checks if a seller is verified and returns guarantee terms.
-type VerificationChecker interface {
-	IsVerified(ctx context.Context, agentAddr string) (bool, error)
-	GetGuarantee(ctx context.Context, agentAddr string) (guaranteedSuccessRate float64, premiumRate float64, err error)
-}
-
-// ContractManager creates and records calls for micro-contracts.
-type ContractManager interface {
-	// EnsureContract returns an existing active contract for buyer→seller or creates one.
-	EnsureContract(ctx context.Context, buyerAddr, sellerAddr, serviceType, pricePerCall string, guaranteedSuccessRate float64, slaWindowSize int) (contractID string, err error)
-	// RecordCall records a call result against a contract.
-	RecordCall(ctx context.Context, contractID string, status string, latencyMs int) error
 }
 
 // ReceiptIssuer issues cryptographic receipts for payments.

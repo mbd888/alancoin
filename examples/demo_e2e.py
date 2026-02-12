@@ -5,7 +5,7 @@ Alancoin End-to-End Demo
 Demonstrates the full agent-to-agent loop:
 1. Start service agents (translator, echo)
 2. Register a buyer agent with platform balance
-3. Buyer discovers and calls services using bounded sessions
+3. Buyer discovers and calls services through the gateway
 4. Show real payments flowing through the platform
 
 Prerequisites:
@@ -27,9 +27,9 @@ from alancoin.session_keys import generate_session_keypair
 
 PLATFORM_URL = os.environ.get("ALANCOIN_URL", "http://localhost:8080")
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Step 1: Define service agents
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 translator = ServiceAgent(
     name="TranslatorBot",
@@ -72,15 +72,15 @@ def echo(text="", **kwargs):
     return {"output": text, "echoed": True}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Step 2: Setup
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def check_platform():
     """Verify the platform is running."""
     client = Alancoin(base_url=PLATFORM_URL)
     try:
-        health = client.health()
+        client.health()
         return True
     except Exception as e:
         print(f"  Platform not reachable at {PLATFORM_URL}: {e}")
@@ -119,9 +119,9 @@ def register_buyer():
     return buyer_addr, api_key
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Step 3: Run the demo
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def run_demo():
     print("=" * 60)
@@ -153,85 +153,51 @@ def run_demo():
     print(f"  BuyerAgent registered: {buyer_addr}")
     print()
 
-    # Create bounded session and call services
-    print("[4/5] Buyer creating bounded spending session...")
+    # Create gateway session and call services
+    print("[4/5] Buyer creating gateway session...")
     client = Alancoin(base_url=PLATFORM_URL, api_key=api_key)
-    # Manually set address since we don't have a real wallet
-    client._buyer_address = buyer_addr
 
-    print("  Budget: max $1.00 total, max $0.50 per tx, expires in 1h")
+    print("  Budget: max $1.00 total, expires in 1h")
     print()
 
-    print("[5/5] Calling services through the platform...")
+    print("[5/5] Calling services through the gateway...")
     print("-" * 60)
 
-    # --- Direct service calls (bypass session for demo without wallet) ---
-    # Since we don't have a real wallet for the session API, demonstrate
-    # the service agents directly to show the full HTTP loop works.
+    with client.gateway(max_total="1.00") as gw:
+        # Call 1: Translate "Hello world" to Spanish
+        print()
+        print("  >> Gateway call: translate 'Hello world' to Spanish")
+        result = gw.call("translation", text="Hello world", target="es")
+        meta = result.get("_gateway", {})
+        print(f"  << Result: {result.get('output')}")
+        print(f"     Paid: ${meta.get('amountPaid')} to {meta.get('serviceName')}")
+        print(f"     Spent so far: ${gw.total_spent}, Remaining: ${gw.remaining}")
 
+        # Call 2: Translate "Good morning" to French
+        print()
+        print("  >> Gateway call: translate 'Good morning' to French")
+        result = gw.call("translation", text="Good morning", target="fr")
+        meta = result.get("_gateway", {})
+        print(f"  << Result: {result.get('output')}")
+        print(f"     Paid: ${meta.get('amountPaid')} to {meta.get('serviceName')}")
+        print(f"     Spent so far: ${gw.total_spent}, Remaining: ${gw.remaining}")
+
+        # Call 3: Echo
+        print()
+        print("  >> Gateway call: echo 'Bounded autonomy works!'")
+        result = gw.call("echo", text="Bounded autonomy works!")
+        meta = result.get("_gateway", {})
+        print(f"  << Result: {result.get('output')}")
+        print(f"     Paid: ${meta.get('amountPaid')} to {meta.get('serviceName')}")
+        print(f"     Spent so far: ${gw.total_spent}, Remaining: ${gw.remaining}")
+
+    print()
+    print("-" * 60)
+
+    # Test 402 (no payment proof) - raw HTTP to show the protocol
     import requests
-
-    # Call translation service directly (simulating what call_service does)
     print()
-    print("  >> Calling TranslatorBot: translate 'Hello world' to Spanish")
-    try:
-        resp = requests.post(
-            "http://localhost:5001/services/translation",
-            json={"text": "Hello world", "target": "es"},
-            headers={
-                "X-Payment-TxHash": f"0xdemo_tx_{int(time.time())}",
-                "X-Payment-Amount": "0.005",
-                "X-Payment-From": buyer_addr,
-            },
-            timeout=10,
-        )
-        result = resp.json()
-        print(f"  << Result: {result['output']}")
-        print(f"     Status: {resp.status_code}, Paid: $0.005 USDC")
-    except Exception as e:
-        print(f"  << Error: {e}")
-
-    print()
-    print("  >> Calling TranslatorBot: translate 'Good morning' to French")
-    try:
-        resp = requests.post(
-            "http://localhost:5001/services/translation",
-            json={"text": "Good morning", "target": "fr"},
-            headers={
-                "X-Payment-TxHash": f"0xdemo_tx_{int(time.time())}_2",
-                "X-Payment-Amount": "0.005",
-                "X-Payment-From": buyer_addr,
-            },
-            timeout=10,
-        )
-        result = resp.json()
-        print(f"  << Result: {result['output']}")
-        print(f"     Status: {resp.status_code}, Paid: $0.005 USDC")
-    except Exception as e:
-        print(f"  << Error: {e}")
-
-    print()
-    print("  >> Calling EchoBot: echo 'Bounded autonomy works!'")
-    try:
-        resp = requests.post(
-            "http://localhost:5002/services/echo",
-            json={"text": "Bounded autonomy works!"},
-            headers={
-                "X-Payment-TxHash": f"0xdemo_tx_{int(time.time())}_3",
-                "X-Payment-Amount": "0.001",
-                "X-Payment-From": buyer_addr,
-            },
-            timeout=10,
-        )
-        result = resp.json()
-        print(f"  << Result: {result['output']}")
-        print(f"     Status: {resp.status_code}, Paid: $0.001 USDC")
-    except Exception as e:
-        print(f"  << Error: {e}")
-
-    # Test 402 (no payment proof)
-    print()
-    print("  >> Calling TranslatorBot WITHOUT payment...")
+    print("  >> Calling TranslatorBot WITHOUT payment (402 test)...")
     try:
         resp = requests.post(
             "http://localhost:5001/services/translation",
@@ -244,20 +210,6 @@ def run_demo():
     except Exception as e:
         print(f"  << Error: {e}")
 
-    print()
-    print("-" * 60)
-
-    # Show what the SDK session API looks like
-    print()
-    print("  In production, the buyer uses the session API:")
-    print()
-    print("    from alancoin import Alancoin, Wallet")
-    print()
-    print("    client = Alancoin(api_key='ak_...', wallet=Wallet(private_key='0x...'))")
-    print()
-    print("    with client.session(max_total='5.00', max_per_tx='0.50') as s:")
-    print("        result = s.call_service('translation', text='Hello', target='es')")
-    print("        # Internally: discover -> pick cheapest -> pay -> call -> return")
     print()
 
     # Show platform stats

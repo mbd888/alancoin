@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Alancoin Pipeline Demo — Multi-Agent Service Composition
+Alancoin Pipeline Demo -- Multi-Agent Service Composition
 
 Demonstrates the killer feature: chaining multiple AI agent services
-into a pipeline where each step's output feeds the next, all within
-a single bounded spending session.
+into a pipeline where each step's output feeds the next, all through
+the gateway with a single bounded budget.
 
-Pipeline:  summarize → translate → extract entities
+Pipeline:  summarize -> translate -> extract entities
 
 Prerequisites:
     - Alancoin platform running: make run
@@ -27,9 +27,9 @@ from alancoin.session_keys import generate_session_keypair
 
 PLATFORM_URL = os.environ.get("ALANCOIN_URL", "http://localhost:8080")
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Step 1: Define three service agents
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 summarizer = ServiceAgent(
     name="SummarizerBot",
@@ -52,7 +52,7 @@ extractor = ServiceAgent(
 
 @summarizer.service("inference", price="0.008", description="Summarize text")
 def summarize(text="", task="summarize", **kwargs):
-    """Simple extractive summarizer — takes first sentence of each paragraph."""
+    """Simple extractive summarizer -- takes first sentence of each paragraph."""
     paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
     summary_parts = []
     for p in paragraphs[:5]:  # Max 5 paragraphs
@@ -102,7 +102,7 @@ def translate(text="", target="es", **kwargs):
 
 @extractor.service("inference", price="0.010", description="Extract named entities")
 def extract_entities(text="", task="extract_entities", **kwargs):
-    """Simple entity extractor — finds capitalized multi-word sequences."""
+    """Simple entity extractor -- finds capitalized multi-word sequences."""
     words = text.split()
     entities = []
     current = []
@@ -126,14 +126,14 @@ def extract_entities(text="", task="extract_entities", **kwargs):
     return {"output": entities, "entity_count": len(entities), "task": task}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Step 2: Run the pipeline demo
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 SAMPLE_DOCUMENT = """Alancoin is building economic infrastructure for autonomous AI agents.
 The platform enables agents to discover each other, negotiate prices, and transact
 using USDC on Base Layer 2. Unlike traditional payment rails, Alancoin uses session
-keys to give agents bounded autonomy — they can spend within limits without human
+keys to give agents bounded autonomy -- they can spend within limits without human
 approval for each transaction.
 
 The network effect is critical. As more agents join the Alancoin marketplace,
@@ -144,7 +144,7 @@ business, incentivizing good behavior.
 
 Skyfire and other competitors focus on simple payment processing. Alancoin
 differentiates by combining payments with discovery, reputation, and session-based
-autonomy into a single platform. The data moat grows with every transaction —
+autonomy into a single platform. The data moat grows with every transaction --
 each payment creates reputation data that cannot be replicated by a new entrant.
 
 The Python SDK provides a three-line developer experience: create a client,
@@ -215,105 +215,48 @@ def run_pipeline_demo():
               f"rep: {svc.reputation_score:5.1f} ({svc.reputation_tier})")
     print()
 
-    # Run pipeline manually (since we don't have real wallets for session keys)
-    print("[5/6] Running pipeline: summarize → translate → extract")
+    # Run pipeline through gateway
+    print("[5/6] Running pipeline: summarize -> translate -> extract")
     print("-" * 60)
     print()
 
-    import requests as http_requests
-
-    total_cost = 0.0
-
-    # Step 1: Summarize
-    print("  Step 1: Summarize document")
-    print(f"  Input: {len(SAMPLE_DOCUMENT)} chars")
-    try:
-        resp = http_requests.post(
-            "http://localhost:5010/services/inference",
-            json={"text": SAMPLE_DOCUMENT, "task": "summarize"},
-            headers={
-                "X-Payment-TxHash": f"0xpipe_1_{int(time.time())}",
-                "X-Payment-Amount": "0.008",
-                "X-Payment-From": buyer_addr,
-            },
-            timeout=10,
-        )
-        step1 = resp.json()
-        summary = step1["output"]
-        total_cost += 0.008
+    with funded_client.gateway(max_total="0.10") as gw:
+        # Step 1: Summarize
+        print("  Step 1: Summarize document")
+        print(f"  Input: {len(SAMPLE_DOCUMENT)} chars")
+        result1 = gw.call("inference", text=SAMPLE_DOCUMENT, task="summarize")
+        summary = result1.get("output", "")
+        meta = result1.get("_gateway", {})
         print(f"  Output: {summary[:100]}...")
-        print(f"  Cost: $0.008 | Running total: ${total_cost:.3f}")
-    except Exception as e:
-        print(f"  Error: {e}")
-        summary = SAMPLE_DOCUMENT[:200]
+        print(f"  Cost: ${meta.get('amountPaid')} | Spent: ${gw.total_spent}")
+        print()
 
-    print()
-
-    # Step 2: Translate summary to Spanish
-    print("  Step 2: Translate summary to Spanish")
-    try:
-        resp = http_requests.post(
-            "http://localhost:5011/services/translation",
-            json={"text": summary, "target": "es"},
-            headers={
-                "X-Payment-TxHash": f"0xpipe_2_{int(time.time())}",
-                "X-Payment-Amount": "0.005",
-                "X-Payment-From": buyer_addr,
-            },
-            timeout=10,
-        )
-        step2 = resp.json()
-        translated = step2["output"]
-        total_cost += 0.005
+        # Step 2: Translate summary to Spanish
+        print("  Step 2: Translate summary to Spanish")
+        result2 = gw.call("translation", text=summary, target="es")
+        translated = result2.get("output", "")
+        meta = result2.get("_gateway", {})
         print(f"  Output: {translated[:100]}...")
-        print(f"  Cost: $0.005 | Running total: ${total_cost:.3f}")
-    except Exception as e:
-        print(f"  Error: {e}")
-        translated = summary
+        print(f"  Cost: ${meta.get('amountPaid')} | Spent: ${gw.total_spent}")
+        print()
 
-    print()
-
-    # Step 3: Extract entities from translation
-    print("  Step 3: Extract entities from translated text")
-    try:
-        resp = http_requests.post(
-            "http://localhost:5012/services/inference",
-            json={"text": translated, "task": "extract_entities"},
-            headers={
-                "X-Payment-TxHash": f"0xpipe_3_{int(time.time())}",
-                "X-Payment-Amount": "0.010",
-                "X-Payment-From": buyer_addr,
-            },
-            timeout=10,
-        )
-        step3 = resp.json()
-        entities = step3["output"]
-        total_cost += 0.010
+        # Step 3: Extract entities from translation
+        print("  Step 3: Extract entities from translated text")
+        result3 = gw.call("inference", text=translated, task="extract_entities")
+        entities = result3.get("output", [])
+        meta = result3.get("_gateway", {})
         print(f"  Output: {entities}")
-        print(f"  Cost: $0.010 | Running total: ${total_cost:.3f}")
-    except Exception as e:
-        print(f"  Error: {e}")
+        print(f"  Cost: ${meta.get('amountPaid')} | Spent: ${gw.total_spent}")
 
     print()
     print("-" * 60)
     print()
 
-    # Show what the SDK pipeline API looks like
     print("[6/6] Pipeline complete!")
     print()
-    print(f"  Total pipeline cost: ${total_cost:.3f} USDC")
+    print(f"  Total pipeline cost: ${gw.total_spent} USDC")
     print(f"  Steps completed:     3")
     print(f"  Agents involved:     3 (SummarizerBot, TranslatorBot, EntityExtractor)")
-    print()
-    print("  In production, the SDK pipeline API makes this even simpler:")
-    print()
-    print('    with client.session(max_total="0.10") as s:')
-    print("        results = s.pipeline([")
-    print('            {"service_type": "inference", "params": {"text": doc, "task": "summarize"}},')
-    print('            {"service_type": "translation", "params": {"text": "$prev", "target": "es"}},')
-    print('            {"service_type": "inference", "params": {"text": "$prev", "task": "extract_entities"}},')
-    print("        ])")
-    print('        entities = results[-1]["output"]')
     print()
 
     # Platform stats

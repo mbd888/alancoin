@@ -235,7 +235,6 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.reputationStore = reputation.NewPostgresSnapshotStore(db)
 		s.logger.Info("reputation snapshots enabled (postgres)")
 
-		s.gatewayService.WithGuaranteeFundAddr(s.wallet.Address())
 	} else {
 		s.registry = registry.NewMemoryStore()
 		s.logger.Info("using in-memory storage (data will not persist)")
@@ -318,11 +317,6 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			return nil, fmt.Errorf("failed to create wallet: %w", err)
 		}
 		s.wallet = w
-	}
-
-	// Wire gateway guarantee fund address now that wallet is available
-	if s.gatewayService != nil && s.wallet != nil && s.db == nil {
-		s.gatewayService.WithGuaranteeFundAddr(s.wallet.Address())
 	}
 
 	// Create paymaster for gas abstraction
