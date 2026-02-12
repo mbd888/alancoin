@@ -30,10 +30,11 @@ var (
 type Status string
 
 const (
-	StatusOpen        Status = "open"         // Active, accepting ticks
-	StatusClosed      Status = "closed"       // Settled by buyer or seller
-	StatusStaleClosed Status = "stale_closed" // Auto-closed due to inactivity
-	StatusDisputed    Status = "disputed"     // Buyer disputed quality
+	StatusOpen             Status = "open"              // Active, accepting ticks
+	StatusClosed           Status = "closed"            // Settled by buyer or seller
+	StatusStaleClosed      Status = "stale_closed"      // Auto-closed due to inactivity
+	StatusDisputed         Status = "disputed"          // Buyer disputed quality
+	StatusSettlementFailed Status = "settlement_failed" // Funds moved but status update failed; requires manual resolution
 )
 
 // DefaultStaleTimeout is the default inactivity threshold before auto-closing.
@@ -62,7 +63,7 @@ type Stream struct {
 // IsTerminal returns true if the stream is in a final state.
 func (s *Stream) IsTerminal() bool {
 	switch s.Status {
-	case StatusClosed, StatusStaleClosed, StatusDisputed:
+	case StatusClosed, StatusStaleClosed, StatusDisputed, StatusSettlementFailed:
 		return true
 	}
 	return false

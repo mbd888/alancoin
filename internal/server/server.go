@@ -25,8 +25,6 @@ import (
 	_ "github.com/lib/pq" // PostgreSQL driver
 	"github.com/mbd888/alancoin/internal/auth"
 	"github.com/mbd888/alancoin/internal/config"
-	"github.com/mbd888/alancoin/internal/contracts"
-	"github.com/mbd888/alancoin/internal/credit"
 	"github.com/mbd888/alancoin/internal/discovery"
 	"github.com/mbd888/alancoin/internal/escrow"
 	"github.com/mbd888/alancoin/internal/gas"
@@ -40,13 +38,11 @@ import (
 	"github.com/mbd888/alancoin/internal/receipts"
 	"github.com/mbd888/alancoin/internal/registry"
 	"github.com/mbd888/alancoin/internal/reputation"
-	"github.com/mbd888/alancoin/internal/risk"
 	"github.com/mbd888/alancoin/internal/security"
 	"github.com/mbd888/alancoin/internal/sessionkeys"
 	"github.com/mbd888/alancoin/internal/streams"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/validation"
-	"github.com/mbd888/alancoin/internal/verified"
 	"github.com/mbd888/alancoin/internal/wallet"
 	"github.com/mbd888/alancoin/internal/watcher"
 	"github.com/mbd888/alancoin/internal/webhooks"
@@ -71,12 +67,6 @@ type Server struct {
 	escrowService          *escrow.Service
 	escrowTimer            *escrow.Timer
 	multiStepEscrowService *escrow.MultiStepService
-	escrowTemplateService  *escrow.TemplateService
-	escrowAnalytics        *escrow.EscrowAnalyticsService
-	creditService          *credit.Service
-	creditTimer            *credit.Timer
-	contractService        *contracts.Service
-	contractTimer          *contracts.Timer
 	streamService          *streams.Service
 	streamTimer            *streams.Timer
 	gatewayService         *gateway.Service
@@ -87,9 +77,6 @@ type Server struct {
 	reputationSigner       *reputation.Signer
 	matviewRefresher       *registry.MatviewRefresher
 	partitionMaint         *registry.PartitionMaintainer
-	riskEngine             *risk.Engine
-	verifiedService        *verified.Service
-	verifiedEnforcer       *verified.Enforcer
 	rateLimiter            *ratelimit.Limiter
 	db                     *sql.DB // nil if using in-memory
 	router                 *gin.Engine
@@ -190,11 +177,8 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		}
 		eventStore := ledger.NewPostgresEventStore(db)
 		auditLogger := ledger.NewPostgresAuditLogger(db)
-		alertStore := ledger.NewPostgresAlertStore(db)
-		alertChecker := ledger.NewAlertChecker(alertStore)
 		s.ledger = ledger.NewWithEvents(ledgerStore, eventStore).
-			WithAuditLogger(auditLogger).
-			WithAlertChecker(alertChecker)
+			WithAuditLogger(auditLogger)
 		s.logger.Info("agent balance tracking enabled")
 
 		// Webhooks with Postgres
@@ -212,17 +196,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.multiStepEscrowService = escrow.NewMultiStepService(
 			escrow.NewMultiStepPostgresStore(db), &escrowLedgerAdapter{s.ledger},
 		).WithLogger(s.logger)
-		s.escrowTemplateService = escrow.NewTemplateService(
-			escrow.NewTemplatePostgresStore(db), escrowStore, &escrowLedgerAdapter{s.ledger},
-		)
-		s.escrowAnalytics = escrow.NewEscrowAnalyticsService(escrowStore)
 		s.logger.Info("escrow enabled (postgres)")
-
-		// Contracts with PostgreSQL store
-		contractStore := contracts.NewPostgresStore(db)
-		s.contractService = contracts.NewService(contractStore, &escrowLedgerAdapter{s.ledger})
-		s.contractTimer = contracts.NewTimer(s.contractService, contractStore, s.logger)
-		s.logger.Info("contracts enabled (postgres)")
 
 		// Streams with PostgreSQL store (streaming micropayments)
 		streamStore := streams.NewPostgresStore(db)
@@ -261,60 +235,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.reputationStore = reputation.NewPostgresSnapshotStore(db)
 		s.logger.Info("reputation snapshots enabled (postgres)")
 
-		// Credit system (spend on credit, repay from earnings)
-		creditStore := credit.NewPostgresStore(db)
-		// Note: gateway verification/contracts wired after verifiedService is created (below)
-		if err := creditStore.Migrate(ctx); err != nil {
-			s.logger.Warn("failed to migrate credit store", "error", err)
-		}
-		reputationProv := reputation.NewRegistryProvider(s.registry)
-		creditScorer := credit.NewScorer()
-		s.creditService = credit.NewService(
-			creditStore,
-			creditScorer,
-			reputationProv,
-			&creditMetricsAdapter{reputationProv},
-			&creditLedgerAdapter{s.ledger},
-		)
-		s.creditTimer = credit.NewTimer(s.creditService, s.logger)
-		s.logger.Info("credit system enabled")
-
-		// Risk scoring engine (real-time anomaly detection for session key transactions)
-		riskStore := risk.NewPostgresStore(db)
-		if err := riskStore.Migrate(ctx); err != nil {
-			s.logger.Warn("failed to migrate risk store", "error", err)
-		}
-		s.riskEngine = risk.NewEngine(riskStore)
-		s.logger.Info("risk scoring enabled (postgres)")
-
-		// Verified agents (performance-guaranteed agents with bonds)
-		verifiedStore := verified.NewPostgresStore(db)
-		if err := verifiedStore.Migrate(ctx); err != nil {
-			s.logger.Warn("failed to migrate verified store", "error", err)
-		}
-		verifiedReputationProv := reputation.NewRegistryProvider(s.registry)
-		verifiedScorer := verified.NewScorer()
-		s.verifiedService = verified.NewService(
-			verifiedStore,
-			verifiedScorer,
-			verifiedReputationProv,
-			&creditMetricsAdapter{verifiedReputationProv},
-			&verifiedLedgerAdapter{s.ledger},
-		)
-		s.verifiedService.WithBuyerPayments(&buyerPaymentAdapter{s.contractService})
-		s.verifiedEnforcer = verified.NewEnforcer(
-			s.verifiedService,
-			&contractCallAdapter{s.contractService},
-			s.wallet.Address(), // platform address receives forfeited bonds
-			s.logger,
-		)
-		s.logger.Info("verified agents enabled (postgres)")
-
-		// Wire verification and contracts into gateway for premium handling
-		s.gatewayService.
-			WithVerification(&gatewayVerificationAdapter{s.verifiedService}).
-			WithContracts(&gatewayContractAdapter{s.contractService}).
-			WithGuaranteeFundAddr(s.wallet.Address())
+		s.gatewayService.WithGuaranteeFundAddr(s.wallet.Address())
 	} else {
 		s.registry = registry.NewMemoryStore()
 		s.logger.Info("using in-memory storage (data will not persist)")
@@ -333,11 +254,8 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		memStore := ledger.NewMemoryStore()
 		memEventStore := ledger.NewMemoryEventStore()
 		memAuditLogger := ledger.NewMemoryAuditLogger()
-		memAlertStore := ledger.NewMemoryAlertStore()
-		memAlertChecker := ledger.NewAlertChecker(memAlertStore)
 		s.ledger = ledger.NewWithEvents(memStore, memEventStore).
-			WithAuditLogger(memAuditLogger).
-			WithAlertChecker(memAlertChecker)
+			WithAuditLogger(memAuditLogger)
 		s.logger.Info("agent balance tracking enabled (in-memory)")
 
 		// Webhooks with in-memory store
@@ -350,17 +268,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.multiStepEscrowService = escrow.NewMultiStepService(
 			escrow.NewMultiStepMemoryStore(), &escrowLedgerAdapter{s.ledger},
 		).WithLogger(s.logger)
-		s.escrowTemplateService = escrow.NewTemplateService(
-			escrow.NewTemplateMemoryStore(), escrowStore, &escrowLedgerAdapter{s.ledger},
-		)
-		s.escrowAnalytics = escrow.NewEscrowAnalyticsService(escrowStore)
 		s.logger.Info("escrow enabled (in-memory)")
-
-		// Contracts with in-memory store
-		contractStore := contracts.NewMemoryStore()
-		s.contractService = contracts.NewService(contractStore, &escrowLedgerAdapter{s.ledger})
-		s.contractTimer = contracts.NewTimer(s.contractService, contractStore, s.logger)
-		s.logger.Info("contracts enabled (in-memory)")
 
 		// Streams with in-memory store (streaming micropayments)
 		streamStore := streams.NewMemoryStore()
@@ -395,42 +303,6 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.reputationStore = reputation.NewMemorySnapshotStore()
 		s.logger.Info("reputation snapshots enabled (in-memory)")
 
-		// Credit system (in-memory) — use demo scorer with relaxed policies
-		creditStore := credit.NewMemoryStore()
-		reputationProv := reputation.NewRegistryProvider(s.registry)
-		creditScorer := credit.NewDemoScorer()
-		s.creditService = credit.NewService(
-			creditStore,
-			creditScorer,
-			reputationProv,
-			&creditMetricsAdapter{reputationProv},
-			&creditLedgerAdapter{s.ledger},
-		)
-		s.creditTimer = credit.NewTimer(s.creditService, s.logger)
-		s.logger.Info("credit system enabled (in-memory)")
-
-		// Risk scoring engine (in-memory)
-		s.riskEngine = risk.NewEngine(risk.NewMemoryStore())
-		s.logger.Info("risk scoring enabled (in-memory)")
-
-		// Verified agents (in-memory) — use demo scorer with relaxed policies
-		verifiedStore := verified.NewMemoryStore()
-		verifiedReputationProv := reputation.NewRegistryProvider(s.registry)
-		verifiedScorer := verified.NewDemoScorer()
-		s.verifiedService = verified.NewService(
-			verifiedStore,
-			verifiedScorer,
-			verifiedReputationProv,
-			&creditMetricsAdapter{verifiedReputationProv},
-			&verifiedLedgerAdapter{s.ledger},
-		)
-		s.verifiedService.WithBuyerPayments(&buyerPaymentAdapter{s.contractService})
-		s.logger.Info("verified agents enabled (in-memory)")
-
-		// Wire verification and contracts into gateway for premium handling
-		s.gatewayService.
-			WithVerification(&gatewayVerificationAdapter{s.verifiedService}).
-			WithContracts(&gatewayContractAdapter{s.contractService})
 		// guaranteeFundAddr set after wallet is created (below)
 	}
 
@@ -669,11 +541,6 @@ func (s *Server) setupRoutes() {
 	reputationProvider := reputation.NewRegistryProvider(s.registry)
 	registryHandler.SetReputation(reputationProvider)
 
-	// Wire verified agent status into discovery so buyers see guaranteed services
-	if s.verifiedService != nil {
-		registryHandler.SetVerification(s.verifiedService)
-	}
-
 	// Wire reputation impact tracking into escrow (dispute/confirm outcomes)
 	s.escrowService.WithReputationImpactor(reputationProvider)
 
@@ -760,11 +627,6 @@ func (s *Server) setupRoutes() {
 		sessionHandler = sessionHandler.WithEvents(&realtimeEventEmitter{s.realtimeHub})
 	}
 
-	// Add risk scoring engine for anomaly detection
-	if s.riskEngine != nil {
-		sessionHandler = sessionHandler.WithRiskScorer(s.riskEngine)
-	}
-
 	// Add budget/expiration alert checker backed by webhooks
 	if s.webhooks != nil {
 		alertChecker := sessionkeys.NewAlertChecker(&webhookAlertNotifier{d: s.webhooks})
@@ -774,12 +636,6 @@ func (s *Server) setupRoutes() {
 	// Add receipt issuer for cryptographic payment proofs
 	if s.receiptService != nil {
 		sessionHandler = sessionHandler.WithReceiptIssuer(&receiptIssuerAdapter{s.receiptService})
-	}
-
-	// Add spend analytics service
-	if s.sessionMgr != nil {
-		analyticsService := sessionkeys.NewAnalyticsService(s.sessionMgr.Store())
-		sessionHandler = sessionHandler.WithAnalyticsService(analyticsService)
 	}
 
 	protectedSessions := v1.Group("")
@@ -805,8 +661,6 @@ func (s *Server) setupRoutes() {
 	v1.POST("/sessions/:keyId/delegate", sessionHandler.CreateDelegation)
 	v1.GET("/sessions/:keyId/tree", sessionHandler.GetDelegationTree)
 	v1.GET("/sessions/:keyId/delegation-log", sessionHandler.GetDelegationLog)
-	v1.GET("/sessions/:keyId/analytics", sessionHandler.GetKeyAnalytics)
-	v1.GET("/agents/:address/sessions/analytics", sessionHandler.GetOwnerAnalytics)
 
 	// =========================================================================
 	// Gateway — transparent payment proxy (the primary path for AI agents)
@@ -852,10 +706,6 @@ func (s *Server) setupRoutes() {
 		adminLedger.Use(auth.Middleware(s.authMgr), auth.RequireAdmin())
 		ledgerHandler.RegisterAdminRoutes(adminLedger)
 
-		// Alert routes (per-agent, require authentication and ownership)
-		protectedAlerts := v1.Group("")
-		protectedAlerts.Use(auth.Middleware(s.authMgr), auth.RequireOwnership(s.authMgr, "address"))
-		ledgerHandler.RegisterAlertRoutes(protectedAlerts)
 	}
 
 	// Gas abstraction routes (agents pay USDC only, gas is sponsored)
@@ -924,26 +774,6 @@ func (s *Server) setupRoutes() {
 		escrowHandler.RegisterProtectedRoutes(protectedEscrow)
 	}
 
-	// Escrow template routes (milestone-based escrows)
-	if s.escrowTemplateService != nil {
-		tmplHandler := escrow.NewTemplateHandler(s.escrowTemplateService)
-
-		// Public routes
-		tmplHandler.RegisterRoutes(v1)
-
-		// Protected routes
-		protectedTmpl := v1.Group("")
-		protectedTmpl.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
-		tmplHandler.RegisterProtectedRoutes(protectedTmpl)
-	}
-
-	// Escrow analytics (admin only)
-	if s.escrowAnalytics != nil {
-		adminEscrow := v1.Group("")
-		adminEscrow.Use(auth.Middleware(s.authMgr), auth.RequireAdmin())
-		adminEscrow.GET("/admin/escrow/analytics", s.getEscrowAnalytics)
-	}
-
 	// MultiStep escrow routes (atomic N-step pipeline payments)
 	if s.multiStepEscrowService != nil {
 		msHandler := escrow.NewMultiStepHandler(s.multiStepEscrowService)
@@ -953,53 +783,6 @@ func (s *Server) setupRoutes() {
 		protectedMS := v1.Group("")
 		protectedMS.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
 		msHandler.RegisterProtectedRoutes(protectedMS)
-	}
-
-	// Credit routes (agent credit lines - spend on credit, repay from earnings)
-	if s.creditService != nil {
-		creditHandler := credit.NewHandler(s.creditService)
-
-		// Public routes - anyone can view credit status
-		creditHandler.RegisterRoutes(v1)
-
-		// Protected routes - only authenticated agents can apply/repay/review
-		protectedCredit := v1.Group("")
-		protectedCredit.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
-		creditHandler.RegisterProtectedRoutes(protectedCredit)
-
-		// Admin routes - require authentication
-		adminCredit := v1.Group("/admin")
-		adminCredit.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
-		creditHandler.RegisterAdminRoutes(adminCredit)
-	}
-
-	// Verified agent routes (performance-guaranteed agents with bonds)
-	if s.verifiedService != nil {
-		verifiedHandler := verified.NewHandler(s.verifiedService)
-
-		// Public routes - anyone can view verified status
-		v1.GET("/verified", verifiedHandler.List)
-		v1.GET("/verified/:address", verifiedHandler.GetByAgent)
-
-		// Protected routes - only authenticated agents can apply/revoke/reinstate
-		protectedVerified := v1.Group("")
-		protectedVerified.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
-		protectedVerified.POST("/verified/apply", verifiedHandler.Apply)
-		protectedVerified.POST("/verified/:address/revoke", auth.RequireOwnership(s.authMgr, "address"), verifiedHandler.Revoke)
-		protectedVerified.POST("/verified/:address/reinstate", auth.RequireOwnership(s.authMgr, "address"), verifiedHandler.Reinstate)
-	}
-
-	// Contract routes (service agreements with SLA enforcement)
-	if s.contractService != nil {
-		contractHandler := contracts.NewHandler(s.contractService)
-
-		// Public routes - anyone can read
-		contractHandler.RegisterRoutes(v1)
-
-		// Protected routes - only authenticated agents can propose/accept/reject/call/terminate
-		protectedContracts := v1.Group("")
-		protectedContracts.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
-		contractHandler.RegisterProtectedRoutes(protectedContracts)
 	}
 
 	// Streaming micropayment routes (per-tick payments for continuous services)
@@ -1276,7 +1059,6 @@ func (s *Server) readinessHandler(c *gin.Context) {
 	// Timer checks
 	checks["escrow_timer"] = timerStatus(s.escrowTimer)
 	checks["stream_timer"] = timerStatus(s.streamTimer)
-	checks["contract_timer"] = timerStatus(s.contractTimer)
 	checks["gateway_timer"] = timerStatus(s.gatewayTimer)
 	status := "ready"
 	httpStatus := http.StatusOK
@@ -1507,16 +1289,6 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.escrowTimer.Start(runCtx)
 	}
 
-	// Start credit default-check timer
-	if s.creditTimer != nil {
-		go s.creditTimer.Start(runCtx)
-	}
-
-	// Start contract expiration timer
-	if s.contractTimer != nil {
-		go s.contractTimer.Start(runCtx)
-	}
-
 	// Start stream stale-close timer
 	if s.streamTimer != nil {
 		go s.streamTimer.Start(runCtx)
@@ -1530,11 +1302,6 @@ func (s *Server) Run(ctx context.Context) error {
 	// Start reputation snapshot worker
 	if s.reputationWorker != nil {
 		go s.reputationWorker.Start(runCtx)
-	}
-
-	// Start verified agent guarantee enforcer
-	if s.verifiedEnforcer != nil {
-		go s.verifiedEnforcer.Start(runCtx)
 	}
 
 	// Start materialized view refresher for service discovery
@@ -1600,18 +1367,6 @@ func (s *Server) Shutdown() error {
 	if s.escrowTimer != nil {
 		s.escrowTimer.Stop()
 		s.logger.Info("escrow timer stopped")
-	}
-
-	// Stop credit timer
-	if s.creditTimer != nil {
-		s.creditTimer.Stop()
-		s.logger.Info("credit timer stopped")
-	}
-
-	// Stop contract timer
-	if s.contractTimer != nil {
-		s.contractTimer.Stop()
-		s.logger.Info("contract timer stopped")
 	}
 
 	// Stop stream timer
@@ -1874,40 +1629,6 @@ func (a *escrowLedgerAdapter) PartialEscrowSettle(ctx context.Context, buyerAddr
 	return a.l.PartialEscrowSettle(ctx, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference)
 }
 
-// creditMetricsAdapter adapts reputation.RegistryProvider to credit.MetricsProvider
-type creditMetricsAdapter struct {
-	rep *reputation.RegistryProvider
-}
-
-func (a *creditMetricsAdapter) GetAgentMetrics(ctx context.Context, address string) (int, float64, int, float64, error) {
-	metrics, err := a.rep.GetAgentMetrics(ctx, address)
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-	var successRate float64
-	if metrics.TotalTransactions > 0 {
-		successRate = float64(metrics.SuccessfulTxns) / float64(metrics.TotalTransactions)
-	}
-	return metrics.TotalTransactions, successRate, metrics.DaysOnNetwork, metrics.TotalVolumeUSD, nil
-}
-
-// creditLedgerAdapter adapts ledger.Ledger to credit.LedgerService.
-type creditLedgerAdapter struct {
-	l *ledger.Ledger
-}
-
-func (a *creditLedgerAdapter) GetCreditInfo(ctx context.Context, agentAddr string) (string, string, error) {
-	return a.l.GetCreditInfo(ctx, agentAddr)
-}
-
-func (a *creditLedgerAdapter) SetCreditLimit(ctx context.Context, agentAddr, limit string) error {
-	return a.l.SetCreditLimit(ctx, agentAddr, limit)
-}
-
-func (a *creditLedgerAdapter) RepayCredit(ctx context.Context, agentAddr, amount string) error {
-	return a.l.RepayCredit(ctx, agentAddr, amount)
-}
-
 // streamLedgerAdapter adapts ledger.Ledger to streams.LedgerService
 type streamLedgerAdapter struct {
 	l *ledger.Ledger
@@ -1953,36 +1674,6 @@ type TimelineItem struct {
 	Type      string      `json:"type"`
 	Timestamp time.Time   `json:"timestamp"`
 	Data      interface{} `json:"data"`
-}
-
-func (s *Server) getEscrowAnalytics(c *gin.Context) {
-	filter := escrow.AnalyticsFilter{
-		SellerAddr: c.Query("sellerAddr"),
-		ServiceID:  c.Query("serviceId"),
-	}
-	if from := c.Query("from"); from != "" {
-		t, err := time.Parse(time.RFC3339, from)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_from", "message": "from must be RFC3339 format"})
-			return
-		}
-		filter.From = &t
-	}
-	if to := c.Query("to"); to != "" {
-		t, err := time.Parse(time.RFC3339, to)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_to", "message": "to must be RFC3339 format"})
-			return
-		}
-		filter.To = &t
-	}
-
-	analytics, err := s.escrowAnalytics.GetAnalytics(c.Request.Context(), filter)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"analytics": analytics})
 }
 
 func (s *Server) getTimeline(c *gin.Context) {
@@ -2247,172 +1938,6 @@ func (n *webhookAlertNotifier) NotifyAlert(ctx context.Context, alert sessionkey
 			"expiresIn":  alert.ExpiresIn,
 		},
 	})
-}
-
-// verifiedLedgerAdapter adapts ledger.Ledger to verified.LedgerService
-type verifiedLedgerAdapter struct {
-	l *ledger.Ledger
-}
-
-func (a *verifiedLedgerAdapter) Hold(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.Hold(ctx, agentAddr, amount, reference)
-}
-
-func (a *verifiedLedgerAdapter) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.ConfirmHold(ctx, agentAddr, amount, reference)
-}
-
-func (a *verifiedLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
-	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
-}
-
-func (a *verifiedLedgerAdapter) Deposit(ctx context.Context, agentAddr, amount, txHash string) error {
-	return a.l.Deposit(ctx, agentAddr, amount, txHash)
-}
-
-// contractCallAdapter adapts contracts.Service to verified.ContractCallProvider
-type contractCallAdapter struct {
-	svc *contracts.Service
-}
-
-func (a *contractCallAdapter) GetRecentCallsByAgent(ctx context.Context, agentAddr string, windowSize int) (int, int, error) {
-	// Get all active contracts where this agent is the seller
-	allContracts, err := a.svc.ListByAgent(ctx, agentAddr, "active", 100)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	successCount := 0
-	totalCount := 0
-	for _, c := range allContracts {
-		if c.SellerAddr != agentAddr {
-			continue
-		}
-		calls, err := a.svc.ListCalls(ctx, c.ID, windowSize)
-		if err != nil {
-			continue
-		}
-		for _, call := range calls {
-			totalCount++
-			if call.Status == "success" {
-				successCount++
-			}
-			if totalCount >= windowSize {
-				return successCount, totalCount, nil
-			}
-		}
-	}
-	return successCount, totalCount, nil
-}
-
-// buyerPaymentAdapter adapts contracts.Service to verified.BuyerPaymentProvider
-type buyerPaymentAdapter struct {
-	svc *contracts.Service
-}
-
-func (a *buyerPaymentAdapter) GetRecentBuyerPayments(ctx context.Context, sellerAddr string, windowSize int) ([]verified.BuyerPayment, error) {
-	allContracts, err := a.svc.ListByAgent(ctx, sellerAddr, "active", 100)
-	if err != nil {
-		return nil, err
-	}
-
-	// Aggregate payments per buyer across all contracts where this agent is seller
-	buyerTotals := make(map[string]float64)
-	for _, c := range allContracts {
-		if c.SellerAddr != strings.ToLower(sellerAddr) {
-			continue
-		}
-		calls, err := a.svc.ListCalls(ctx, c.ID, windowSize)
-		if err != nil {
-			continue
-		}
-		pricePerCall, _ := new(big.Float).SetString(c.PricePerCall)
-		if pricePerCall == nil {
-			continue
-		}
-		pf, _ := pricePerCall.Float64()
-		for _, call := range calls {
-			if call.Status == "success" {
-				buyerTotals[c.BuyerAddr] += pf
-			}
-		}
-	}
-
-	var result []verified.BuyerPayment
-	for addr, amount := range buyerTotals {
-		result = append(result, verified.BuyerPayment{
-			BuyerAddr: addr,
-			Amount:    amount,
-		})
-	}
-	return result, nil
-}
-
-// gatewayVerificationAdapter adapts verified.Service to gateway.VerificationChecker
-type gatewayVerificationAdapter struct {
-	svc *verified.Service
-}
-
-func (a *gatewayVerificationAdapter) IsVerified(ctx context.Context, agentAddr string) (bool, error) {
-	return a.svc.IsVerified(ctx, agentAddr)
-}
-
-func (a *gatewayVerificationAdapter) GetGuarantee(ctx context.Context, agentAddr string) (float64, float64, error) {
-	return a.svc.GetGuarantee(ctx, agentAddr)
-}
-
-// gatewayContractAdapter adapts contracts.Service to gateway.ContractManager
-type gatewayContractAdapter struct {
-	svc *contracts.Service
-}
-
-func (a *gatewayContractAdapter) EnsureContract(ctx context.Context, buyerAddr, sellerAddr, serviceType, pricePerCall string, guaranteedSuccessRate float64, slaWindowSize int) (string, error) {
-	// Look for an existing active contract between this buyer and seller for this service type
-	existing, err := a.svc.ListByAgent(ctx, sellerAddr, "active", 50)
-	if err == nil {
-		for _, c := range existing {
-			if c.BuyerAddr == strings.ToLower(buyerAddr) && c.ServiceType == serviceType {
-				return c.ID, nil
-			}
-		}
-	}
-
-	// No existing contract — create one with auto-accept
-	contract, err := a.svc.Propose(ctx, contracts.ProposeRequest{
-		BuyerAddr:      buyerAddr,
-		SellerAddr:     sellerAddr,
-		ServiceType:    serviceType,
-		PricePerCall:   pricePerCall,
-		BuyerBudget:    "100.000000", // default budget for auto-contracts
-		Duration:       "168h",       // 7 days
-		MinVolume:      1,
-		MinSuccessRate: guaranteedSuccessRate,
-		SLAWindowSize:  slaWindowSize,
-	})
-	if err != nil {
-		return "", fmt.Errorf("auto-propose contract: %w", err)
-	}
-
-	// Auto-accept on behalf of the seller (they agreed by being verified)
-	if _, err := a.svc.Accept(ctx, contract.ID, sellerAddr); err != nil {
-		return contract.ID, fmt.Errorf("auto-accept contract: %w", err)
-	}
-
-	return contract.ID, nil
-}
-
-func (a *gatewayContractAdapter) RecordCall(ctx context.Context, contractID string, status string, latencyMs int) error {
-	// Use the seller address as caller — the gateway acts on behalf of the buyer/seller pair
-	contract, err := a.svc.Get(ctx, contractID)
-	if err != nil {
-		return err
-	}
-
-	_, err = a.svc.RecordCall(ctx, contractID, contracts.RecordCallRequest{
-		Status:    status,
-		LatencyMs: latencyMs,
-	}, contract.BuyerAddr)
-	return err
 }
 
 // receiptIssuerAdapter adapts receipts.Service to the ReceiptIssuer interface

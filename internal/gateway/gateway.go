@@ -30,9 +30,10 @@ var (
 type Status string
 
 const (
-	StatusActive  Status = "active"
-	StatusClosed  Status = "closed"
-	StatusExpired Status = "expired"
+	StatusActive           Status = "active"
+	StatusClosed           Status = "closed"
+	StatusExpired          Status = "expired"
+	StatusSettlementFailed Status = "settlement_failed" // Funds moved but status update failed; requires manual resolution
 )
 
 // Constants

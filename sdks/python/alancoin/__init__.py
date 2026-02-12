@@ -99,6 +99,13 @@ try:
 except ImportError:
     __all_realtime__ = []
 
+# Optional: MCP payment proxy (requires mcp)
+try:
+    from .mcp_proxy import MCPPaymentProxy, ToolPricing, DemoBackend, AlancoinBackend
+    __all_mcp__ = ["MCPPaymentProxy", "ToolPricing", "DemoBackend", "AlancoinBackend"]
+except ImportError:
+    __all_mcp__ = []
+
 __version__ = "0.1.0"
 __all__ = [
     # Client
@@ -143,5 +150,5 @@ __all__ = [
     "PaymentRequiredError",
     "ValidationError",
     "NetworkError",
-] + __all_wallet__ + __all_realtime__
+] + __all_wallet__ + __all_realtime__ + __all_mcp__
 

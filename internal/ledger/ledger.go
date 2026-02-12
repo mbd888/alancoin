@@ -122,10 +122,9 @@ type Store interface {
 
 // Ledger manages agent balances
 type Ledger struct {
-	store        Store
-	eventStore   EventStore
-	auditLogger  AuditLogger
-	alertChecker *AlertChecker
+	store       Store
+	eventStore  EventStore
+	auditLogger AuditLogger
 }
 
 // New creates a new ledger
@@ -141,12 +140,6 @@ func NewWithEvents(store Store, eventStore EventStore) *Ledger {
 // WithAuditLogger attaches an audit logger to the ledger.
 func (l *Ledger) WithAuditLogger(logger AuditLogger) *Ledger {
 	l.auditLogger = logger
-	return l
-}
-
-// WithAlertChecker attaches an alert checker to the ledger.
-func (l *Ledger) WithAlertChecker(checker *AlertChecker) *Ledger {
-	l.alertChecker = checker
 	return l
 }
 
@@ -193,13 +186,6 @@ func (l *Ledger) logAudit(ctx context.Context, agentAddr, operation, amount, ref
 		RequestID:   requestID,
 		IPAddress:   ip,
 	})
-}
-
-func (l *Ledger) checkAlerts(ctx context.Context, agentAddr string, bal *Balance, operation, amount string) {
-	if l.alertChecker == nil {
-		return
-	}
-	go l.alertChecker.Check(context.WithoutCancel(ctx), agentAddr, bal, operation, amount)
 }
 
 // GetBalance returns an agent's current balance
@@ -251,7 +237,7 @@ func (l *Ledger) Deposit(ctx context.Context, agentAddr, amount, txHash string) 
 	l.appendEvent(ctx, addr, "deposit", amount, txHash, "")
 	after, _ := l.store.GetBalance(ctx, addr)
 	l.logAudit(ctx, addr, "deposit", amount, txHash, before, after)
-	l.checkAlerts(ctx, addr, after, "deposit", amount)
+
 	return nil
 }
 
@@ -281,7 +267,7 @@ func (l *Ledger) Spend(ctx context.Context, agentAddr, amount, sessionKeyID stri
 	l.appendEvent(ctx, addr, "spend", amount, sessionKeyID, "")
 	after, _ := l.store.GetBalance(ctx, addr)
 	l.logAudit(ctx, addr, "spend", amount, sessionKeyID, before, after)
-	l.checkAlerts(ctx, addr, after, "spend", amount)
+
 	return nil
 }
 
@@ -317,8 +303,6 @@ func (l *Ledger) Transfer(ctx context.Context, from, to, amount, reference strin
 
 	l.logAudit(ctx, fromAddr, "transfer_out", amount, reference, fromBefore, fromAfter)
 	l.logAudit(ctx, toAddr, "transfer_in", amount, reference, toBefore, toAfter)
-	l.checkAlerts(ctx, fromAddr, fromAfter, "transfer_out", amount)
-	l.checkAlerts(ctx, toAddr, toAfter, "transfer_in", amount)
 
 	return nil
 }
@@ -344,7 +328,6 @@ func (l *Ledger) Withdraw(ctx context.Context, agentAddr, amount, txHash string)
 	l.appendEvent(ctx, addr, "withdrawal", amount, txHash, "")
 	after, _ := l.store.GetBalance(ctx, addr)
 	l.logAudit(ctx, addr, "withdrawal", amount, txHash, before, after)
-	l.checkAlerts(ctx, addr, after, "withdrawal", amount)
 	return nil
 }
 
@@ -377,7 +360,6 @@ func (l *Ledger) Refund(ctx context.Context, agentAddr, amount, reference string
 	l.appendEvent(ctx, addr, "refund", amount, reference, "")
 	after, _ := l.store.GetBalance(ctx, addr)
 	l.logAudit(ctx, addr, "refund", amount, reference, before, after)
-	l.checkAlerts(ctx, addr, after, "refund", amount)
 	return nil
 }
 
@@ -407,7 +389,6 @@ func (l *Ledger) Hold(ctx context.Context, agentAddr, amount, reference string) 
 	l.appendEvent(ctx, addr, "hold", amount, reference, "")
 	after, _ := l.store.GetBalance(ctx, addr)
 	l.logAudit(ctx, addr, "hold", amount, reference, before, after)
-	l.checkAlerts(ctx, addr, after, "hold", amount)
 	return nil
 }
 
@@ -466,7 +447,6 @@ func (l *Ledger) ReleaseHold(ctx context.Context, agentAddr, amount, reference s
 	l.appendEvent(ctx, addr, "release_hold", amount, reference, "")
 	after, _ := l.store.GetBalance(ctx, addr)
 	l.logAudit(ctx, addr, "release_hold", amount, reference, before, after)
-	l.checkAlerts(ctx, addr, after, "release_hold", amount)
 	return nil
 }
 
@@ -595,7 +575,6 @@ func (l *Ledger) EscrowLock(ctx context.Context, agentAddr, amount, reference st
 	l.appendEvent(ctx, addr, "escrow_lock", amount, reference, "")
 	after, _ := l.store.GetBalance(ctx, addr)
 	l.logAudit(ctx, addr, "escrow_lock", amount, reference, before, after)
-	l.checkAlerts(ctx, addr, after, "escrow_lock", amount)
 	return nil
 }
 
@@ -653,28 +632,7 @@ func (l *Ledger) RefundEscrow(ctx context.Context, agentAddr, amount, reference 
 	l.appendEvent(ctx, addr, "escrow_refund", amount, reference, "")
 	after, _ := l.store.GetBalance(ctx, addr)
 	l.logAudit(ctx, addr, "escrow_refund", amount, reference, before, after)
-	l.checkAlerts(ctx, addr, after, "escrow_refund", amount)
 	return nil
-}
-
-// SetCreditLimit sets the maximum credit for an agent
-func (l *Ledger) SetCreditLimit(ctx context.Context, agentAddr, limit string) error {
-	return l.store.SetCreditLimit(ctx, strings.ToLower(agentAddr), limit)
-}
-
-// RepayCredit reduces outstanding credit usage
-func (l *Ledger) RepayCredit(ctx context.Context, agentAddr, amount string) error {
-	amountBig, ok := usdc.Parse(amount)
-	if !ok || amountBig.Sign() <= 0 {
-		return ErrInvalidAmount
-	}
-	_ = amountBig
-	return l.store.RepayCredit(ctx, strings.ToLower(agentAddr), amount)
-}
-
-// GetCreditInfo returns the current credit limit and usage
-func (l *Ledger) GetCreditInfo(ctx context.Context, agentAddr string) (creditLimit, creditUsed string, err error) {
-	return l.store.GetCreditInfo(ctx, strings.ToLower(agentAddr))
 }
 
 // Reverse creates a compensating entry for an existing entry.

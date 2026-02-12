@@ -109,31 +109,3 @@ func (m *MemoryStore) ListByStatus(ctx context.Context, status Status, limit int
 	}
 	return result, nil
 }
-
-// QueryForAnalytics returns escrows matching the analytics filter.
-func (m *MemoryStore) QueryForAnalytics(_ context.Context, filter AnalyticsFilter, limit int) ([]*Escrow, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	var result []*Escrow
-	for _, e := range m.escrows {
-		if filter.SellerAddr != "" && e.SellerAddr != strings.ToLower(filter.SellerAddr) {
-			continue
-		}
-		if filter.ServiceID != "" && e.ServiceID != filter.ServiceID {
-			continue
-		}
-		if filter.From != nil && e.CreatedAt.Before(*filter.From) {
-			continue
-		}
-		if filter.To != nil && e.CreatedAt.After(*filter.To) {
-			continue
-		}
-		cp := *e
-		result = append(result, &cp)
-		if len(result) >= limit {
-			break
-		}
-	}
-	return result, nil
-}

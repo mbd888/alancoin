@@ -47,3 +47,6 @@ tmp/
 # Python
 __pycache__/
 *.pyc
+*.egg-info/
+/sdks/python/.venv/
+/experiments/.venv/

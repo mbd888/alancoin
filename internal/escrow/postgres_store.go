@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"time"
 )
 
@@ -228,49 +227,6 @@ func nullTime(t *time.Time) sql.NullTime {
 		return sql.NullTime{}
 	}
 	return sql.NullTime{Time: *t, Valid: true}
-}
-
-// QueryForAnalytics returns escrows matching the analytics filter.
-func (p *PostgresStore) QueryForAnalytics(ctx context.Context, filter AnalyticsFilter, limit int) ([]*Escrow, error) {
-	query := `SELECT id, buyer_addr, seller_addr, amount, service_id, session_key_id,
-		status, auto_release_at, delivered_at, resolved_at,
-		dispute_reason, resolution, created_at, updated_at,
-		COALESCE(dispute_evidence, '[]'::jsonb), COALESCE(arbitrator_addr, ''),
-		arbitration_deadline, COALESCE(partial_release_amount, ''), COALESCE(partial_refund_amount, ''),
-		dispute_window_until
-		FROM escrows WHERE 1=1`
-	args := []interface{}{}
-	argN := 1
-
-	if filter.SellerAddr != "" {
-		query += fmt.Sprintf(" AND seller_addr = $%d", argN)
-		args = append(args, filter.SellerAddr)
-		argN++
-	}
-	if filter.ServiceID != "" {
-		query += fmt.Sprintf(" AND service_id = $%d", argN)
-		args = append(args, filter.ServiceID)
-		argN++
-	}
-	if filter.From != nil {
-		query += fmt.Sprintf(" AND created_at >= $%d", argN)
-		args = append(args, *filter.From)
-		argN++
-	}
-	if filter.To != nil {
-		query += fmt.Sprintf(" AND created_at <= $%d", argN)
-		args = append(args, *filter.To)
-		argN++
-	}
-	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", argN)
-	args = append(args, limit)
-
-	rows, err := p.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	return scanEscrows(rows)
 }
 
 // Compile-time assertion that PostgresStore implements Store.

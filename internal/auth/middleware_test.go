@@ -233,6 +233,7 @@ func TestRequireOwnership_CaseInsensitive(t *testing.T) {
 
 func TestRequireAdmin_DemoMode_AuthenticatedPasses(t *testing.T) {
 	t.Setenv("ADMIN_SECRET", "")
+	t.Setenv("DEMO_MODE", "true")
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -248,6 +249,7 @@ func TestRequireAdmin_DemoMode_AuthenticatedPasses(t *testing.T) {
 
 func TestRequireAdmin_DemoMode_UnauthenticatedRejects(t *testing.T) {
 	t.Setenv("ADMIN_SECRET", "")
+	t.Setenv("DEMO_MODE", "true")
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -257,6 +259,22 @@ func TestRequireAdmin_DemoMode_UnauthenticatedRejects(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("Expected 401 in demo mode without auth, got %d", w.Code)
+	}
+}
+
+func TestRequireAdmin_NoSecretNoDemoMode_Rejects(t *testing.T) {
+	t.Setenv("ADMIN_SECRET", "")
+	t.Setenv("DEMO_MODE", "")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("POST", "/admin/deposit", nil)
+	c.Set(ContextKeyAPIKey, &APIKey{AgentAddr: "0xagentabc"})
+
+	RequireAdmin()(c)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("Expected 403 when no ADMIN_SECRET and no DEMO_MODE, got %d", w.Code)
 	}
 }
 

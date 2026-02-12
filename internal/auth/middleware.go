@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/subtle"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -123,11 +124,22 @@ func IsAuthenticated(c *gin.Context) bool {
 
 // RequireAdmin middleware restricts access to admin endpoints.
 // Checks the X-Admin-Secret header against the ADMIN_SECRET env var.
-// In demo mode (no ADMIN_SECRET set), allows any authenticated request.
+// Demo mode requires explicit DEMO_MODE=true to allow any authenticated request.
 func RequireAdmin() gin.HandlerFunc {
 	adminSecret := os.Getenv("ADMIN_SECRET")
+	demoMode := os.Getenv("DEMO_MODE") == "true"
+	if adminSecret == "" && !demoMode {
+		slog.Error("ADMIN_SECRET is not set and DEMO_MODE is not enabled. Admin endpoints will reject all requests. Set ADMIN_SECRET for production or DEMO_MODE=true for development.")
+	}
 	return func(c *gin.Context) {
 		if adminSecret == "" {
+			if !demoMode {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+					"error":   "forbidden",
+					"message": "Admin access is disabled. Set ADMIN_SECRET or enable DEMO_MODE.",
+				})
+				return
+			}
 			// Demo mode: allow any authenticated request
 			if _, exists := c.Get(ContextKeyAPIKey); !exists {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{

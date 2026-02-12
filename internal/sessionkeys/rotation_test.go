@@ -234,9 +234,9 @@ func TestRotateKeyHTTPEndpoint(t *testing.T) {
 	mgr := NewManager(store, nil)
 	handler := NewHandler(mgr, nil)
 
-	// Verify WithRiskScorer returns the handler (builder pattern)
-	h := handler.WithRiskScorer(nil)
+	// Verify WithReceiptIssuer returns the handler (builder pattern)
+	h := handler.WithReceiptIssuer(nil)
 	if h != handler {
-		t.Error("WithRiskScorer should return the same handler")
+		t.Error("WithReceiptIssuer should return the same handler")
 	}
 }

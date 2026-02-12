@@ -13,7 +13,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/mbd888/alancoin/internal/metrics"
-	"github.com/mbd888/alancoin/internal/risk"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
 	"github.com/mbd888/alancoin/internal/validation"
@@ -66,12 +65,6 @@ type EventEmitter interface {
 	EmitSessionKeyUsed(keyID, agentAddr string, amount string)
 }
 
-// RiskScorer evaluates transaction risk in real time.
-type RiskScorer interface {
-	Score(ctx context.Context, tx *risk.TransactionContext) *risk.RiskAssessment
-	RecordTransaction(keyID, to, amount string)
-}
-
 // ReceiptIssuer issues cryptographic receipts for payments.
 type ReceiptIssuer interface {
 	IssueReceipt(ctx context.Context, path, reference, from, to, amount, serviceID, status, metadata string) error
@@ -86,9 +79,7 @@ type Handler struct {
 	events        EventEmitter        // For broadcasting events (optional)
 	revenue       RevenueAccumulator  // For revenue staking interception (optional)
 	alerts        *AlertChecker       // For budget/expiration alerts (optional)
-	riskScorer    RiskScorer          // For real-time risk scoring (optional)
 	receiptIssuer ReceiptIssuer       // For cryptographic payment receipts (optional)
-	analytics     *AnalyticsService   // For spend analytics (optional)
 	logger        *slog.Logger
 	demoMode      bool // Skip on-chain transfers, use ledger only
 }
@@ -128,11 +119,6 @@ func (h *Handler) WithAlertChecker(a *AlertChecker) *Handler {
 }
 
 // WithRiskScorer adds a risk scoring engine for real-time transaction evaluation.
-func (h *Handler) WithRiskScorer(rs RiskScorer) *Handler {
-	h.riskScorer = rs
-	return h
-}
-
 // WithReceiptIssuer adds a receipt issuer for cryptographic payment proofs.
 func (h *Handler) WithReceiptIssuer(r ReceiptIssuer) *Handler {
 	h.receiptIssuer = r
@@ -140,11 +126,6 @@ func (h *Handler) WithReceiptIssuer(r ReceiptIssuer) *Handler {
 }
 
 // WithAnalyticsService adds a spend analytics service.
-func (h *Handler) WithAnalyticsService(a *AnalyticsService) *Handler {
-	h.analytics = a
-	return h
-}
-
 // WithDemoMode enables demo mode: balance holds work but on-chain transfers are skipped.
 func (h *Handler) WithDemoMode() *Handler {
 	h.demoMode = true
@@ -399,48 +380,6 @@ func (h *Handler) Transact(c *gin.Context) {
 		return
 	}
 
-	// Risk scoring: evaluate transaction before moving funds
-	var riskAssessment *risk.RiskAssessment
-	if h.riskScorer != nil {
-		amountF := 0.0
-		if parsed, ok := usdc.Parse(req.Amount); ok {
-			amountF, _ = strconv.ParseFloat(usdc.Format(parsed), 64)
-		}
-		txCtx := &risk.TransactionContext{
-			KeyID:      keyID,
-			OwnerAddr:  address,
-			To:         req.To,
-			Amount:     req.Amount,
-			AmountUSDC: amountF,
-			MaxTotal:   key.Permission.MaxTotal,
-			TotalSpent: key.Usage.TotalSpent,
-			Nonce:      req.Nonce,
-			Timestamp:  req.Timestamp,
-		}
-		riskAssessment = h.riskScorer.Score(c.Request.Context(), txCtx)
-		metrics.SessionKeyRiskScore.Observe(riskAssessment.Score)
-
-		if riskAssessment.Decision == risk.DecisionBlock {
-			metrics.RiskBlocksTotal.Inc()
-			h.logger.Warn("transaction blocked by risk engine",
-				"keyId", keyID, "score", riskAssessment.Score, "factors", riskAssessment.Factors)
-			c.JSON(http.StatusForbidden, gin.H{
-				"error":   "risk_blocked",
-				"message": "Transaction blocked by risk scoring engine",
-				"risk": gin.H{
-					"score":   riskAssessment.Score,
-					"factors": riskAssessment.Factors,
-				},
-			})
-			return
-		}
-
-		if riskAssessment.Decision == risk.DecisionWarn {
-			h.logger.Info("transaction risk warning",
-				"keyId", keyID, "score", riskAssessment.Score, "factors", riskAssessment.Factors)
-		}
-	}
-
 	// Execute the transfer if wallet is configured
 	var txHash string
 	var executed bool
@@ -620,11 +559,6 @@ func (h *Handler) Transact(c *gin.Context) {
 		return
 	}
 
-	// Record successful transaction in risk engine's sliding window
-	if h.riskScorer != nil {
-		h.riskScorer.RecordTransaction(keyID, req.To, req.Amount)
-	}
-
 	// Check budget thresholds and emit alerts
 	if h.alerts != nil {
 		h.alerts.CheckBudget(c.Request.Context(), key)
@@ -662,15 +596,6 @@ func (h *Handler) Transact(c *gin.Context) {
 			"spentToday":       key.Usage.SpentToday,
 			"lastNonce":        key.Usage.LastNonce,
 		},
-	}
-
-	// Add risk assessment if scorer is present
-	if riskAssessment != nil {
-		response["risk"] = gin.H{
-			"score":    riskAssessment.Score,
-			"decision": riskAssessment.Decision,
-			"factors":  riskAssessment.Factors,
-		}
 	}
 
 	// Add delegation info if this is a delegated key
@@ -997,61 +922,6 @@ func (h *Handler) RotateSessionKey(c *gin.Context) {
 			"gracePeriodEnd": gracePeriodEnd,
 		},
 	})
-}
-
-// GetKeyAnalytics handles GET /v1/sessions/:keyId/analytics
-func (h *Handler) GetKeyAnalytics(c *gin.Context) {
-	keyID := c.Param("keyId")
-
-	if h.analytics == nil {
-		c.JSON(http.StatusNotImplemented, gin.H{
-			"error":   "not_configured",
-			"message": "Analytics service is not configured",
-		})
-		return
-	}
-
-	ka, err := h.analytics.GetKeyAnalytics(c.Request.Context(), keyID)
-	if err != nil {
-		if err == ErrKeyNotFound {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error":   "not_found",
-				"message": "Session key not found",
-			})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "analytics_failed",
-			"message": "Failed to compute analytics",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"analytics": ka})
-}
-
-// GetOwnerAnalytics handles GET /v1/agents/:address/sessions/analytics
-func (h *Handler) GetOwnerAnalytics(c *gin.Context) {
-	address := c.Param("address")
-
-	if h.analytics == nil {
-		c.JSON(http.StatusNotImplemented, gin.H{
-			"error":   "not_configured",
-			"message": "Analytics service is not configured",
-		})
-		return
-	}
-
-	oa, err := h.analytics.GetOwnerAnalytics(c.Request.Context(), address)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "analytics_failed",
-			"message": "Failed to compute analytics",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"analytics": oa})
 }
 
 func calculateRemaining(limit string, spent string) string {
