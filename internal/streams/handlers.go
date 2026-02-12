@@ -1,6 +1,7 @@
 package streams
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -10,14 +11,26 @@ import (
 	"github.com/mbd888/alancoin/internal/validation"
 )
 
+// ScopeChecker verifies that a session key possesses a required scope.
+type ScopeChecker interface {
+	ValidateScope(ctx context.Context, keyID, scope string) error
+}
+
 // Handler provides HTTP endpoints for streaming micropayments.
 type Handler struct {
-	service *Service
+	service      *Service
+	scopeChecker ScopeChecker
 }
 
 // NewHandler creates a new stream handler.
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
+}
+
+// WithScopeChecker adds scope enforcement for session key capabilities.
+func (h *Handler) WithScopeChecker(sc ScopeChecker) *Handler {
+	h.scopeChecker = sc
+	return h
 }
 
 // RegisterRoutes sets up public (read-only) stream routes.
@@ -68,6 +81,17 @@ func (h *Handler) OpenStream(c *gin.Context) {
 			"message": "Authenticated agent must be the buyer",
 		})
 		return
+	}
+
+	// Enforce "streams" scope if a session key is provided
+	if h.scopeChecker != nil && req.SessionKeyID != "" {
+		if err := h.scopeChecker.ValidateScope(c.Request.Context(), req.SessionKeyID, "streams"); err != nil {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "scope_not_allowed",
+				"message": "Session key does not have the 'streams' scope",
+			})
+			return
+		}
 	}
 
 	stream, err := h.service.Open(c.Request.Context(), req)

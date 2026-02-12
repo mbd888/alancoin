@@ -1105,3 +1105,205 @@ class StreamingSession:
         self._spent = Decimal(stream.get("spentAmount", str(self._spent)))
         self._active = stream.get("status") == "open"
         return stream
+
+
+class GatewaySession:
+    """A server-side payment proxy session for AI agents.
+
+    The gateway handles discover -> pay -> forward -> settle in a single
+    server-side round trip. This is the recommended path for most agents:
+    fewer HTTP calls, no client-side session key management, and built-in
+    settlement with receipts and reputation updates.
+
+    Created via ``client.gateway()``. Holds funds upfront, releases
+    unspent on close.
+
+    Example::
+
+        with client.gateway(max_total="5.00") as gw:
+            result = gw.call("translation", text="Hello", target="es")
+            print(result["output"])
+            print(f"Spent: ${gw.total_spent}, Remaining: ${gw.remaining}")
+    """
+
+    def __init__(
+        self,
+        client: "Alancoin",
+        max_total: str = "10.00",
+        max_per_tx: str = None,
+        expires_in: str = "1h",
+        allowed_services: list = None,
+        allowed_recipients: list = None,
+    ):
+        self._client = client
+        self._max_total = max_total
+        self._max_per_tx = max_per_tx
+        self._expires_in = expires_in
+        self._allowed_services = allowed_services
+        self._allowed_recipients = allowed_recipients
+        self._session_id: Optional[str] = None
+        self._total_spent = Decimal("0")
+        self._request_count = 0
+        self._active = False
+        self._lock = threading.Lock()
+
+    # -- Properties -----------------------------------------------------------
+
+    @property
+    def session_id(self) -> Optional[str]:
+        """The server-assigned gateway session ID."""
+        return self._session_id
+
+    @property
+    def total_spent(self) -> str:
+        """Total USDC spent so far."""
+        return str(self._total_spent)
+
+    @property
+    def remaining(self) -> str:
+        """USDC remaining in the session budget."""
+        return str(Decimal(self._max_total) - self._total_spent)
+
+    @property
+    def request_count(self) -> int:
+        """Number of proxy requests made."""
+        return self._request_count
+
+    @property
+    def is_active(self) -> bool:
+        """Whether the gateway session is currently active."""
+        return self._active
+
+    # -- Context manager ------------------------------------------------------
+
+    def __enter__(self):
+        self._open()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._active:
+            try:
+                self.close()
+            except Exception as e:
+                logger.warning(
+                    "Failed to close gateway session %s: %s", self._session_id, e
+                )
+        return False
+
+    def _open(self):
+        """Create the gateway session on the server."""
+        resp = self._client.create_gateway_session(
+            max_total=self._max_total,
+            expires_in=self._expires_in,
+            allowed_services=self._allowed_services,
+            allowed_recipients=self._allowed_recipients,
+            max_per_tx=self._max_per_tx,
+        )
+
+        session = resp.get("session", {})
+        self._session_id = session.get("id")
+        if not self._session_id:
+            raise AlancoinError(
+                "Server returned no gateway session ID", code="invalid_response"
+            )
+        self._active = True
+        logger.info(
+            "Gateway session opened: %s (budget=%s, expires=%s)",
+            self._session_id,
+            self._max_total,
+            self._expires_in,
+        )
+
+    # -- Proxy calls ----------------------------------------------------------
+
+    def call(self, service_type: str, **params) -> dict:
+        """Proxy a service call through the gateway.
+
+        The server handles discover -> select -> pay -> forward -> settle
+        in a single round trip.
+
+        Args:
+            service_type: Type of service ("translation", "inference", etc.).
+            **params: Parameters forwarded to the service endpoint.
+
+        Returns:
+            Service response dict with payment metadata.
+
+        Raises:
+            AlancoinError: If session is closed or budget exhausted.
+        """
+        with self._lock:
+            if not self._active:
+                raise AlancoinError(
+                    "Gateway session is not active", code="gateway_inactive"
+                )
+
+        resp = self._client.gateway_proxy(
+            token=self._session_id,
+            service_type=service_type,
+            **params,
+        )
+
+        # Update local tracking from server response
+        with self._lock:
+            if "cost" in resp:
+                cost = _parse_decimal(resp["cost"], "cost")
+                if cost >= 0:
+                    self._total_spent += cost
+            self._request_count += 1
+
+        return resp
+
+    # -- Close ----------------------------------------------------------------
+
+    def close(self) -> dict:
+        """Close the gateway session, releasing unspent funds.
+
+        Returns:
+            Closed session with final amounts.
+        """
+        with self._lock:
+            if not self._active:
+                raise AlancoinError(
+                    "Gateway session is not active", code="gateway_inactive"
+                )
+            self._active = False
+
+        resp = self._client.close_gateway_session(self._session_id)
+
+        session = resp.get("session", {})
+        logger.info(
+            "Gateway session closed: %s (spent=%s, requests=%d)",
+            self._session_id,
+            session.get("spentAmount", self.total_spent),
+            self._request_count,
+        )
+        return resp
+
+    # -- Info -----------------------------------------------------------------
+
+    def logs(self, limit: int = 100) -> list:
+        """Fetch proxy request logs for this session.
+
+        Args:
+            limit: Maximum log entries to return.
+
+        Returns:
+            List of request log records.
+        """
+        resp = self._client.list_gateway_logs(self._session_id, limit=limit)
+        return resp.get("logs", [])
+
+    def refresh(self) -> dict:
+        """Refresh session state from the server.
+
+        Returns:
+            Current session data.
+        """
+        resp = self._client.get_gateway_session(self._session_id)
+        session = resp.get("session", {})
+        spent = session.get("spentAmount")
+        if spent is not None:
+            self._total_spent = Decimal(spent)
+        self._active = session.get("status") == "active"
+        return session

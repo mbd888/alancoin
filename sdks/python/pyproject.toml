@@ -84,4 +84,4 @@ disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --cov=alancoin --cov-report=term-missing"
+addopts = "-v"

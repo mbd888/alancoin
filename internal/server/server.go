@@ -77,6 +77,8 @@ type Server struct {
 	escrowService          *escrow.Service
 	escrowTimer            *escrow.Timer
 	multiStepEscrowService *escrow.MultiStepService
+	escrowTemplateService  *escrow.TemplateService
+	escrowAnalytics        *escrow.EscrowAnalyticsService
 	creditService          *credit.Service
 	creditTimer            *credit.Timer
 	contractService        *contracts.Service
@@ -180,7 +182,9 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		if err := policyStore.Migrate(ctx); err != nil {
 			s.logger.Warn("failed to migrate policy store", "error", err)
 		}
-		s.sessionMgr = sessionkeys.NewManager(sessionStore, nil, policyStore)
+		delegationAuditLogger := sessionkeys.NewPostgresAuditLogger(db)
+		s.sessionMgr = sessionkeys.NewManager(sessionStore, nil, policyStore).
+			WithDelegationAuditLogger(delegationAuditLogger)
 
 		// API keys with Postgres
 		authStore := auth.NewPostgresStore(db)
@@ -234,6 +238,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.multiStepEscrowService = escrow.NewMultiStepService(
 			escrow.NewMultiStepPostgresStore(db), &escrowLedgerAdapter{s.ledger},
 		).WithLogger(s.logger)
+		s.escrowTemplateService = escrow.NewTemplateService(
+			escrow.NewTemplatePostgresStore(db), escrowStore, &escrowLedgerAdapter{s.ledger},
+		)
+		s.escrowAnalytics = escrow.NewEscrowAnalyticsService(escrowStore)
 		s.logger.Info("escrow enabled (postgres)")
 
 		// Contracts with PostgreSQL store
@@ -360,7 +368,9 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		// Session keys with in-memory store
 		sessionStore := sessionkeys.NewMemoryStore()
 		policyStore := sessionkeys.NewPolicyMemoryStore()
-		s.sessionMgr = sessionkeys.NewManager(sessionStore, nil, policyStore)
+		memDelegationAuditLogger := sessionkeys.NewMemoryAuditLogger()
+		s.sessionMgr = sessionkeys.NewManager(sessionStore, nil, policyStore).
+			WithDelegationAuditLogger(memDelegationAuditLogger)
 
 		// API keys with in-memory store
 		s.authMgr = auth.NewManager(auth.NewMemoryStore())
@@ -390,6 +400,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.multiStepEscrowService = escrow.NewMultiStepService(
 			escrow.NewMultiStepMemoryStore(), &escrowLedgerAdapter{s.ledger},
 		).WithLogger(s.logger)
+		s.escrowTemplateService = escrow.NewTemplateService(
+			escrow.NewTemplateMemoryStore(), escrowStore, &escrowLedgerAdapter{s.ledger},
+		)
+		s.escrowAnalytics = escrow.NewEscrowAnalyticsService(escrowStore)
 		s.logger.Info("escrow enabled (in-memory)")
 
 		// Contracts with in-memory store
@@ -837,6 +851,12 @@ func (s *Server) setupRoutes() {
 		sessionHandler = sessionHandler.WithReceiptIssuer(&receiptIssuerAdapter{s.receiptService})
 	}
 
+	// Add spend analytics service
+	if s.sessionMgr != nil {
+		analyticsService := sessionkeys.NewAnalyticsService(s.sessionMgr.Store())
+		sessionHandler = sessionHandler.WithAnalyticsService(analyticsService)
+	}
+
 	protectedSessions := v1.Group("")
 	protectedSessions.Use(auth.Middleware(s.authMgr))
 	{
@@ -859,6 +879,25 @@ func (s *Server) setupRoutes() {
 	// Delegation routes (A2A) — authenticated by session key signature, no API key needed
 	v1.POST("/sessions/:keyId/delegate", sessionHandler.CreateDelegation)
 	v1.GET("/sessions/:keyId/tree", sessionHandler.GetDelegationTree)
+	v1.GET("/sessions/:keyId/delegation-log", sessionHandler.GetDelegationLog)
+	v1.GET("/sessions/:keyId/analytics", sessionHandler.GetKeyAnalytics)
+	v1.GET("/agents/:address/sessions/analytics", sessionHandler.GetOwnerAnalytics)
+
+	// =========================================================================
+	// Gateway — transparent payment proxy (the primary path for AI agents)
+	// One call: discover -> pay -> forward -> settle -> receipt -> reputation
+	// =========================================================================
+	if s.gatewayService != nil {
+		gatewayHandler := gateway.NewHandler(s.gatewayService)
+
+		// Protected routes - session CRUD requires API key auth
+		protectedGateway := v1.Group("")
+		protectedGateway.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		gatewayHandler.RegisterProtectedRoutes(protectedGateway)
+
+		// Proxy route - uses gateway token auth (X-Gateway-Token), no API key needed
+		gatewayHandler.RegisterProxyRoute(v1)
+	}
 
 	// Ledger routes (agent balances)
 	if s.ledger != nil {
@@ -965,6 +1004,9 @@ func (s *Server) setupRoutes() {
 	// Escrow routes (buyer protection for service payments)
 	if s.escrowService != nil {
 		escrowHandler := escrow.NewHandler(s.escrowService)
+		if s.sessionMgr != nil {
+			escrowHandler = escrowHandler.WithScopeChecker(s.sessionMgr)
+		}
 
 		// Public routes - anyone can read
 		escrowHandler.RegisterRoutes(v1)
@@ -973,6 +1015,26 @@ func (s *Server) setupRoutes() {
 		protectedEscrow := v1.Group("")
 		protectedEscrow.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
 		escrowHandler.RegisterProtectedRoutes(protectedEscrow)
+	}
+
+	// Escrow template routes (milestone-based escrows)
+	if s.escrowTemplateService != nil {
+		tmplHandler := escrow.NewTemplateHandler(s.escrowTemplateService)
+
+		// Public routes
+		tmplHandler.RegisterRoutes(v1)
+
+		// Protected routes
+		protectedTmpl := v1.Group("")
+		protectedTmpl.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		tmplHandler.RegisterProtectedRoutes(protectedTmpl)
+	}
+
+	// Escrow analytics (admin only)
+	if s.escrowAnalytics != nil {
+		adminEscrow := v1.Group("")
+		adminEscrow.Use(auth.Middleware(s.authMgr), auth.RequireAdmin())
+		adminEscrow.GET("/admin/escrow/analytics", s.getEscrowAnalytics)
 	}
 
 	// MultiStep escrow routes (atomic N-step pipeline payments)
@@ -1036,6 +1098,9 @@ func (s *Server) setupRoutes() {
 	// Streaming micropayment routes (per-tick payments for continuous services)
 	if s.streamService != nil {
 		streamHandler := streams.NewHandler(s.streamService)
+		if s.sessionMgr != nil {
+			streamHandler = streamHandler.WithScopeChecker(s.sessionMgr)
+		}
 
 		// Public routes - anyone can read
 		streamHandler.RegisterRoutes(v1)
@@ -1050,19 +1115,6 @@ func (s *Server) setupRoutes() {
 	if s.receiptService != nil {
 		receiptHandler := receipts.NewHandler(s.receiptService)
 		receiptHandler.RegisterRoutes(v1)
-	}
-
-	// Gateway routes (transparent payment proxy for AI agents)
-	if s.gatewayService != nil {
-		gatewayHandler := gateway.NewHandler(s.gatewayService)
-
-		// Protected routes - session CRUD requires API key auth
-		protectedGateway := v1.Group("")
-		protectedGateway.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
-		gatewayHandler.RegisterProtectedRoutes(protectedGateway)
-
-		// Proxy route - uses gateway token auth (X-Gateway-Token), no API key needed
-		gatewayHandler.RegisterProxyRoute(v1)
 	}
 
 	// Negotiation routes (autonomous deal-making between agents)
@@ -1098,7 +1150,8 @@ func (s *Server) setupRoutes() {
 
 	// Stakes routes (agent revenue staking / investment)
 	if s.stakesService != nil {
-		stakesHandler := stakes.NewHandler(s.stakesService)
+		stakeAnalytics := stakes.NewStakeAnalyticsService(s.stakesService.Store())
+		stakesHandler := stakes.NewHandler(s.stakesService).WithAnalytics(stakeAnalytics)
 
 		// Public routes - anyone can browse offerings and portfolios
 		stakesHandler.RegisterRoutes(v1)
@@ -2093,6 +2146,36 @@ type TimelineItem struct {
 }
 
 // getTimeline returns a unified feed of transactions + commentary
+func (s *Server) getEscrowAnalytics(c *gin.Context) {
+	filter := escrow.AnalyticsFilter{
+		SellerAddr: c.Query("sellerAddr"),
+		ServiceID:  c.Query("serviceId"),
+	}
+	if from := c.Query("from"); from != "" {
+		t, err := time.Parse(time.RFC3339, from)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_from", "message": "from must be RFC3339 format"})
+			return
+		}
+		filter.From = &t
+	}
+	if to := c.Query("to"); to != "" {
+		t, err := time.Parse(time.RFC3339, to)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_to", "message": "to must be RFC3339 format"})
+			return
+		}
+		filter.To = &t
+	}
+
+	analytics, err := s.escrowAnalytics.GetAnalytics(c.Request.Context(), filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"analytics": analytics})
+}
+
 func (s *Server) getTimeline(c *gin.Context) {
 	ctx := c.Request.Context()
 	limit := 50

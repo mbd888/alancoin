@@ -36,8 +36,9 @@ type ServiceResolver interface {
 type Manager struct {
 	store       Store
 	resolver    ServiceResolver
-	policyStore PolicyStore // optional: policy engine for additional constraints
-	keyLocks    sync.Map    // per-key locks to prevent nonce TOCTOU replay
+	policyStore PolicyStore           // optional: policy engine for additional constraints
+	auditLog    DelegationAuditLogger // optional: delegation event audit trail
+	keyLocks    sync.Map              // per-key locks to prevent nonce TOCTOU replay
 }
 
 // LockKey acquires a per-key mutex and returns the unlock function.
@@ -102,9 +103,25 @@ func NewManager(store Store, resolver ServiceResolver, policyStores ...PolicySto
 	return m
 }
 
+// WithDelegationAuditLogger adds an audit logger for delegation events.
+func (m *Manager) WithDelegationAuditLogger(al DelegationAuditLogger) *Manager {
+	m.auditLog = al
+	return m
+}
+
+// AuditLogger returns the manager's delegation audit logger (may be nil).
+func (m *Manager) AuditLogger() DelegationAuditLogger {
+	return m.auditLog
+}
+
 // PolicyStore returns the manager's policy store (may be nil).
 func (m *Manager) PolicyStore() PolicyStore {
 	return m.policyStore
+}
+
+// Store returns the manager's session key store.
+func (m *Manager) Store() Store {
+	return m.store
 }
 
 // Create creates a new session key with the given permissions
@@ -158,6 +175,17 @@ func (m *Manager) Create(ctx context.Context, ownerAddr string, req *SessionKeyR
 		}
 	}
 
+	// Validate and default scopes
+	scopes := req.Scopes
+	if len(scopes) == 0 {
+		scopes = DefaultScopes
+	}
+	for _, s := range scopes {
+		if !ValidScopes[s] {
+			return nil, ErrInvalidScope
+		}
+	}
+
 	// Create the session key
 	key := &SessionKey{
 		ID:        idgen.WithPrefix("sk_"),
@@ -172,6 +200,7 @@ func (m *Manager) Create(ctx context.Context, ownerAddr string, req *SessionKeyR
 			AllowedRecipients:   toLower(req.AllowedRecipients),
 			AllowedServiceTypes: toLower(req.AllowedServiceTypes),
 			AllowAny:            req.AllowAny,
+			Scopes:              scopes,
 			Label:               req.Label,
 		},
 		Usage: SessionKeyUsage{
@@ -217,6 +246,21 @@ func (m *Manager) Revoke(ctx context.Context, id string) error {
 		return err
 	}
 
+	// Audit: log revocation
+	rootKeyID := key.RootKeyID
+	if rootKeyID == "" {
+		rootKeyID = key.ID
+	}
+	m.logDelegationEvent(ctx, &DelegationLogEntry{
+		ParentKeyID:   key.ParentKeyID,
+		ChildKeyID:    id,
+		RootKeyID:     rootKeyID,
+		RootOwnerAddr: key.OwnerAddr,
+		Depth:         key.Depth,
+		EventType:     DelegationEventRevoke,
+		AncestorChain: m.buildAncestorChain(ctx, id),
+	})
+
 	// Cascade: revoke all children
 	children, err := m.store.GetByParent(ctx, id)
 	if err != nil {
@@ -224,6 +268,21 @@ func (m *Manager) Revoke(ctx context.Context, id string) error {
 	}
 	for _, child := range children {
 		if child.RevokedAt == nil {
+			// Audit: log cascade revocation for each child
+			childRootKeyID := child.RootKeyID
+			if childRootKeyID == "" {
+				childRootKeyID = child.ID
+			}
+			m.logDelegationEvent(ctx, &DelegationLogEntry{
+				ParentKeyID:   id,
+				ChildKeyID:    child.ID,
+				RootKeyID:     childRootKeyID,
+				RootOwnerAddr: child.OwnerAddr,
+				Depth:         child.Depth,
+				Reason:        "parent revoked: " + id,
+				EventType:     DelegationEventCascadeRevoke,
+				AncestorChain: m.buildAncestorChain(ctx, child.ID),
+			})
 			_ = m.Revoke(ctx, child.ID) // best-effort recursive revocation
 		}
 	}
@@ -289,6 +348,7 @@ func (m *Manager) RotateKey(ctx context.Context, oldKeyID, newPublicKey string) 
 			AllowedRecipients:   oldKey.Permission.AllowedRecipients,
 			AllowedServiceTypes: oldKey.Permission.AllowedServiceTypes,
 			AllowAny:            oldKey.Permission.AllowAny,
+			Scopes:              oldKey.Permission.Scopes,
 			Label:               oldKey.Permission.Label,
 		},
 		Usage: SessionKeyUsage{
@@ -319,6 +379,23 @@ func (m *Manager) RotateKey(ctx context.Context, oldKeyID, newPublicKey string) 
 	if err := m.store.ReParentChildren(ctx, oldKeyID, newKey.ID); err != nil {
 		return nil, fmt.Errorf("failed to re-parent children: %w", err)
 	}
+
+	// Audit: log rotation
+	rootKeyID := oldKey.RootKeyID
+	if rootKeyID == "" {
+		rootKeyID = oldKey.ID
+	}
+	m.logDelegationEvent(ctx, &DelegationLogEntry{
+		ParentKeyID:   oldKeyID,
+		ChildKeyID:    newKey.ID,
+		RootKeyID:     rootKeyID,
+		RootOwnerAddr: oldKey.OwnerAddr,
+		Depth:         oldKey.Depth,
+		MaxTotal:      remaining,
+		Reason:        "rotated from " + oldKeyID,
+		EventType:     DelegationEventRotate,
+		AncestorChain: m.buildAncestorChain(ctx, oldKeyID),
+	})
 
 	return newKey, nil
 }
@@ -480,6 +557,33 @@ func (m *Manager) CreateDelegated(ctx context.Context, parentKeyID string, req *
 		childAllowAny = true
 	}
 
+	// 10b. Intersect scopes (child can only narrow)
+	parentScopes := parent.Permission.Scopes
+	if len(parentScopes) == 0 {
+		parentScopes = DefaultScopes
+	}
+	childScopes := req.Scopes
+	if len(childScopes) == 0 {
+		childScopes = parentScopes // inherit parent's scopes
+	} else {
+		// Validate all child scopes are recognized
+		for _, s := range childScopes {
+			if !ValidScopes[s] {
+				return nil, ErrInvalidScope
+			}
+		}
+		// Enforce subset: every child scope must exist in parent
+		parentScopeSet := make(map[string]bool, len(parentScopes))
+		for _, s := range parentScopes {
+			parentScopeSet[s] = true
+		}
+		for _, s := range childScopes {
+			if !parentScopeSet[s] {
+				return nil, ErrChildScopeNotAllowed
+			}
+		}
+	}
+
 	// 11. Ensure child doesn't outlive parent
 	var expiresAt time.Time
 	if req.ExpiresIn != "" {
@@ -521,6 +625,7 @@ func (m *Manager) CreateDelegated(ctx context.Context, parentKeyID string, req *
 			AllowedRecipients:   childRecipients,
 			AllowedServiceTypes: childServiceTypes,
 			AllowAny:            childAllowAny,
+			Scopes:              childScopes,
 			Label:               req.DelegationLabel,
 		},
 		Usage: SessionKeyUsage{
@@ -538,6 +643,19 @@ func (m *Manager) CreateDelegated(ctx context.Context, parentKeyID string, req *
 	if err := m.store.Create(ctx, childKey); err != nil {
 		return nil, fmt.Errorf("failed to create delegated key: %w", err)
 	}
+
+	// Audit: log delegation creation
+	m.logDelegationEvent(ctx, &DelegationLogEntry{
+		ParentKeyID:   parentKeyID,
+		ChildKeyID:    childKey.ID,
+		RootKeyID:     rootKeyID,
+		RootOwnerAddr: parent.OwnerAddr,
+		Depth:         childDepth,
+		MaxTotal:      req.MaxTotal,
+		Reason:        req.DelegationLabel,
+		EventType:     DelegationEventCreate,
+		AncestorChain: m.buildAncestorChain(ctx, parentKeyID),
+	})
 
 	// 15. Update parent nonce
 	parent.Usage.LastNonce = req.Nonce
@@ -582,6 +700,21 @@ func (m *Manager) RecordUsageWithCascade(ctx context.Context, keyID string, amou
 		if ancestor.Permission.MaxTotal != "" {
 			maxTotal, ok := usdc.Parse(ancestor.Permission.MaxTotal)
 			if ok && newTotal.Cmp(maxTotal) > 0 {
+				// Audit: log budget exceeded on ancestor
+				ancestorRootKeyID := ancestor.RootKeyID
+				if ancestorRootKeyID == "" {
+					ancestorRootKeyID = ancestor.ID
+				}
+				m.logDelegationEvent(ctx, &DelegationLogEntry{
+					ParentKeyID:   ancestor.ID,
+					ChildKeyID:    keyID,
+					RootKeyID:     ancestorRootKeyID,
+					RootOwnerAddr: ancestor.OwnerAddr,
+					Depth:         ancestor.Depth,
+					MaxTotal:      ancestor.Permission.MaxTotal,
+					Reason:        fmt.Sprintf("child %s spend %s would exceed ancestor %s budget %s (current: %s)", keyID, amount, ancestor.ID, ancestor.Permission.MaxTotal, ancestor.Usage.TotalSpent),
+					EventType:     DelegationEventBudgetExceed,
+				})
 				return ErrExceedsTotal
 			}
 		}
@@ -871,6 +1004,27 @@ func (m *Manager) validateTransaction(ctx context.Context, key *SessionKey, to s
 	return nil
 }
 
+// ScopeChecker verifies that a session key possesses a required scope.
+// This interface is consumed by other packages (streams, escrow) to enforce
+// fine-grained capability control without importing the full Manager.
+type ScopeChecker interface {
+	ValidateScope(ctx context.Context, keyID, scope string) error
+}
+
+// ValidateScope checks that the session key identified by keyID has the given scope.
+// Returns ErrScopeNotAllowed if the key lacks the scope, ErrKeyNotFound if the key
+// does not exist.
+func (m *Manager) ValidateScope(ctx context.Context, keyID, scope string) error {
+	key, err := m.store.Get(ctx, keyID)
+	if err != nil {
+		return ErrKeyNotFound
+	}
+	if !key.HasScope(scope) {
+		return ErrScopeNotAllowed
+	}
+	return nil
+}
+
 // Helper functions
 
 func parseDuration(s string) (time.Duration, error) {
@@ -892,6 +1046,31 @@ func toLower(ss []string) []string {
 		result[i] = strings.ToLower(s)
 	}
 	return result
+}
+
+// buildAncestorChain returns the list of key IDs from the given key up to the root.
+func (m *Manager) buildAncestorChain(ctx context.Context, keyID string) []string {
+	var chain []string
+	current := keyID
+	depth := 0
+	for current != "" && depth < MaxDelegationDepth+2 {
+		chain = append(chain, current)
+		key, err := m.store.Get(ctx, current)
+		if err != nil {
+			break
+		}
+		current = key.ParentKeyID
+		depth++
+	}
+	return chain
+}
+
+// logDelegationEvent is a best-effort audit logger; failures are silently ignored.
+func (m *Manager) logDelegationEvent(ctx context.Context, entry *DelegationLogEntry) {
+	if m.auditLog == nil {
+		return
+	}
+	_ = m.auditLog.LogEvent(ctx, entry)
 }
 
 // intersectStrings returns elements present in both slices (case-insensitive)

@@ -30,8 +30,9 @@ func (p *PostgresStore) Create(ctx context.Context, key *SessionKey) error {
 			transaction_count, total_spent, spent_today, last_used, last_reset_day, last_nonce,
 			revoked_at, created_at,
 			parent_key_id, depth, root_key_id, delegation_label,
-			rotated_from_id, rotated_to_id, rotation_grace_until
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+			rotated_from_id, rotated_to_id, rotation_grace_until,
+			scopes
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
 	`,
 		key.ID,
 		strings.ToLower(key.OwnerAddr),
@@ -60,6 +61,7 @@ func (p *PostgresStore) Create(ctx context.Context, key *SessionKey) error {
 		nullString(key.RotatedFromID),
 		nullString(key.RotatedToID),
 		nullTime(timePtr(key.RotationGraceEnd)),
+		pq.Array(key.Permission.Scopes),
 	)
 
 	if err != nil {
@@ -85,7 +87,8 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error)
 			transaction_count, total_spent, spent_today, last_used, last_reset_day, COALESCE(last_nonce, 0),
 			revoked_at, created_at,
 			parent_key_id, COALESCE(depth, 0), root_key_id, delegation_label,
-			rotated_from_id, rotated_to_id, rotation_grace_until
+			rotated_from_id, rotated_to_id, rotation_grace_until,
+			COALESCE(scopes, ARRAY['spend', 'read'])
 		FROM session_keys WHERE id = $1
 		AND revoked_at IS NULL AND expires_at > NOW()
 	`, id).Scan(
@@ -116,6 +119,7 @@ func (p *PostgresStore) Get(ctx context.Context, id string) (*SessionKey, error)
 		&rotatedFromID,
 		&rotatedToID,
 		&rotationGraceUntil,
+		pq.Array(&key.Permission.Scopes),
 	)
 
 	if err == sql.ErrNoRows {

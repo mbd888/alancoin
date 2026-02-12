@@ -11,12 +11,19 @@ import (
 
 // Handler provides HTTP endpoints for agent revenue staking.
 type Handler struct {
-	service *Service
+	service   *Service
+	analytics *StakeAnalyticsService
 }
 
 // NewHandler creates a new stakes handler.
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
+}
+
+// WithAnalytics adds an analytics service to the handler.
+func (h *Handler) WithAnalytics(a *StakeAnalyticsService) *Handler {
+	h.analytics = a
+	return h
 }
 
 // RegisterRoutes sets up public (read-only) stake routes.
@@ -26,8 +33,11 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/stakes/:id/distributions", h.ListDistributions)
 	r.GET("/stakes/:id/orders", h.ListOrders)
 	r.GET("/stakes/:id/holdings", h.ListStakeHoldings)
+	r.GET("/stakes/:id/nav", h.GetStakeNAV)
+	r.GET("/stakes/:id/performance", h.GetStakePerformance)
 	r.GET("/agents/:address/stakes", h.ListAgentStakes)
 	r.GET("/agents/:address/portfolio", h.GetPortfolio)
+	r.GET("/agents/:address/portfolio/analytics", h.GetPortfolioAnalytics)
 	r.GET("/agents/:address/holdings", h.ListInvestorHoldings)
 	r.GET("/agents/:address/orders", h.ListSellerOrders)
 }
@@ -388,6 +398,65 @@ func (h *Handler) ListOrders(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"orders": orders, "count": len(orders)})
+}
+
+// GetPortfolioAnalytics handles GET /v1/agents/:address/portfolio/analytics
+func (h *Handler) GetPortfolioAnalytics(c *gin.Context) {
+	if h.analytics == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "not_implemented", "message": "Analytics not available"})
+		return
+	}
+
+	address := strings.ToLower(c.Param("address"))
+	analytics, err := h.analytics.GetPortfolioAnalytics(c.Request.Context(), address)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"analytics": analytics})
+}
+
+// GetStakeNAV handles GET /v1/stakes/:id/nav
+func (h *Handler) GetStakeNAV(c *gin.Context) {
+	if h.analytics == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "not_implemented", "message": "Analytics not available"})
+		return
+	}
+
+	id := c.Param("id")
+	nav, err := h.analytics.GetStakeNAV(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, ErrStakeNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Stake not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"nav": nav})
+}
+
+// GetStakePerformance handles GET /v1/stakes/:id/performance
+func (h *Handler) GetStakePerformance(c *gin.Context) {
+	if h.analytics == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "not_implemented", "message": "Analytics not available"})
+		return
+	}
+
+	id := c.Param("id")
+	perf, err := h.analytics.GetStakePerformance(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, ErrStakeNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Stake not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"performance": perf})
 }
 
 func parseLimit(c *gin.Context, defaultLimit, maxLimit int) int {

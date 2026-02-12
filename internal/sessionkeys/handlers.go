@@ -88,6 +88,7 @@ type Handler struct {
 	alerts        *AlertChecker       // For budget/expiration alerts (optional)
 	riskScorer    RiskScorer          // For real-time risk scoring (optional)
 	receiptIssuer ReceiptIssuer       // For cryptographic payment receipts (optional)
+	analytics     *AnalyticsService   // For spend analytics (optional)
 	logger        *slog.Logger
 	demoMode      bool // Skip on-chain transfers, use ledger only
 }
@@ -135,6 +136,12 @@ func (h *Handler) WithRiskScorer(rs RiskScorer) *Handler {
 // WithReceiptIssuer adds a receipt issuer for cryptographic payment proofs.
 func (h *Handler) WithReceiptIssuer(r ReceiptIssuer) *Handler {
 	h.receiptIssuer = r
+	return h
+}
+
+// WithAnalyticsService adds a spend analytics service.
+func (h *Handler) WithAnalyticsService(a *AnalyticsService) *Handler {
+	h.analytics = a
 	return h
 }
 
@@ -350,6 +357,15 @@ func (h *Handler) Transact(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error":   "forbidden",
 			"message": "Session key does not belong to this agent",
+		})
+		return
+	}
+
+	// Enforce "spend" scope
+	if !key.HasScope("spend") {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   ErrScopeNotAllowed.Code,
+			"message": "Session key does not have the 'spend' scope",
 		})
 		return
 	}
@@ -686,6 +702,23 @@ func (h *Handler) CreateDelegation(c *gin.Context) {
 		return
 	}
 
+	// Verify parent key has "delegate" scope
+	parentKey, err := h.manager.Get(c.Request.Context(), parentKeyID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "not_found",
+			"message": "Parent session key not found",
+		})
+		return
+	}
+	if !parentKey.HasScope("delegate") {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   ErrScopeNotAllowed.Code,
+			"message": "Parent session key does not have the 'delegate' scope",
+		})
+		return
+	}
+
 	// Lock the parent key to prevent concurrent delegation/transactions
 	unlockKey := h.manager.LockKey(parentKeyID)
 	defer unlockKey()
@@ -767,6 +800,46 @@ func (h *Handler) GetDelegationTree(c *gin.Context) {
 		"tree":      tree,
 		"rootKeyId": key.RootKeyID,
 		"ownerAddr": key.OwnerAddr,
+	})
+}
+
+// GetDelegationLog handles GET /v1/sessions/:keyId/delegation-log
+// Returns the audit log of delegation events for a given key.
+func (h *Handler) GetDelegationLog(c *gin.Context) {
+	keyID := c.Param("keyId")
+
+	al := h.manager.AuditLogger()
+	if al == nil {
+		c.JSON(http.StatusOK, gin.H{"events": []interface{}{}, "count": 0})
+		return
+	}
+
+	limit := 100
+	if l := c.Query("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 500 {
+			limit = parsed
+		}
+	}
+
+	// Support querying by root key instead of individual key
+	var entries []*DelegationLogEntry
+	var err error
+	if c.Query("scope") == "tree" {
+		entries, err = al.GetByRoot(c.Request.Context(), keyID, limit)
+	} else {
+		entries, err = al.GetByKey(c.Request.Context(), keyID, limit)
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "query_failed",
+			"message": "Failed to query delegation log",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"events": entries,
+		"count":  len(entries),
 	})
 }
 
@@ -889,6 +962,61 @@ func (h *Handler) RotateSessionKey(c *gin.Context) {
 			"gracePeriodEnd": gracePeriodEnd,
 		},
 	})
+}
+
+// GetKeyAnalytics handles GET /v1/sessions/:keyId/analytics
+func (h *Handler) GetKeyAnalytics(c *gin.Context) {
+	keyID := c.Param("keyId")
+
+	if h.analytics == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{
+			"error":   "not_configured",
+			"message": "Analytics service is not configured",
+		})
+		return
+	}
+
+	ka, err := h.analytics.GetKeyAnalytics(c.Request.Context(), keyID)
+	if err != nil {
+		if err == ErrKeyNotFound {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":   "not_found",
+				"message": "Session key not found",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "analytics_failed",
+			"message": "Failed to compute analytics",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"analytics": ka})
+}
+
+// GetOwnerAnalytics handles GET /v1/agents/:address/sessions/analytics
+func (h *Handler) GetOwnerAnalytics(c *gin.Context) {
+	address := c.Param("address")
+
+	if h.analytics == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{
+			"error":   "not_configured",
+			"message": "Analytics service is not configured",
+		})
+		return
+	}
+
+	oa, err := h.analytics.GetOwnerAnalytics(c.Request.Context(), address)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "analytics_failed",
+			"message": "Failed to compute analytics",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"analytics": oa})
 }
 
 func calculateRemaining(limit string, spent string) string {

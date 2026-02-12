@@ -638,6 +638,237 @@ func TestLockKeyChain_SerializesSiblings(t *testing.T) {
 // Integration: concurrent siblings can't exceed parent budget
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Delegation Audit Log tests
+// ---------------------------------------------------------------------------
+
+func TestDelegationAudit_CreateEvent(t *testing.T) {
+	al := NewMemoryAuditLogger()
+	mgr := NewManager(NewMemoryStore(), nil).WithDelegationAuditLogger(al)
+	ctx := context.Background()
+
+	parent, parentPriv := createRootKey(t, mgr, "0x0000000000000000000000000000000000001111", "10.00")
+	childAddr, _ := freshAddr(t)
+	req := signDelegation(t, parentPriv, childAddr, "5.00", 1)
+	child, err := mgr.CreateDelegated(ctx, parent.ID, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := al.GetByKey(ctx, child.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.EventType != DelegationEventCreate {
+		t.Errorf("EventType = %q, want %q", e.EventType, DelegationEventCreate)
+	}
+	if e.ParentKeyID != parent.ID {
+		t.Errorf("ParentKeyID = %q, want %q", e.ParentKeyID, parent.ID)
+	}
+	if e.ChildKeyID != child.ID {
+		t.Errorf("ChildKeyID = %q, want %q", e.ChildKeyID, child.ID)
+	}
+	if e.RootKeyID != parent.ID {
+		t.Errorf("RootKeyID = %q, want %q", e.RootKeyID, parent.ID)
+	}
+	if e.Depth != 1 {
+		t.Errorf("Depth = %d, want 1", e.Depth)
+	}
+	if e.MaxTotal != "5.00" {
+		t.Errorf("MaxTotal = %q, want 5.00", e.MaxTotal)
+	}
+}
+
+func TestDelegationAudit_RevokeEvents(t *testing.T) {
+	al := NewMemoryAuditLogger()
+	mgr := NewManager(NewMemoryStore(), nil).WithDelegationAuditLogger(al)
+	ctx := context.Background()
+
+	root, rootPriv := createRootKey(t, mgr, "0x0000000000000000000000000000000000001111", "100.00")
+
+	childAddr, childPriv := freshAddr(t)
+	childReq := signDelegation(t, rootPriv, childAddr, "50.00", 1)
+	child, _ := mgr.CreateDelegated(ctx, root.ID, childReq)
+
+	gcAddr, _ := freshAddr(t)
+	gcReq := signDelegation(t, childPriv, gcAddr, "20.00", 1)
+	grandchild, _ := mgr.CreateDelegated(ctx, child.ID, gcReq)
+
+	// Revoke root → cascades to child and grandchild
+	if err := mgr.Revoke(ctx, root.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Check root events: should have revoke
+	rootEntries, _ := al.GetByRoot(ctx, root.ID, 100)
+	var revokeCount, cascadeCount, createCount int
+	for _, e := range rootEntries {
+		switch e.EventType {
+		case DelegationEventCreate:
+			createCount++
+		case DelegationEventRevoke:
+			revokeCount++
+		case DelegationEventCascadeRevoke:
+			cascadeCount++
+		}
+	}
+	if createCount != 2 {
+		t.Errorf("create events = %d, want 2", createCount)
+	}
+	// Each key in the tree gets its own "revoke" event (root + child + grandchild = 3)
+	if revokeCount != 3 {
+		t.Errorf("revoke events = %d, want 3", revokeCount)
+	}
+	// cascade_revoke is emitted before recursing into each child (child + grandchild = 2)
+	if cascadeCount != 2 {
+		t.Errorf("cascade_revoke events = %d, want 2", cascadeCount)
+	}
+
+	// Verify grandchild has cascade_revoke
+	gcEntries, _ := al.GetByKey(ctx, grandchild.ID, 10)
+	var hasCreate, hasCascade bool
+	for _, e := range gcEntries {
+		if e.EventType == DelegationEventCreate {
+			hasCreate = true
+		}
+		if e.EventType == DelegationEventCascadeRevoke {
+			hasCascade = true
+		}
+	}
+	if !hasCreate {
+		t.Error("grandchild should have create event")
+	}
+	if !hasCascade {
+		t.Error("grandchild should have cascade_revoke event")
+	}
+}
+
+func TestDelegationAudit_RotateEvent(t *testing.T) {
+	al := NewMemoryAuditLogger()
+	mgr := NewManager(NewMemoryStore(), nil).WithDelegationAuditLogger(al)
+	ctx := context.Background()
+
+	root, _ := createRootKey(t, mgr, "0x0000000000000000000000000000000000001111", "10.00")
+
+	newAddr, _ := freshAddr(t)
+	_, err := mgr.RotateKey(ctx, root.ID, newAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries, _ := al.GetByKey(ctx, root.ID, 10)
+	var hasRotate bool
+	for _, e := range entries {
+		if e.EventType == DelegationEventRotate {
+			hasRotate = true
+			if e.ParentKeyID != root.ID {
+				t.Errorf("rotate ParentKeyID = %q, want %q", e.ParentKeyID, root.ID)
+			}
+		}
+	}
+	if !hasRotate {
+		t.Error("expected rotate event for root key")
+	}
+}
+
+func TestDelegationAudit_NilLoggerNoError(t *testing.T) {
+	// Manager without audit logger should work fine
+	mgr := NewManager(NewMemoryStore(), nil)
+	ctx := context.Background()
+
+	parent, parentPriv := createRootKey(t, mgr, "0x0000000000000000000000000000000000001111", "10.00")
+	childAddr, _ := freshAddr(t)
+	req := signDelegation(t, parentPriv, childAddr, "5.00", 1)
+	_, err := mgr.CreateDelegated(ctx, parent.ID, req)
+	if err != nil {
+		t.Fatalf("CreateDelegated without audit logger should work: %v", err)
+	}
+
+	// Revoke should also work
+	if err := mgr.Revoke(ctx, parent.ID); err != nil {
+		t.Fatalf("Revoke without audit logger should work: %v", err)
+	}
+}
+
+func TestDelegationAudit_GetByKeyFilters(t *testing.T) {
+	al := NewMemoryAuditLogger()
+	mgr := NewManager(NewMemoryStore(), nil).WithDelegationAuditLogger(al)
+	ctx := context.Background()
+
+	root, rootPriv := createRootKey(t, mgr, "0x0000000000000000000000000000000000001111", "100.00")
+
+	// Create two children
+	childA_Addr, _ := freshAddr(t)
+	childA_Req := signDelegation(t, rootPriv, childA_Addr, "40.00", 1)
+	childA, _ := mgr.CreateDelegated(ctx, root.ID, childA_Req)
+
+	childB_Addr, _ := freshAddr(t)
+	childB_Req := signDelegation(t, rootPriv, childB_Addr, "40.00", 2)
+	childB, _ := mgr.CreateDelegated(ctx, root.ID, childB_Req)
+
+	// GetByKey for childA should only return childA's event
+	entries, _ := al.GetByKey(ctx, childA.ID, 10)
+	if len(entries) != 1 {
+		t.Fatalf("childA entries = %d, want 1", len(entries))
+	}
+	if entries[0].ChildKeyID != childA.ID {
+		t.Errorf("expected childA ID, got %q", entries[0].ChildKeyID)
+	}
+
+	// GetByKey for childB should only return childB's event
+	entries, _ = al.GetByKey(ctx, childB.ID, 10)
+	if len(entries) != 1 {
+		t.Fatalf("childB entries = %d, want 1", len(entries))
+	}
+
+	// GetByRoot should return all events under root
+	entries, _ = al.GetByRoot(ctx, root.ID, 10)
+	if len(entries) != 2 {
+		t.Fatalf("root entries = %d, want 2", len(entries))
+	}
+}
+
+func TestDelegationAudit_AncestorChain(t *testing.T) {
+	al := NewMemoryAuditLogger()
+	mgr := NewManager(NewMemoryStore(), nil).WithDelegationAuditLogger(al)
+	ctx := context.Background()
+
+	root, rootPriv := createRootKey(t, mgr, "0x0000000000000000000000000000000000001111", "100.00")
+
+	midAddr, midPriv := freshAddr(t)
+	midReq := signDelegation(t, rootPriv, midAddr, "50.00", 1)
+	mid, _ := mgr.CreateDelegated(ctx, root.ID, midReq)
+
+	leafAddr, _ := freshAddr(t)
+	leafReq := signDelegation(t, midPriv, leafAddr, "20.00", 1)
+	leaf, _ := mgr.CreateDelegated(ctx, mid.ID, leafReq)
+
+	// The leaf creation event should have an ancestor chain
+	entries, _ := al.GetByKey(ctx, leaf.ID, 10)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry for leaf, got %d", len(entries))
+	}
+	chain := entries[0].AncestorChain
+	if len(chain) != 2 {
+		t.Fatalf("ancestor chain length = %d, want 2", len(chain))
+	}
+	// Chain should be [mid.ID, root.ID] or [root.ID, mid.ID] depending on order
+	found := make(map[string]bool)
+	for _, id := range chain {
+		found[id] = true
+	}
+	if !found[root.ID] {
+		t.Error("ancestor chain should contain root ID")
+	}
+	if !found[mid.ID] {
+		t.Error("ancestor chain should contain mid ID")
+	}
+}
+
 func TestConcurrentSiblings_BudgetEnforced(t *testing.T) {
 	mgr := NewManager(NewMemoryStore(), nil)
 	ctx := context.Background()

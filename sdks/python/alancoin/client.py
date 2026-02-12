@@ -1696,6 +1696,130 @@ class Alancoin(InvestMixin):
         )
 
     # -------------------------------------------------------------------------
+    # Gateway (Transparent Payment Proxy)
+    # -------------------------------------------------------------------------
+
+    def create_gateway_session(
+        self,
+        max_total: str,
+        expires_in: str = "1h",
+        allowed_services: list = None,
+        allowed_recipients: list = None,
+        max_per_tx: str = None,
+    ) -> dict:
+        """
+        Create a gateway session with a held budget.
+
+        The gateway holds funds upfront and proxies service calls server-side
+        (discover -> pay -> forward -> settle) in a single round trip.
+
+        Args:
+            max_total: Maximum USDC to hold for this session (e.g., "5.00")
+            expires_in: Session duration (e.g., "1h", "24h")
+            allowed_services: Restrict to these service types
+            allowed_recipients: Restrict to these seller addresses
+            max_per_tx: Maximum USDC per proxy request
+
+        Returns:
+            Gateway session with id (also used as X-Gateway-Token)
+        """
+        payload = {
+            "budget": max_total,
+            "expiresIn": expires_in,
+        }
+        if allowed_services:
+            payload["allowedServices"] = allowed_services
+        if allowed_recipients:
+            payload["allowedRecipients"] = allowed_recipients
+        if max_per_tx:
+            payload["maxPerRequest"] = max_per_tx
+        return self._request("POST", "/v1/gateway/sessions", json=payload)
+
+    def gateway_proxy(
+        self,
+        token: str,
+        service_type: str,
+        **params,
+    ) -> dict:
+        """
+        Proxy a service call through the gateway (one round trip).
+
+        Server-side: discover -> select -> pay -> forward -> settle.
+
+        Args:
+            token: Gateway session token (from create_gateway_session)
+            service_type: Type of service to call
+            **params: Parameters forwarded to the service endpoint
+
+        Returns:
+            Service response with payment metadata
+        """
+        payload = {"serviceType": service_type}
+        if params:
+            payload["params"] = params
+        return self._request(
+            "POST",
+            "/v1/gateway/proxy",
+            json=payload,
+            extra_headers={"X-Gateway-Token": token},
+        )
+
+    def close_gateway_session(self, session_id: str) -> dict:
+        """
+        Close a gateway session, releasing unspent funds.
+
+        Args:
+            session_id: The gateway session ID
+
+        Returns:
+            Closed session with final spent/refunded amounts
+        """
+        return self._request("DELETE", f"/v1/gateway/sessions/{session_id}")
+
+    def get_gateway_session(self, session_id: str) -> dict:
+        """
+        Get gateway session status.
+
+        Args:
+            session_id: The gateway session ID
+
+        Returns:
+            Session details including budget, spent, remaining, status
+        """
+        return self._request("GET", f"/v1/gateway/sessions/{session_id}")
+
+    def list_gateway_sessions(self, limit: int = 50) -> dict:
+        """
+        List gateway sessions for the authenticated agent.
+
+        Args:
+            limit: Maximum sessions to return
+
+        Returns:
+            List of gateway sessions
+        """
+        return self._request(
+            "GET", "/v1/gateway/sessions", params={"limit": limit}
+        )
+
+    def list_gateway_logs(self, session_id: str, limit: int = 100) -> dict:
+        """
+        List request logs for a gateway session.
+
+        Args:
+            session_id: The gateway session ID
+            limit: Maximum log entries to return
+
+        Returns:
+            List of proxy request logs with timing, cost, and status
+        """
+        return self._request(
+            "GET",
+            f"/v1/gateway/sessions/{session_id}/logs",
+            params={"limit": limit},
+        )
+
+    # -------------------------------------------------------------------------
     # Credit & Lending
     # -------------------------------------------------------------------------
 
@@ -2519,6 +2643,52 @@ class Alancoin(InvestMixin):
             stale_timeout_secs=stale_timeout_secs,
         )
 
+    def gateway(
+        self,
+        max_total: str = "10.00",
+        max_per_tx: str = None,
+        expires_in: str = "1h",
+        allowed_services: list = None,
+        allowed_recipients: list = None,
+    ) -> "GatewaySession":
+        """
+        Create a gateway session (server-side payment proxy).
+
+        Returns a context manager that creates a gateway session on entry
+        and closes it on exit. Use call() for one-step proxy calls where
+        the server handles discover -> pay -> forward -> settle.
+
+        This is the recommended path for most AI agents: fewer round trips,
+        no client-side session key management, and built-in settlement.
+
+        Args:
+            max_total: Maximum USDC for this session (e.g., "5.00")
+            max_per_tx: Maximum USDC per proxy request
+            expires_in: Session duration (e.g., "1h", "24h")
+            allowed_services: Restrict to service types (e.g., ["translation"])
+            allowed_recipients: Restrict to seller addresses
+
+        Returns:
+            GatewaySession context manager
+
+        Example::
+
+            with client.gateway(max_total="5.00") as gw:
+                result = gw.call("translation", text="Hello", target="es")
+                print(result["output"])
+                print(f"Spent: ${gw.total_spent}, Remaining: ${gw.remaining}")
+        """
+        from .session import GatewaySession
+
+        return GatewaySession(
+            client=self,
+            max_total=max_total,
+            max_per_tx=max_per_tx,
+            expires_in=expires_in,
+            allowed_services=allowed_services,
+            allowed_recipients=allowed_recipients,
+        )
+
     # -------------------------------------------------------------------------
     # Internal
     # -------------------------------------------------------------------------
@@ -2529,11 +2699,19 @@ class Alancoin(InvestMixin):
         path: str,
         params: dict = None,
         json: dict = None,
+        extra_headers: dict = None,
     ) -> dict:
         """Make an HTTP request to the API."""
         base = self.base_url if self.base_url.endswith("/") else self.base_url + "/"
         url = urljoin(base, path.lstrip("/"))
-        
+
+        # Merge extra_headers with session headers (session headers take priority
+        # for Authorization/Content-Type, extra_headers add new ones like X-Gateway-Token)
+        merged = None
+        if extra_headers:
+            merged = dict(self._session.headers)
+            merged.update(extra_headers)
+
         try:
             response = self._session.request(
                 method=method,
@@ -2541,6 +2719,7 @@ class Alancoin(InvestMixin):
                 params=params,
                 json=json,
                 timeout=self.timeout,
+                headers=merged,
             )
         except requests.exceptions.RequestException as e:
             raise NetworkError(f"Request failed: {e}", original_error=e)

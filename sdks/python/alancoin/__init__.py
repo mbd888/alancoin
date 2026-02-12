@@ -64,7 +64,7 @@ from .models import (
     Contract, ContractCall, SLATerms,
     RFP, Bid, ScoringWeights,
 )
-from .session import Budget, BudgetSession, ServiceResult, StreamingSession, StreamResult
+from .session import Budget, BudgetSession, ServiceResult, StreamingSession, StreamResult, GatewaySession
 from .serve import ServiceAgent, DelegationContext
 from .invest import StakeOffering, StakeHolding, StakeOrder, InvestMixin
 from .session_keys import (
@@ -112,6 +112,8 @@ __all__ = [
     # Streaming Micropayments
     "StreamingSession",
     "StreamResult",
+    # Gateway (Transparent Payment Proxy)
+    "GatewaySession",
     # Service Agent Framework
     "ServiceAgent",
     "DelegationContext",

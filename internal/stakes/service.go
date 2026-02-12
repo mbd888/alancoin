@@ -32,6 +32,9 @@ func NewService(store Store, ledger LedgerService) *Service {
 	}
 }
 
+// Store returns the underlying store for read-only analytics queries.
+func (s *Service) Store() Store { return s.store }
+
 func (s *Service) stakeLock(id string) *sync.Mutex {
 	v, _ := s.locks.LoadOrStore(id, &sync.Mutex{})
 	return v.(*sync.Mutex)

@@ -31,6 +31,9 @@ type Permission struct {
 	AllowedServiceAgents []string `json:"allowedServiceAgents,omitempty"` // Agents offering services
 	AllowAny             bool     `json:"allowAny,omitempty"`             // If true, no recipient restrictions
 
+	// Scopes — fine-grained capability control
+	Scopes []string `json:"scopes,omitempty"` // e.g., ["spend", "read", "streams"]
+
 	// Metadata
 	Label string `json:"label,omitempty"` // Human-readable label, e.g., "Translation budget Q1"
 }
@@ -86,6 +89,7 @@ type SessionKeyRequest struct {
 	AllowedRecipients   []string `json:"allowedRecipients,omitempty"`
 	AllowedServiceTypes []string `json:"allowedServiceTypes,omitempty"`
 	AllowAny            bool     `json:"allowAny,omitempty"`
+	Scopes              []string `json:"scopes,omitempty"`
 	Label               string   `json:"label,omitempty"`
 }
 
@@ -145,11 +149,49 @@ type DelegateRequest struct {
 	AllowedRecipients   []string `json:"allowedRecipients,omitempty"`
 	AllowedServiceTypes []string `json:"allowedServiceTypes,omitempty"`
 	AllowAny            bool     `json:"allowAny,omitempty"`
+	Scopes              []string `json:"scopes,omitempty"`
 	DelegationLabel     string   `json:"delegationLabel,omitempty"`
 	Nonce               uint64   `json:"nonce" binding:"required"`
 	Timestamp           int64    `json:"timestamp" binding:"required"`
 	Signature           string   `json:"signature" binding:"required"`
 }
+
+// Delegation audit event types
+const (
+	DelegationEventCreate        = "create"
+	DelegationEventRevoke        = "revoke"
+	DelegationEventCascadeRevoke = "cascade_revoke"
+	DelegationEventBudgetExceed  = "budget_exceeded"
+	DelegationEventRotate        = "rotate"
+)
+
+// DelegationLogEntry represents a single event in the delegation audit log
+type DelegationLogEntry struct {
+	ID            int       `json:"id"`
+	ParentKeyID   string    `json:"parentKeyId"`
+	ChildKeyID    string    `json:"childKeyId"`
+	RootKeyID     string    `json:"rootKeyId"`
+	RootOwnerAddr string    `json:"rootOwnerAddr"`
+	Depth         int       `json:"depth"`
+	MaxTotal      string    `json:"maxTotal,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	EventType     string    `json:"eventType"`
+	AncestorChain []string  `json:"ancestorChain,omitempty"`
+	Metadata      string    `json:"metadata,omitempty"` // JSON string
+	CreatedAt     time.Time `json:"createdAt"`
+}
+
+// ValidScopes is the set of recognized scope strings.
+var ValidScopes = map[string]bool{
+	"spend":    true,
+	"read":     true,
+	"streams":  true,
+	"escrow":   true,
+	"delegate": true,
+}
+
+// DefaultScopes is applied when no explicit scopes are provided.
+var DefaultScopes = []string{"spend", "read"}
 
 // Common validation errors
 var (
@@ -175,7 +217,27 @@ var (
 	ErrChildServiceNotAllowed = &ValidationError{Code: "child_service_not_allowed", Message: "Child service types must be subset of parent's"}
 	ErrAncestorInvalid        = &ValidationError{Code: "ancestor_invalid", Message: "An ancestor key is no longer active"}
 	ErrKeyAlreadyRotated      = &ValidationError{Code: "key_already_rotated", Message: "Session key has already been rotated"}
+
+	// Scope errors
+	ErrScopeNotAllowed      = &ValidationError{Code: "scope_not_allowed", Message: "Session key does not have the required scope"}
+	ErrInvalidScope         = &ValidationError{Code: "invalid_scope", Message: "One or more scopes are not recognized"}
+	ErrChildScopeNotAllowed = &ValidationError{Code: "child_scope_not_allowed", Message: "Child scopes must be a subset of parent's scopes"}
 )
+
+// HasScope returns true if the session key has the given scope.
+// Keys with no explicit scopes are treated as having DefaultScopes.
+func (sk *SessionKey) HasScope(scope string) bool {
+	scopes := sk.Permission.Scopes
+	if len(scopes) == 0 {
+		scopes = DefaultScopes
+	}
+	for _, s := range scopes {
+		if s == scope {
+			return true
+		}
+	}
+	return false
+}
 
 // IsActive returns true if the session key is currently valid
 func (sk *SessionKey) IsActive() bool {
