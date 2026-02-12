@@ -668,8 +668,11 @@ func (s *Server) setupRoutes() {
 		protectedGateway.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
 		gatewayHandler.RegisterProtectedRoutes(protectedGateway)
 
-		// Proxy route - uses gateway token auth (X-Gateway-Token), no API key needed
-		gatewayHandler.RegisterProxyRoute(v1)
+		// Proxy route - requires both API key auth AND gateway token.
+		// API key verifies caller identity, gateway token authorizes session access.
+		protectedProxy := v1.Group("")
+		protectedProxy.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		gatewayHandler.RegisterProxyRoute(protectedProxy)
 	}
 
 	// Ledger routes (agent balances)

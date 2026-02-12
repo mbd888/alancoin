@@ -91,8 +91,9 @@ func (f *Forwarder) Forward(ctx context.Context, req ForwardRequest) (*ForwardRe
 		LatencyMs:  latency,
 	}
 
-	// Treat 5xx as an error so the gateway retry loop can try the next candidate.
-	if resp.StatusCode >= 500 {
+	// Treat 4xx and 5xx as errors so the gateway doesn't charge the buyer
+	// for failed service calls. Only 2xx/3xx responses trigger payment.
+	if resp.StatusCode >= 400 {
 		return fwdResp, fmt.Errorf("service returned HTTP %d", resp.StatusCode)
 	}
 

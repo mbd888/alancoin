@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -460,20 +462,18 @@ func TestGatewayTokenAuth(t *testing.T) {
 
 	handler := NewHandler(svc)
 
-	// Valid token
+	// Valid token with matching owner
 	t.Run("valid_token", func(t *testing.T) {
 		called := false
 		testHandler := handler.gatewayTokenAuth()
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/", nil)
-		c.Request.Header.Set("X-Gateway-Token", session.ID)
-
-		// Chain with a next handler
 		gin.SetMode(gin.TestMode)
 		r := gin.New()
-		r.POST("/test", testHandler, func(c *gin.Context) {
+		r.POST("/test", func(c *gin.Context) {
+			// Simulate auth middleware setting agent address
+			c.Set("authAgentAddr", "0xbuyer")
+			c.Next()
+		}, testHandler, func(c *gin.Context) {
 			called = true
 			sid := c.GetString("gatewaySessionID")
 			if sid != session.ID {
@@ -489,6 +489,47 @@ func TestGatewayTokenAuth(t *testing.T) {
 
 		if !called {
 			t.Error("handler should have been called")
+		}
+	})
+
+	// Wrong owner — should be forbidden
+	t.Run("wrong_owner", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		r := gin.New()
+		testHandler := handler.gatewayTokenAuth()
+		r.POST("/test", func(c *gin.Context) {
+			c.Set("authAgentAddr", "0xstranger")
+			c.Next()
+		}, testHandler, func(c *gin.Context) {
+			c.Status(200)
+		})
+
+		req := httptest.NewRequest("POST", "/test", nil)
+		req.Header.Set("X-Gateway-Token", session.ID)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusForbidden {
+			t.Errorf("expected 403, got %d", w.Code)
+		}
+	})
+
+	// No auth (no authAgentAddr) — should be unauthorized
+	t.Run("no_auth", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		r := gin.New()
+		testHandler := handler.gatewayTokenAuth()
+		r.POST("/test", testHandler, func(c *gin.Context) {
+			c.Status(200)
+		})
+
+		req := httptest.NewRequest("POST", "/test", nil)
+		req.Header.Set("X-Gateway-Token", session.ID)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401, got %d", w.Code)
 		}
 	})
 
@@ -1072,5 +1113,264 @@ func TestProxy_NoIdempotencyKey_ProcessesEveryTime(t *testing.T) {
 
 	if len(ml.settlements) != 3 {
 		t.Errorf("expected 3 settlements, got %d", len(ml.settlements))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bug fix verification tests
+// ---------------------------------------------------------------------------
+
+// TestProxy_ConcurrentBudgetRace verifies that concurrent proxy requests
+// cannot over-allocate the session budget (Bug #1 fix).
+// Two goroutines race to spend the last $0.08 of a $1.00 budget.
+// Without pendingSpend reservation, both would forward and one seller
+// would deliver service without payment.
+func TestProxy_ConcurrentBudgetRace(t *testing.T) {
+	// Slow server to widen the race window
+	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+	}))
+	defer slowServer.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.08", Endpoint: slowServer.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	ctx := context.Background()
+	session, err := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "1.00",
+		MaxPerRequest: "0.50",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Spend $0.92 sequentially so only $0.08 remains
+	fastServer := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer fastServer.Close()
+
+	// Temporarily update registry to use a $0.092 service for 10 calls
+	reg.services = []ServiceCandidate{
+		{AgentAddress: "0xsetup", ServiceID: "svc0", ServiceName: "setup", Price: "0.092", Endpoint: fastServer.URL},
+	}
+	for i := 0; i < 10; i++ {
+		_, err := svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "test"})
+		if err != nil {
+			t.Fatalf("setup proxy %d: %v", i, err)
+		}
+	}
+
+	updated, _ := svc.GetSession(ctx, session.ID)
+	if updated.TotalSpent != "0.920000" {
+		t.Fatalf("expected 0.920000 spent after setup, got %s", updated.TotalSpent)
+	}
+
+	// Now switch to $0.08 service and race two concurrent requests
+	reg.services = []ServiceCandidate{
+		{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.08", Endpoint: slowServer.URL},
+	}
+
+	var wg sync.WaitGroup
+	results := make(chan error, 2)
+
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "test"})
+			results <- err
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	successCount := 0
+	budgetExceededCount := 0
+	for err := range results {
+		if err == nil {
+			successCount++
+		} else if strings.Contains(err.Error(), "budget") {
+			budgetExceededCount++
+		} else {
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+
+	// Exactly one should succeed and one should fail with budget exceeded.
+	// Without the pendingSpend fix, both would forward and one seller would
+	// be unpaid (the old bug).
+	if successCount != 1 {
+		t.Errorf("expected exactly 1 success, got %d", successCount)
+	}
+	if budgetExceededCount != 1 {
+		t.Errorf("expected exactly 1 budget exceeded, got %d", budgetExceededCount)
+	}
+
+	// Settlements: 10 setup + 1 race winner = 11
+	if len(ml.settlements) != 11 {
+		t.Errorf("expected 11 settlements, got %d", len(ml.settlements))
+	}
+}
+
+// TestProxy_SettlementRetry verifies that transient SettleHold failures
+// are retried before giving up (Bug #2 fix).
+func TestProxy_SettlementRetry(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.10", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	// Make SettleHold fail twice, then succeed on 3rd attempt
+	settleAttempts := 0
+
+	customLedger := &retryMockLedger{
+		mockLedger:   ml,
+		failCount:    2,
+		attemptCount: &settleAttempts,
+	}
+
+	// Rebuild service with custom ledger
+	store := NewMemoryStore()
+	resolver := NewResolver(reg)
+	forwarder := NewForwarder(5 * time.Second)
+	svc2 := NewService(store, resolver, forwarder, customLedger, testLogger())
+
+	session2, _ := svc2.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	result, err := svc2.Proxy(ctx, session2.ID, ProxyRequest{
+		ServiceType: "test",
+	})
+	if err != nil {
+		t.Fatalf("proxy should succeed after retries: %v", err)
+	}
+	if result.AmountPaid != "0.100000" {
+		t.Errorf("expected 0.100000 paid, got %s", result.AmountPaid)
+	}
+	if settleAttempts != 3 {
+		t.Errorf("expected 3 settle attempts, got %d", settleAttempts)
+	}
+
+	// Session should reflect the successful settlement
+	updated, _ := svc2.GetSession(ctx, session2.ID)
+	if updated.TotalSpent != "0.100000" {
+		t.Errorf("expected 0.100000 spent, got %s", updated.TotalSpent)
+	}
+	_ = session // suppress unused
+}
+
+// retryMockLedger wraps mockLedger to fail SettleHold a configurable number of times.
+type retryMockLedger struct {
+	*mockLedger
+	failCount    int
+	attemptCount *int
+}
+
+func (r *retryMockLedger) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error {
+	*r.attemptCount++
+	if *r.attemptCount <= r.failCount {
+		return fmt.Errorf("transient DB error (attempt %d)", *r.attemptCount)
+	}
+	return r.mockLedger.SettleHold(ctx, buyerAddr, sellerAddr, amount, reference)
+}
+
+// TestProxy_ConcurrentIdempotencyDedup verifies that concurrent requests
+// with the same idempotency key result in exactly one forward and one
+// settlement (Bug #3 fix).
+func TestProxy_ConcurrentIdempotencyDedup(t *testing.T) {
+	callCount := int32(0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&callCount, 1)
+		time.Sleep(50 * time.Millisecond) // Slow enough for both goroutines to arrive
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"call": atomic.LoadInt32(&callCount)})
+	}))
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.10", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	// Race two requests with the same idempotency key
+	var wg sync.WaitGroup
+	type proxyResult struct {
+		result *ProxyResult
+		err    error
+	}
+	results := make(chan proxyResult, 2)
+
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r, err := svc.Proxy(ctx, session.ID, ProxyRequest{
+				ServiceType:    "test",
+				IdempotencyKey: "same-key",
+			})
+			results <- proxyResult{r, err}
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	var successes int
+	for pr := range results {
+		if pr.err != nil {
+			t.Errorf("unexpected error: %v", pr.err)
+		} else {
+			successes++
+		}
+	}
+
+	if successes != 2 {
+		t.Errorf("expected 2 successes (one real, one cached), got %d", successes)
+	}
+
+	// Service should have been called exactly ONCE
+	if atomic.LoadInt32(&callCount) != 1 {
+		t.Errorf("expected service called once (deduped), got %d", atomic.LoadInt32(&callCount))
+	}
+
+	// Only one settlement
+	if len(ml.settlements) != 1 {
+		t.Errorf("expected 1 settlement, got %d", len(ml.settlements))
+	}
+
+	// Session spend should reflect single charge
+	updated, _ := svc.GetSession(ctx, session.ID)
+	if updated.TotalSpent != "0.100000" {
+		t.Errorf("expected 0.100000, got %s", updated.TotalSpent)
 	}
 }

@@ -51,8 +51,8 @@ func (h *Handler) RegisterProxyRoute(r *gin.RouterGroup) {
 	r.POST("/gateway/proxy", h.gatewayTokenAuth(), h.Proxy)
 }
 
-// gatewayTokenAuth validates X-Gateway-Token header against session store.
-// The session ID IS the token.
+// gatewayTokenAuth validates X-Gateway-Token header against session store
+// and verifies caller identity (authAgentAddr must match session owner).
 func (h *Handler) gatewayTokenAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := c.GetHeader("X-Gateway-Token")
@@ -69,6 +69,23 @@ func (h *Handler) gatewayTokenAuth() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error":   "unauthorized",
 				"message": "Invalid gateway token",
+			})
+			return
+		}
+
+		// Verify caller owns this session (requires API key auth upstream).
+		callerAddr := strings.ToLower(c.GetString("authAgentAddr"))
+		if callerAddr == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error":   "unauthorized",
+				"message": "API key authentication required for gateway proxy",
+			})
+			return
+		}
+		if callerAddr != session.AgentAddr {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error":   "forbidden",
+				"message": "This gateway session belongs to another agent",
 			})
 			return
 		}

@@ -15,45 +15,112 @@ import (
 )
 
 // idempotencyEntry caches a proxy result for deduplication.
+// The done channel is closed when processing completes, waking any waiters.
 type idempotencyEntry struct {
 	result    *ProxyResult
 	err       error
 	expiresAt time.Time
+	done      chan struct{} // closed when result is ready
 }
 
 // idempotencyCache is a bounded TTL cache for proxy result deduplication.
+// It supports in-flight dedup: concurrent requests with the same key wait
+// for the first to complete rather than both processing.
 type idempotencyCache struct {
-	entries sync.Map
+	mu      sync.Mutex
+	entries map[string]*idempotencyEntry
 	ttl     time.Duration
 }
 
 func newIdempotencyCache(ttl time.Duration) *idempotencyCache {
-	return &idempotencyCache{ttl: ttl}
+	return &idempotencyCache{
+		entries: make(map[string]*idempotencyEntry),
+		ttl:     ttl,
+	}
 }
 
 func (c *idempotencyCache) key(sessionID, idempotencyKey string) string {
 	return sessionID + ":" + idempotencyKey
 }
 
-func (c *idempotencyCache) get(sessionID, idempotencyKey string) (*ProxyResult, error, bool) {
-	v, ok := c.entries.Load(c.key(sessionID, idempotencyKey))
-	if !ok {
-		return nil, nil, false
+// getOrReserve checks for a cached result or reserves the key for processing.
+//
+// Returns:
+//   - (result, err, true)  — cached result found, use it directly
+//   - (nil, nil, false)    — key reserved, caller must call complete() or cancel()
+//
+// If another goroutine is currently processing the same key, this blocks
+// until that goroutine calls complete() or cancel(), or ctx is cancelled.
+func (c *idempotencyCache) getOrReserve(ctx context.Context, sessionID, idempotencyKey string) (*ProxyResult, error, bool) {
+	k := c.key(sessionID, idempotencyKey)
+
+	c.mu.Lock()
+	entry, ok := c.entries[k]
+	if ok && time.Now().After(entry.expiresAt) {
+		delete(c.entries, k)
+		ok = false
 	}
-	entry := v.(*idempotencyEntry)
-	if time.Now().After(entry.expiresAt) {
-		c.entries.Delete(c.key(sessionID, idempotencyKey))
-		return nil, nil, false
+
+	if ok {
+		done := entry.done
+		c.mu.Unlock()
+
+		// Wait for the in-flight request to complete.
+		select {
+		case <-done:
+			// Re-read under lock in case cancel() deleted the entry.
+			c.mu.Lock()
+			entry, ok = c.entries[k]
+			c.mu.Unlock()
+			if ok {
+				return entry.result, entry.err, true
+			}
+			// Entry was cancelled — fall through to re-reserve below.
+			return c.getOrReserve(ctx, sessionID, idempotencyKey)
+		case <-ctx.Done():
+			return nil, ctx.Err(), true
+		}
 	}
-	return entry.result, entry.err, true
+
+	// Reserve the key for this goroutine.
+	c.entries[k] = &idempotencyEntry{
+		done:      make(chan struct{}),
+		expiresAt: time.Now().Add(c.ttl),
+	}
+	c.mu.Unlock()
+	return nil, nil, false
 }
 
-func (c *idempotencyCache) set(sessionID, idempotencyKey string, result *ProxyResult, err error) {
-	c.entries.Store(c.key(sessionID, idempotencyKey), &idempotencyEntry{
-		result:    result,
-		err:       err,
-		expiresAt: time.Now().Add(c.ttl),
-	})
+// complete stores the result and wakes all waiters.
+// Only call this for successful results that should be cached.
+func (c *idempotencyCache) complete(sessionID, idempotencyKey string, result *ProxyResult) {
+	k := c.key(sessionID, idempotencyKey)
+	c.mu.Lock()
+	entry, ok := c.entries[k]
+	if !ok {
+		c.mu.Unlock()
+		return
+	}
+	entry.result = result
+	entry.err = nil
+	entry.expiresAt = time.Now().Add(c.ttl)
+	c.mu.Unlock()
+	close(entry.done)
+}
+
+// cancel removes the reservation and wakes waiters so they can retry.
+// Call this when processing fails and the result should NOT be cached.
+func (c *idempotencyCache) cancel(sessionID, idempotencyKey string) {
+	k := c.key(sessionID, idempotencyKey)
+	c.mu.Lock()
+	entry, ok := c.entries[k]
+	if ok {
+		delete(c.entries, k)
+	}
+	c.mu.Unlock()
+	if ok {
+		close(entry.done)
+	}
 }
 
 // Service implements gateway business logic.
@@ -67,6 +134,11 @@ type Service struct {
 	logger        *slog.Logger
 	locks         syncutil.ShardedMutex
 	idemCache     *idempotencyCache
+
+	// pendingSpend tracks in-flight budget reservations per session.
+	// Key: sessionID, Value: *big.Int (sum of reserved amounts).
+	// Accessed under per-session lock (s.locks) for correctness.
+	pendingSpend sync.Map
 }
 
 // NewService creates a new gateway service.
@@ -91,6 +163,35 @@ func (s *Service) WithRecorder(r TransactionRecorder) *Service {
 func (s *Service) WithReceiptIssuer(r ReceiptIssuer) *Service {
 	s.receiptIssuer = r
 	return s
+}
+
+// getPendingSpend returns a copy of the current pending spend for a session.
+// Must be called under the per-session lock.
+func (s *Service) getPendingSpend(sessionID string) *big.Int {
+	val, ok := s.pendingSpend.Load(sessionID)
+	if !ok {
+		return new(big.Int)
+	}
+	return new(big.Int).Set(val.(*big.Int))
+}
+
+// addPendingSpend reserves budget for an in-flight request.
+// Must be called under the per-session lock.
+func (s *Service) addPendingSpend(sessionID string, amount *big.Int) {
+	current := s.getPendingSpend(sessionID)
+	s.pendingSpend.Store(sessionID, new(big.Int).Add(current, amount))
+}
+
+// removePendingSpend releases a budget reservation.
+// Must be called under the per-session lock.
+func (s *Service) removePendingSpend(sessionID string, amount *big.Int) {
+	current := s.getPendingSpend(sessionID)
+	result := new(big.Int).Sub(current, amount)
+	if result.Sign() <= 0 {
+		s.pendingSpend.Delete(sessionID)
+	} else {
+		s.pendingSpend.Store(sessionID, result)
+	}
 }
 
 // CreateSession creates a gateway session and holds the buyer's budget.
@@ -177,36 +278,57 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr string, req Creat
 
 // Proxy handles a single proxy request within a session.
 //
-// Lock strategy: hold the per-session lock only for state reads and writes,
-// NOT during the HTTP forward (which can take up to 30s). This allows
-// concurrent proxy requests within the same session.
+// Lock strategy (3-phase with budget reservation):
+//
+//	Phase 1: Lock → validate session, resolve candidates → unlock
+//	Phase 2: For each candidate:
+//	  2a: Lock → check budget (accounting for pendingSpend) → reserve → unlock
+//	  2b: Forward HTTP request (unlocked, concurrent-safe)
+//	  2c: Lock → settle payment + update session (or unreserve on failure) → unlock
+//
+// The pendingSpend reservation in 2a prevents concurrent requests from
+// over-allocating budget. Each request's reservation is visible to others.
 func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest) (*ProxyResult, error) {
 	if len(req.ServiceType) > 100 {
 		return nil, fmt.Errorf("%w: service type exceeds maximum length of 100", ErrNoServiceAvailable)
 	}
 
-	// Idempotency: if the client provides a key and we've seen it before, return cached result.
+	// Idempotency: if the client provides a key, check cache or reserve for processing.
+	idemReserved := false
 	if req.IdempotencyKey != "" {
-		if cached, cachedErr, ok := s.idemCache.get(sessionID, req.IdempotencyKey); ok {
-			return cached, cachedErr
+		result, err, found := s.idemCache.getOrReserve(ctx, sessionID, req.IdempotencyKey)
+		if found {
+			return result, err
+		}
+		// We reserved the key — must call complete() or cancel() before returning.
+		idemReserved = true
+	}
+
+	// Wrapper to handle idempotency cleanup on all exit paths.
+	cancelIdem := func() {
+		if idemReserved {
+			s.idemCache.cancel(sessionID, req.IdempotencyKey)
 		}
 	}
 
-	// --- Phase 1: Lock, validate session, resolve candidates, snapshot state ---
+	// --- Phase 1: Lock, validate session, resolve candidates ---
 	unlock := s.locks.Lock(sessionID)
 
 	session, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
 		unlock()
+		cancelIdem()
 		return nil, err
 	}
 
 	if session.Status != StatusActive {
 		unlock()
+		cancelIdem()
 		return nil, ErrSessionClosed
 	}
 	if session.IsExpired() {
 		unlock()
+		cancelIdem()
 		return nil, ErrSessionExpired
 	}
 
@@ -221,6 +343,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		}
 		if !allowed {
 			unlock()
+			cancelIdem()
 			return nil, fmt.Errorf("%w: service type %q not in allowed types", ErrNoServiceAvailable, req.ServiceType)
 		}
 	}
@@ -230,18 +353,19 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 	if err != nil {
 		s.logRequest(ctx, session.ID, req.ServiceType, "", "0", "no_service", 0, err.Error())
 		unlock()
+		cancelIdem()
 		return nil, err
 	}
 
-	// Snapshot budget state for candidate filtering.
+	// Snapshot immutable session properties.
 	holdBig, _ := usdc.Parse(session.MaxTotal)
 	maxPerBig, _ := usdc.Parse(session.MaxPerRequest)
 	agentAddr := session.AgentAddr
 	sessionIDCopy := session.ID
 
-	unlock() // Release lock before HTTP forwards
+	unlock() // Release lock — candidates resolved, ready to iterate
 
-	// --- Phase 2: Try candidates (UNLOCKED — HTTP forward can take 30s) ---
+	// --- Phase 2: Try candidates ---
 	var lastErr error
 	retries := 0
 
@@ -256,23 +380,43 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			continue
 		}
 
-		// Quick budget check against snapshot (may be stale but avoids pointless forwards)
-		// The authoritative check happens under lock in Phase 3.
-		// We don't hold the lock here, so we do an optimistic read.
-		if sess, sErr := s.store.GetSession(ctx, sessionIDCopy); sErr == nil {
-			spent, _ := usdc.Parse(sess.TotalSpent)
-			rem := new(big.Int).Sub(holdBig, spent)
-			if priceBig.Cmp(rem) > 0 {
-				lastErr = ErrBudgetExceeded
-				continue
-			}
+		// --- Phase 2a: Lock, reserve budget for this candidate ---
+		unlock = s.locks.Lock(sessionID)
+
+		session, err = s.store.GetSession(ctx, sessionIDCopy)
+		if err != nil {
+			unlock()
+			cancelIdem()
+			return nil, err
 		}
+		if session.Status != StatusActive {
+			unlock()
+			cancelIdem()
+			return nil, ErrSessionClosed
+		}
+
+		// Budget check: account for both settled spend AND in-flight reservations.
+		spentBig, _ := usdc.Parse(session.TotalSpent)
+		pending := s.getPendingSpend(sessionIDCopy)
+		committed := new(big.Int).Add(spentBig, pending)
+		remaining := new(big.Int).Sub(holdBig, committed)
+
+		if priceBig.Cmp(remaining) > 0 {
+			unlock()
+			lastErr = ErrBudgetExceeded
+			continue
+		}
+
+		// Reserve: mark this amount as committed so concurrent requests see it.
+		s.addPendingSpend(sessionIDCopy, priceBig)
+
+		unlock() // Budget reserved — safe to forward without lock
 
 		// Build reference for this request.
 		ref := fmt.Sprintf("%s:req:%d:%s", sessionIDCopy, retries, candidate.ServiceID)
 		priceStr := usdc.Format(priceBig)
 
-		// Forward HTTP request — UNLOCKED, can run concurrently with other proxy calls.
+		// --- Phase 2b: Forward HTTP request (unlocked) ---
 		fwdResp, fwdErr := s.forwarder.Forward(ctx, ForwardRequest{
 			Endpoint:  candidate.Endpoint,
 			Params:    req.Params,
@@ -282,11 +426,16 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		})
 
 		if fwdErr != nil {
-			// Forward failed — no payment was made. Try next candidate.
-			s.logger.Warn("forward failed, trying next candidate", "session", sessionID, "seller", candidate.AgentAddress, "error", fwdErr)
-			s.logRequest(ctx, sessionIDCopy, req.ServiceType, candidate.AgentAddress, "0", "forward_failed", 0, fwdErr.Error())
+			// Forward failed — unreserve budget, no payment.
+			unlock = s.locks.Lock(sessionID)
+			s.removePendingSpend(sessionIDCopy, priceBig)
+			unlock()
 
-			// Record failed forward for reputation (no money moved)
+			s.logger.Warn("forward failed, trying next candidate",
+				"session", sessionID, "seller", candidate.AgentAddress, "error", fwdErr)
+			s.logRequest(ctx, sessionIDCopy, req.ServiceType, candidate.AgentAddress,
+				"0", "forward_failed", 0, fwdErr.Error())
+
 			if s.recorder != nil {
 				_ = s.recorder.RecordTransaction(ctx, ref, agentAddr,
 					candidate.AgentAddress, "0", candidate.ServiceID, "failed")
@@ -297,45 +446,52 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			continue
 		}
 
-		// --- Phase 3: Lock, re-validate budget, settle, update session ---
+		// --- Phase 2c: Lock, settle payment, update session ---
 		unlock = s.locks.Lock(sessionID)
 
-		// Re-read session under lock to get authoritative state.
+		// Re-read session for authoritative state.
 		session, err = s.store.GetSession(ctx, sessionIDCopy)
 		if err != nil {
+			s.removePendingSpend(sessionIDCopy, priceBig)
 			unlock()
+			cancelIdem()
 			return nil, err
 		}
-		if session.Status != StatusActive {
-			unlock()
-			return nil, ErrSessionClosed
-		}
 
-		// Authoritative budget check — another concurrent request may have spent funds.
-		spentBig, _ := usdc.Parse(session.TotalSpent)
-		remaining := new(big.Int).Sub(holdBig, spentBig)
-		if priceBig.Cmp(remaining) > 0 {
+		// Allow settlement if session was closed/expired during forward.
+		// The hold has enough because Close/Expire account for pendingSpend.
+		if session.Status != StatusActive &&
+			session.Status != StatusClosed &&
+			session.Status != StatusExpired {
+			s.removePendingSpend(sessionIDCopy, priceBig)
 			unlock()
-			// Service was delivered but budget consumed by concurrent request.
-			// This is a rare race — log it but don't charge the buyer.
-			s.logger.Warn("budget consumed by concurrent request after successful forward",
-				"session", sessionID, "seller", candidate.AgentAddress, "price", candidate.Price)
-			lastErr = ErrBudgetExceeded
-			continue
+			cancelIdem()
+			return nil, ErrSessionClosed
 		}
 
 		// Update reference with authoritative request count.
 		ref = fmt.Sprintf("%s:req:%d:%s", session.ID, session.RequestCount+1, candidate.ServiceID)
 
-		// Forward succeeded — now settle payment.
-		if err := s.ledger.SettleHold(ctx, agentAddr, candidate.AgentAddress, candidate.Price, ref); err != nil {
-			s.logger.Error("CRITICAL: settle failed after successful forward — service delivered but seller not paid",
-				"session", sessionID, "seller", candidate.AgentAddress, "error", err)
+		// Settle payment with retry (handles transient DB errors).
+		var settleErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			settleErr = s.ledger.SettleHold(ctx, agentAddr, candidate.AgentAddress, candidate.Price, ref)
+			if settleErr == nil {
+				break
+			}
+			if attempt < 2 {
+				time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+			}
+		}
+		if settleErr != nil {
+			s.removePendingSpend(sessionIDCopy, priceBig)
+			s.logger.Error("settlement failed after retries — service delivered but seller not paid",
+				"session", sessionID, "seller", candidate.AgentAddress, "attempts", 3, "error", settleErr)
 			unlock()
 			lastErr = &MoneyError{
-				Err:         err,
+				Err:         settleErr,
 				FundsStatus: "held_safe",
-				Recovery:    "Service was delivered but payment settlement failed. Your funds are safely held. Contact support with the reference.",
+				Recovery:    "Service was delivered but payment settlement failed after 3 attempts. Your funds are safely held. Contact support with the reference.",
 				Amount:      candidate.Price,
 				Reference:   ref,
 			}
@@ -343,14 +499,25 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			continue
 		}
 
-		// Success — update session.
+		// Settlement succeeded — move reservation from pendingSpend to TotalSpent.
+		spentBig, _ = usdc.Parse(session.TotalSpent)
 		newSpent := new(big.Int).Add(spentBig, priceBig)
 		session.TotalSpent = usdc.Format(newSpent)
 		session.RequestCount++
 		session.UpdatedAt = time.Now()
+		s.removePendingSpend(sessionIDCopy, priceBig)
 
-		if err := s.store.UpdateSession(ctx, session); err != nil {
-			s.logger.Error("failed to update session after successful proxy", "session", sessionID, "error", err)
+		// Update session with retry (money already moved, must persist).
+		var updateErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if updateErr = s.store.UpdateSession(ctx, session); updateErr == nil {
+				break
+			}
+			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+		}
+		if updateErr != nil {
+			s.logger.Error("CRITICAL: settlement succeeded but session update failed after retries",
+				"session", sessionID, "seller", candidate.AgentAddress, "amount", priceStr, "error", updateErr)
 		}
 
 		unlock() // Done with state — release lock
@@ -377,16 +544,18 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			Retries:     retries,
 		}
 
-		// Cache for idempotency so retries return the same result.
-		if req.IdempotencyKey != "" {
-			s.idemCache.set(sessionID, req.IdempotencyKey, result, nil)
+		// Cache successful result for idempotency.
+		if idemReserved {
+			s.idemCache.complete(sessionID, req.IdempotencyKey, result)
 		}
 
 		return result, nil
 	}
 
+	// All candidates failed.
+	cancelIdem()
+
 	if lastErr != nil {
-		// Propagate MoneyError through ErrProxyFailed so handlers can extract funds_status
 		if me, ok := lastErr.(*MoneyError); ok {
 			return nil, &MoneyError{
 				Err:         fmt.Errorf("%w: %v", ErrProxyFailed, me.Err),
@@ -419,10 +588,14 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 		return nil, ErrSessionClosed
 	}
 
-	// Release only the unused portion. Per-request SettleHold already settled the spent portion.
+	// Release only the unused portion, accounting for in-flight reservations.
+	// Per-request SettleHold already settled the spent portion.
+	// PendingSpend covers in-flight requests that haven't settled yet.
 	spentBig, _ := usdc.Parse(session.TotalSpent)
 	holdBig, _ := usdc.Parse(session.MaxTotal)
-	unused := new(big.Int).Sub(holdBig, spentBig)
+	pending := s.getPendingSpend(sessionID)
+	committed := new(big.Int).Add(spentBig, pending)
+	unused := new(big.Int).Sub(holdBig, committed)
 
 	if unused.Sign() > 0 {
 		unusedStr := usdc.Format(unused)
@@ -526,10 +699,12 @@ func (s *Service) AutoCloseExpired(ctx context.Context, session *Session) error 
 		return ErrSessionClosed
 	}
 
-	// Release only the unused portion. Per-request SettleHold already settled the spent portion.
+	// Release only the unused portion, accounting for in-flight reservations.
 	spentBig, _ := usdc.Parse(fresh.TotalSpent)
 	holdBig, _ := usdc.Parse(fresh.MaxTotal)
-	unused := new(big.Int).Sub(holdBig, spentBig)
+	pending := s.getPendingSpend(fresh.ID)
+	committed := new(big.Int).Add(spentBig, pending)
+	unused := new(big.Int).Sub(holdBig, committed)
 
 	if unused.Sign() > 0 {
 		unusedStr := usdc.Format(unused)
