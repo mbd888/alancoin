@@ -29,21 +29,21 @@ func TestShouldSend_EventTypeFilter(t *testing.T) {
 	h := testHub()
 
 	client := &Client{sub: Subscription{
-		EventTypes: []EventType{EventTransaction, EventComment},
+		EventTypes: []EventType{EventTransaction, EventAgentJoined},
 	}}
 
 	txEvent := &Event{Type: EventTransaction}
-	commentEvent := &Event{Type: EventComment}
-	predEvent := &Event{Type: EventPrediction}
+	joinedEvent := &Event{Type: EventAgentJoined}
+	milestoneEvent := &Event{Type: EventMilestone}
 
 	if !h.shouldSend(client, txEvent) {
 		t.Error("Should receive transaction events")
 	}
-	if !h.shouldSend(client, commentEvent) {
-		t.Error("Should receive comment events")
+	if !h.shouldSend(client, joinedEvent) {
+		t.Error("Should receive agent_joined events")
 	}
-	if h.shouldSend(client, predEvent) {
-		t.Error("Should NOT receive prediction events")
+	if h.shouldSend(client, milestoneEvent) {
+		t.Error("Should NOT receive milestone events")
 	}
 }
 
@@ -67,7 +67,7 @@ func TestShouldSend_AgentFilter(t *testing.T) {
 		Data: map[string]interface{}{"from": "0xsender", "to": "0xagent1"},
 	}
 	matchingAuthor := &Event{
-		Type: EventComment,
+		Type: EventAgentJoined,
 		Data: map[string]interface{}{"authorAddr": "0xagent1"},
 	}
 
@@ -100,8 +100,8 @@ func TestShouldSend_MinAmountFilter(t *testing.T) {
 		Type: EventTransaction,
 		Data: map[string]interface{}{"amount": 5.0},
 	}
-	comment := &Event{
-		Type: EventComment,
+	milestone := &Event{
+		Type: EventMilestone,
 		Data: map[string]interface{}{"content": "test"},
 	}
 
@@ -111,7 +111,7 @@ func TestShouldSend_MinAmountFilter(t *testing.T) {
 	if h.shouldSend(client, small) {
 		t.Error("Should NOT receive small transaction")
 	}
-	if !h.shouldSend(client, comment) {
+	if !h.shouldSend(client, milestone) {
 		t.Error("MinAmount filter should only apply to transactions")
 	}
 }
@@ -266,20 +266,6 @@ func TestHub_BroadcastTransaction(t *testing.T) {
 	})
 }
 
-func TestHub_BroadcastComment(t *testing.T) {
-	h := testHub()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go h.Run(ctx)
-	time.Sleep(50 * time.Millisecond)
-
-	// Should not panic
-	h.BroadcastComment(map[string]interface{}{
-		"authorAddr": "0xa", "content": "test",
-	})
-}
-
 func TestHub_ContextCancellation(t *testing.T) {
 	h := testHub()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -309,11 +295,11 @@ func TestHub_FilteredBroadcast(t *testing.T) {
 	go h.Run(ctx)
 	time.Sleep(50 * time.Millisecond)
 
-	// Client only wants comments
+	// Client only wants milestones
 	client := &Client{
 		hub:  h,
 		send: make(chan []byte, 256),
-		sub:  Subscription{EventTypes: []EventType{EventComment}},
+		sub:  Subscription{EventTypes: []EventType{EventMilestone}},
 	}
 
 	h.register <- client
@@ -330,8 +316,8 @@ func TestHub_FilteredBroadcast(t *testing.T) {
 		// Good - filtered out
 	}
 
-	// Send a comment event (should be received)
-	h.Broadcast(&Event{Type: EventComment, Timestamp: time.Now()})
+	// Send a milestone event (should be received)
+	h.Broadcast(&Event{Type: EventMilestone, Timestamp: time.Now()})
 
 	select {
 	case msg := <-client.send:
@@ -339,6 +325,6 @@ func TestHub_FilteredBroadcast(t *testing.T) {
 			t.Error("Expected non-empty message")
 		}
 	case <-time.After(time.Second):
-		t.Error("Client should receive comment event")
+		t.Error("Client should receive milestone event")
 	}
 }

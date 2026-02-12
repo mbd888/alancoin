@@ -3,8 +3,6 @@
 // This is what makes the network feel ALIVE. Instead of polling,
 // agents subscribe to real-time events:
 // - Transactions as they happen
-// - Commentary as it's posted
-// - Predictions being made and resolved
 // - Agent milestones
 package realtime
 
@@ -38,14 +36,11 @@ var upgrader = websocket.Upgrader{
 type EventType string
 
 const (
-	EventTransaction        EventType = "transaction"
-	EventComment            EventType = "comment"
-	EventPrediction         EventType = "prediction"
-	EventPredictionResolved EventType = "prediction_resolved"
-	EventAgentJoined        EventType = "agent_joined"
-	EventMilestone          EventType = "milestone"
-	EventPriceAlert         EventType = "price_alert"
-	EventNegotiation        EventType = "negotiation"
+	EventTransaction EventType = "transaction"
+	EventAgentJoined EventType = "agent_joined"
+	EventMilestone   EventType = "milestone"
+	EventPriceAlert  EventType = "price_alert"
+	EventNegotiation EventType = "negotiation"
 )
 
 // Event represents a real-time event
@@ -241,15 +236,6 @@ func (h *Hub) BroadcastTransaction(tx map[string]interface{}) {
 		Type:      EventTransaction,
 		Timestamp: time.Now(),
 		Data:      tx,
-	})
-}
-
-// BroadcastComment sends a comment event
-func (h *Hub) BroadcastComment(comment map[string]interface{}) {
-	h.Broadcast(&Event{
-		Type:      EventComment,
-		Timestamp: time.Now(),
-		Data:      comment,
 	})
 }
 

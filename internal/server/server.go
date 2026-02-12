@@ -24,7 +24,6 @@ import (
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq" // PostgreSQL driver
 	"github.com/mbd888/alancoin/internal/auth"
-	"github.com/mbd888/alancoin/internal/commentary"
 	"github.com/mbd888/alancoin/internal/config"
 	"github.com/mbd888/alancoin/internal/contracts"
 	"github.com/mbd888/alancoin/internal/credit"
@@ -37,7 +36,6 @@ import (
 	"github.com/mbd888/alancoin/internal/metrics"
 	"github.com/mbd888/alancoin/internal/negotiation"
 	"github.com/mbd888/alancoin/internal/paywall"
-	"github.com/mbd888/alancoin/internal/predictions"
 	"github.com/mbd888/alancoin/internal/ratelimit"
 	"github.com/mbd888/alancoin/internal/realtime"
 	"github.com/mbd888/alancoin/internal/receipts"
@@ -68,8 +66,6 @@ type Server struct {
 	sessionMgr             *sessionkeys.Manager
 	authMgr                *auth.Manager
 	ledger                 *ledger.Ledger
-	commentary             *commentary.Service
-	predictions            *predictions.Service
 	depositWatcher         *watcher.Watcher
 	webhooks               *webhooks.Dispatcher
 	realtimeHub            *realtime.Hub
@@ -214,22 +210,6 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		}
 		s.webhooks = webhooks.NewDispatcher(webhookStore)
 		s.logger.Info("webhooks enabled")
-
-		// Commentary (verbal agents layer)
-		commentaryStore := commentary.NewPostgresStore(db)
-		if err := commentaryStore.Migrate(ctx); err != nil {
-			s.logger.Warn("failed to migrate commentary store", "error", err)
-		}
-		s.commentary = commentary.NewService(commentaryStore)
-		s.logger.Info("verbal agents enabled")
-
-		// Predictions (verifiable predictions with reputation stakes)
-		predictionsStore := predictions.NewPostgresStore(db)
-		if err := predictionsStore.Migrate(ctx); err != nil {
-			s.logger.Warn("failed to migrate predictions store", "error", err)
-		}
-		s.predictions = predictions.NewService(predictionsStore, &registryMetricProvider{s.registry})
-		s.logger.Info("predictions enabled")
 
 		// Escrow with PostgreSQL store
 		escrowStore := escrow.NewPostgresStore(db)
@@ -388,10 +368,6 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Webhooks with in-memory store
 		s.webhooks = webhooks.NewDispatcher(webhooks.NewMemoryStore())
-
-		// Commentary and predictions with in-memory stores (for demo)
-		s.commentary = commentary.NewService(commentary.NewMemoryStore())
-		s.predictions = predictions.NewService(predictions.NewMemoryStore(), &registryMetricProvider{s.registry})
 
 		// Escrow with in-memory store
 		escrowStore := escrow.NewMemoryStore()
@@ -983,24 +959,6 @@ func (s *Server) setupRoutes() {
 		}
 	}
 
-	// Commentary routes (verbal agents - the social/insight layer)
-	if s.commentary != nil {
-		commentaryHandler := commentary.NewHandler(s.commentary)
-
-		// Add real-time event emitter
-		if s.realtimeHub != nil {
-			commentaryHandler = commentaryHandler.WithEvents(&commentaryEventEmitter{s.realtimeHub})
-		}
-
-		// Public routes - anyone can read
-		commentaryHandler.RegisterRoutes(v1)
-
-		// Protected routes - only authenticated agents can post
-		protectedCommentary := v1.Group("")
-		protectedCommentary.Use(auth.Middleware(s.authMgr))
-		commentaryHandler.RegisterProtectedRoutes(protectedCommentary)
-	}
-
 	// Escrow routes (buyer protection for service payments)
 	if s.escrowService != nil {
 		escrowHandler := escrow.NewHandler(s.escrowService)
@@ -1135,19 +1093,6 @@ func (s *Server) setupRoutes() {
 		negotiationHandler.RegisterAdminRoutes(adminNeg)
 	}
 
-	// Predictions routes (verifiable predictions with reputation stakes)
-	if s.predictions != nil {
-		predictionsHandler := predictions.NewHandler(s.predictions)
-
-		// Public routes - anyone can read
-		predictionsHandler.RegisterRoutes(v1)
-
-		// Protected routes - only authenticated agents can make/vote
-		protectedPredictions := v1.Group("")
-		protectedPredictions.Use(auth.Middleware(s.authMgr))
-		predictionsHandler.RegisterProtectedRoutes(protectedPredictions)
-	}
-
 	// Stakes routes (agent revenue staking / investment)
 	if s.stakesService != nil {
 		stakeAnalytics := stakes.NewStakeAnalyticsService(s.stakesService.Store())
@@ -1162,7 +1107,7 @@ func (s *Server) setupRoutes() {
 		stakesHandler.RegisterProtectedRoutes(protectedStakes)
 	}
 
-	// Enhanced feed - transactions + commentary interleaved
+	// Timeline feed
 	v1.GET("/timeline", s.getTimeline)
 
 	// Paywall config
@@ -1546,7 +1491,7 @@ func (s *Server) premiumHandler(c *gin.Context) {
 }
 
 // enhancedStatsHandler returns extended network stats for demos
-// Aggregates data from multiple sources: registry, session keys, commentary, gas
+// Aggregates data from multiple sources: registry, session keys, gas
 func (s *Server) enhancedStatsHandler(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -1592,13 +1537,6 @@ func (s *Server) enhancedStatsHandler(c *gin.Context) {
 			f, _ := balanceETH.Float64()
 			enhanced["paymasterBalance"] = fmt.Sprintf("%.4f ETH", f)
 		}
-	}
-
-	// Add commentary stats
-	if s.commentary != nil {
-		// Count verbal agents and comments (if store exposes this)
-		// For now, just indicate commentary is enabled
-		enhanced["commentaryEnabled"] = true
 	}
 
 	c.JSON(http.StatusOK, enhanced)
@@ -2140,12 +2078,11 @@ func (a *withdrawalAdapter) Transfer(ctx context.Context, to common.Address, amo
 
 // TimelineItem represents an item in the unified timeline
 type TimelineItem struct {
-	Type      string      `json:"type"` // "transaction" or "comment"
+	Type      string      `json:"type"`
 	Timestamp time.Time   `json:"timestamp"`
 	Data      interface{} `json:"data"`
 }
 
-// getTimeline returns a unified feed of transactions + commentary
 func (s *Server) getEscrowAnalytics(c *gin.Context) {
 	filter := escrow.AnalyticsFilter{
 		SellerAddr: c.Query("sellerAddr"),
@@ -2191,34 +2128,6 @@ func (s *Server) getTimeline(c *gin.Context) {
 				Timestamp: tx.CreatedAt,
 				Data:      tx,
 			})
-		}
-	}
-
-	// Get recent commentary if enabled
-	if s.commentary != nil {
-		comments, err := s.commentary.GetFeed(ctx, limit)
-		if err == nil {
-			for _, comment := range comments {
-				items = append(items, TimelineItem{
-					Type:      "comment",
-					Timestamp: comment.CreatedAt,
-					Data:      comment,
-				})
-			}
-		}
-	}
-
-	// Get recent predictions if enabled
-	if s.predictions != nil {
-		preds, err := s.predictions.Store().List(ctx, predictions.ListOptions{Limit: limit})
-		if err == nil {
-			for _, pred := range preds {
-				items = append(items, TimelineItem{
-					Type:      "prediction",
-					Timestamp: pred.CreatedAt,
-					Data:      pred,
-				})
-			}
 		}
 	}
 
@@ -2369,96 +2278,6 @@ func (e *realtimeEventEmitter) EmitSessionKeyUsed(keyID, agentAddr, amount strin
 				"event":        "session_key_used",
 			},
 		})
-	}
-}
-
-// commentaryEventEmitter adapts realtime.Hub to commentary.CommentEventEmitter
-type commentaryEventEmitter struct {
-	hub *realtime.Hub
-}
-
-func (e *commentaryEventEmitter) EmitComment(comment map[string]interface{}) {
-	if e.hub != nil {
-		e.hub.BroadcastComment(comment)
-	}
-}
-
-// registryMetricProvider implements predictions.MetricProvider using registry data
-type registryMetricProvider struct {
-	r registry.Store
-}
-
-func (p *registryMetricProvider) GetAgentMetric(ctx context.Context, agentAddr, metric string) (float64, error) {
-	agent, err := p.r.GetAgent(ctx, agentAddr)
-	if err != nil {
-		return 0, err
-	}
-
-	switch metric {
-	case "tx_count", "transaction_count":
-		return float64(agent.Stats.TransactionCount), nil
-	case "success_rate":
-		return agent.Stats.SuccessRate, nil
-	case "volume", "total_volume":
-		// Parse TotalReceived string to float
-		var volume float64
-		if agent.Stats.TotalReceived != "" {
-			_, _ = fmt.Sscanf(agent.Stats.TotalReceived, "%f", &volume)
-		}
-		return volume, nil
-	default:
-		return 0, errors.New("unknown metric: " + metric)
-	}
-}
-
-func (p *registryMetricProvider) GetServiceTypeMetric(ctx context.Context, serviceType, metric string) (float64, error) {
-	// Get aggregate metrics for a service type
-	services, err := p.r.ListServices(ctx, registry.AgentQuery{ServiceType: serviceType, Limit: 1000})
-	if err != nil {
-		return 0, err
-	}
-
-	switch metric {
-	case "count":
-		return float64(len(services)), nil
-	case "avg_price":
-		if len(services) == 0 {
-			return 0, nil
-		}
-		var total float64
-		for _, svc := range services {
-			var price float64
-			_, _ = fmt.Sscanf(svc.Price, "%f", &price)
-			total += price
-		}
-		return total / float64(len(services)), nil
-	default:
-		return 0, errors.New("unknown metric: " + metric)
-	}
-}
-
-func (p *registryMetricProvider) GetMarketMetric(ctx context.Context, metric string) (float64, error) {
-	stats, err := p.r.GetNetworkStats(ctx)
-	if err != nil {
-		return 0, err
-	}
-
-	switch metric {
-	case "total_agents":
-		return float64(stats.TotalAgents), nil
-	case "total_services":
-		return float64(stats.TotalServices), nil
-	case "total_transactions":
-		return float64(stats.TotalTransactions), nil
-	case "total_volume":
-		// Parse TotalVolume string to float
-		var volume float64
-		if stats.TotalVolume != "" {
-			_, _ = fmt.Sscanf(stats.TotalVolume, "%f", &volume)
-		}
-		return volume, nil
-	default:
-		return 0, errors.New("unknown metric: " + metric)
 	}
 }
 

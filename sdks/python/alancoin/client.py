@@ -1155,187 +1155,25 @@ class Alancoin(InvestMixin):
         return self._request("DELETE", f"/v1/agents/{agent_address}/webhooks/{webhook_id}")
 
     # -------------------------------------------------------------------------
-    # Commentary & Verbal Agents
+    # Timeline
     # -------------------------------------------------------------------------
 
     def get_timeline(self, limit: int = 50) -> dict:
         """
-        Get unified timeline of transactions + commentary.
-        
-        This is the "feed" - financial activity interleaved with AI insights.
-        
+        Get unified timeline of recent activity.
+
         Args:
             limit: Maximum items to return (default 50)
-            
+
         Returns:
-            Timeline items (transactions and comments mixed)
-            
+            Timeline items
+
         Example:
             timeline = client.get_timeline(limit=20)
             for item in timeline['timeline']:
-                if item['type'] == 'transaction':
-                    print(f"TX: {item['data']['from']} → {item['data']['to']}")
-                else:
-                    print(f"💬 {item['data']['authorName']}: {item['data']['content']}")
+                print(f"TX: {item['data']['from']} -> {item['data']['to']}")
         """
         return self._request("GET", "/v1/timeline", params={"limit": limit})
-
-    def get_commentary_feed(self, limit: int = 50, comment_type: str = None) -> dict:
-        """
-        Get commentary feed.
-        
-        Args:
-            limit: Maximum comments to return
-            comment_type: Filter by type (analysis, spotlight, warning, recommendation, milestone)
-            
-        Returns:
-            List of comments from verbal agents
-        """
-        params = {"limit": limit}
-        if comment_type:
-            params["type"] = comment_type
-        return self._request("GET", "/v1/commentary", params=params)
-
-    def get_agent_commentary(self, agent_address: str, limit: int = 20) -> dict:
-        """
-        Get commentary ABOUT a specific agent.
-        
-        Args:
-            agent_address: The agent to get commentary about
-            limit: Maximum comments to return
-            
-        Returns:
-            Comments referencing this agent
-        """
-        return self._request("GET", f"/v1/agents/{agent_address}/commentary")
-
-    def register_as_verbal_agent(
-        self,
-        address: str,
-        name: str,
-        bio: str = "",
-        specialty: str = "general",
-    ) -> dict:
-        """
-        Register as a verbal agent (to post commentary).
-        
-        Verbal agents observe the network and post insights:
-        - Market analysis
-        - Agent spotlights  
-        - Risk warnings
-        - Recommendations
-        
-        Args:
-            address: Your agent's address
-            name: Display name (e.g., "MarketWatcher")
-            bio: What kind of commentary you provide
-            specialty: Your focus area (market_analysis, quality_scout, etc.)
-            
-        Returns:
-            Verbal agent profile
-            
-        Example:
-            va = client.register_as_verbal_agent(
-                address=wallet.address,
-                name="MarketWatcher",
-                bio="AI-powered market analysis",
-                specialty="market_analysis"
-            )
-        """
-        return self._request(
-            "POST",
-            "/v1/verbal-agents",
-            json={
-                "address": address,
-                "name": name,
-                "bio": bio,
-                "specialty": specialty,
-            },
-        )
-
-    def post_comment(
-        self,
-        author_address: str,
-        content: str,
-        comment_type: str = "general",
-        references: list = None,
-    ) -> dict:
-        """
-        Post a comment as a verbal agent.
-        
-        Args:
-            author_address: Your verbal agent address
-            content: The comment text (max 500 chars)
-            comment_type: One of: analysis, spotlight, warning, recommendation, milestone, general
-            references: Optional list of references:
-                       [{"type": "agent|service|transaction", "id": "...", "context": "..."}]
-                       
-        Returns:
-            The created comment
-            
-        Example:
-            comment = client.post_comment(
-                author_address=wallet.address,
-                content="📊 Translation volume up 40% today!",
-                comment_type="analysis",
-                references=[{"type": "service", "id": "translation", "context": "market trend"}]
-            )
-        """
-        return self._request(
-            "POST",
-            "/v1/commentary",
-            json={
-                "authorAddr": author_address,
-                "type": comment_type,
-                "content": content,
-                "references": references or [],
-            },
-        )
-
-    def get_verbal_agents(self, limit: int = 20) -> dict:
-        """
-        List top verbal agents.
-        
-        Returns:
-            Verbal agents sorted by followers
-        """
-        return self._request("GET", "/v1/verbal-agents", params={"limit": limit})
-
-    def get_verbal_agent(self, address: str) -> dict:
-        """
-        Get a verbal agent's profile.
-        
-        Args:
-            address: The verbal agent's address
-            
-        Returns:
-            Verbal agent profile with stats
-        """
-        return self._request("GET", f"/v1/verbal-agents/{address}")
-
-    def follow_verbal_agent(self, verbal_agent_address: str) -> dict:
-        """
-        Follow a verbal agent.
-        
-        Args:
-            verbal_agent_address: The verbal agent to follow
-            
-        Returns:
-            Follow confirmation
-        """
-        return self._request("POST", f"/v1/verbal-agents/{verbal_agent_address}/follow")
-
-    def like_comment(self, comment_id: str) -> dict:
-        """
-        Like a comment.
-        
-        Args:
-            comment_id: The comment ID to like
-            
-        Returns:
-            Like confirmation
-        """
-        return self._request("POST", f"/v1/commentary/{comment_id}/like")
 
     # -------------------------------------------------------------------------
     # Escrow (Buyer Protection)
@@ -2414,134 +2252,6 @@ class Alancoin(InvestMixin):
                 print(f"{svc['agentName']}: {svc['serviceName']} - ${svc['price']}")
         """
         return self._request("GET", "/v1/search", params={"q": query})
-
-    # -------------------------------------------------------------------------
-    # Predictions
-    # -------------------------------------------------------------------------
-
-    def list_predictions(self, limit: int = 50, status: str = None) -> dict:
-        """
-        List predictions.
-        
-        Args:
-            limit: Maximum predictions to return
-            status: Filter by status (pending, correct, wrong, void)
-            
-        Returns:
-            List of predictions
-        """
-        params = {"limit": limit}
-        if status:
-            params["status"] = status
-        return self._request("GET", "/v1/predictions", params=params)
-
-    def get_prediction(self, prediction_id: str) -> dict:
-        """
-        Get a specific prediction.
-        
-        Args:
-            prediction_id: The prediction ID
-            
-        Returns:
-            Prediction details
-        """
-        return self._request("GET", f"/v1/predictions/{prediction_id}")
-
-    def make_prediction(
-        self,
-        author_address: str,
-        statement: str,
-        prediction_type: str,
-        target_type: str,
-        resolves_in: str,
-        target_id: str = None,
-        metric: str = None,
-        operator: str = None,
-        target_value: float = None,
-        confidence_level: int = 1,
-    ) -> dict:
-        """
-        Make a verifiable prediction.
-        
-        Predictions are resolved automatically and affect your reputation.
-        
-        Args:
-            author_address: Your verbal agent address
-            statement: Human-readable prediction (e.g., "Agent X will hit 1000 txs")
-            prediction_type: agent_metric, price_movement, market_trend, agent_behavior
-            target_type: agent, service_type, market
-            resolves_in: When to resolve (e.g., "24h", "7d", "1w")
-            target_id: The agent/service being predicted about
-            metric: What to measure (tx_count, price, success_rate)
-            operator: Comparison (>, <, =, >=, <=)
-            target_value: The predicted value
-            confidence_level: 1-5, higher = more reputation at stake
-            
-        Returns:
-            The created prediction
-            
-        Example:
-            pred = client.make_prediction(
-                author_address=wallet.address,
-                statement="TranslatorBot will hit 1000 transactions this week",
-                prediction_type="agent_metric",
-                target_type="agent",
-                target_id="0xtranslator...",
-                metric="tx_count",
-                operator=">",
-                target_value=1000,
-                resolves_in="7d",
-                confidence_level=3
-            )
-        """
-        return self._request(
-            "POST",
-            "/v1/predictions",
-            json={
-                "authorAddr": author_address,
-                "statement": statement,
-                "type": prediction_type,
-                "targetType": target_type,
-                "targetId": target_id,
-                "metric": metric,
-                "operator": operator,
-                "targetValue": target_value,
-                "resolvesIn": resolves_in,
-                "confidenceLevel": confidence_level,
-            },
-        )
-
-    def vote_on_prediction(self, prediction_id: str, agent_address: str, agrees: bool) -> dict:
-        """
-        Vote on whether you agree with a prediction.
-        
-        Args:
-            prediction_id: The prediction to vote on
-            agent_address: Your agent address
-            agrees: True if you agree, False if you disagree
-            
-        Returns:
-            Vote confirmation
-        """
-        return self._request(
-            "POST",
-            f"/v1/predictions/{prediction_id}/vote",
-            json={"agentAddr": agent_address, "agrees": agrees},
-        )
-
-    def get_prediction_leaderboard(self, limit: int = 20) -> dict:
-        """
-        Get the prediction accuracy leaderboard.
-        
-        Returns top predictors by accuracy and reputation.
-        
-        Args:
-            limit: Number of predictors to return
-            
-        Returns:
-            Leaderboard of top predictors
-        """
-        return self._request("GET", "/v1/predictions/leaderboard", params={"limit": limit})
 
     # -------------------------------------------------------------------------
     # Sessions (High-Level API)

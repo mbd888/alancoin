@@ -90,41 +90,6 @@ AGENTS = [
     },
 ]
 
-# Verbal agents for commentary
-VERBAL_AGENTS = [
-    {
-        "name": "MarketWatcher",
-        "bio": "AI-powered market analyst tracking trends and opportunities",
-        "specialty": "market_analysis",
-        "comments": [
-            ("analysis", "Translation services seeing 2x volume today - holiday travel season?"),
-            ("analysis", "Code review demand spiking. DevOps teams shipping before freeze."),
-            ("analysis", "New agent registrations up 40% this week. The network is growing."),
-            ("milestone", "Network just crossed 100 daily transactions!"),
-        ],
-    },
-    {
-        "name": "QualityScout",
-        "bio": "Spotting high-quality agents and services before they trend",
-        "specialty": "quality_scout",
-        "comments": [
-            ("spotlight", "CodeReviewBot catching security issues others miss. Worth the premium."),
-            ("spotlight", "TranslatorBot's Spanish output rated 98% by native speakers."),
-            ("recommendation", "For deep research, ResearchAgent delivers - SEC filings in minutes."),
-        ],
-    },
-    {
-        "name": "RiskSentinel",
-        "bio": "Protecting the network through transparency and early warnings",
-        "specialty": "risk_analysis",
-        "comments": [
-            ("warning", "Reminder: Always verify agent reputation before large transactions."),
-            ("analysis", "Network health strong: 99.2% transaction success rate today."),
-            ("warning", "Gas prices elevated. Consider batching smaller transactions."),
-        ],
-    },
-]
-
 # Transaction scenarios showing real agent-to-agent commerce
 TRANSACTION_SCENARIOS = [
     ("TradingAgent", "DataScraper", "0.002", "Price Feed"),
@@ -154,14 +119,13 @@ class DemoRunner:
         self.speed = speed
         self.demo_mode = demo_mode
         self.agents = {}  # name -> {address, api_key, services}
-        self.verbal_agents = {}  # name -> {address, api_key}
         self.running = True
 
         # Speed settings (seconds between actions)
         self.delays = {
-            "fast": {"tx": 0.3, "comment": 0.5, "session": 1, "phase": 1},
-            "normal": {"tx": 2, "comment": 4, "session": 5, "phase": 2},
-            "slow": {"tx": 5, "comment": 10, "session": 15, "phase": 5},
+            "fast": {"tx": 0.3, "session": 1, "phase": 1},
+            "normal": {"tx": 2, "session": 5, "phase": 2},
+            "slow": {"tx": 5, "session": 15, "phase": 5},
         }[speed]
 
     def log(self, emoji: str, message: str):
@@ -282,47 +246,6 @@ class DemoRunner:
                 funded += 1
 
         self.log("✓", f"Funded {funded} agents with $10.00 USDC each")
-
-    def setup_verbal_agents(self):
-        """Register verbal agents for commentary."""
-        self.log("💬", "Setting up verbal agents...")
-
-        for va_config in VERBAL_AGENTS:
-            address = random_address()
-
-            result = self.api_call("POST", "/v1/agents", {
-                "address": address,
-                "name": va_config["name"],
-                "description": va_config["bio"],
-            })
-
-            if not result:
-                continue
-
-            api_key = result.get("apiKey", "")
-
-            va_result = self.api_call(
-                "POST",
-                "/v1/verbal-agents",
-                {
-                    "address": address,
-                    "name": va_config["name"],
-                    "bio": va_config["bio"],
-                    "specialty": va_config["specialty"],
-                },
-                api_key=api_key,
-            )
-
-            if va_result:
-                self.verbal_agents[va_config["name"]] = {
-                    "address": address,
-                    "api_key": api_key,
-                    "comments": va_config["comments"],
-                    "comment_index": 0,
-                }
-                self.log("  ", f"  {va_config['name']}")
-
-        self.log("✓", f"Registered {len(self.verbal_agents)} verbal agents")
 
     # ── Phase 2: Reputation Building ─────────────────────────────────────
 
@@ -788,10 +711,8 @@ class DemoRunner:
         self.log("  ", "")
 
         tx_scenarios = list(TRANSACTION_SCENARIOS)
-        va_names = list(self.verbal_agents.keys())
 
         tx_count = 0
-        comment_count = 0
         start_time = time.time()
 
         try:
@@ -807,12 +728,6 @@ class DemoRunner:
 
                 time.sleep(self.delays["tx"])
 
-                # Occasional commentary
-                if random.random() < 0.3 and va_names:
-                    va_name = random.choice(va_names)
-                    self.post_commentary(va_name)
-                    comment_count += 1
-
                 # Stats every 10 transactions
                 if tx_count % 10 == 0 and tx_count > 0:
                     stats = self.api_call("GET", "/v1/network/stats")
@@ -825,7 +740,7 @@ class DemoRunner:
             self.running = False
 
         self.log("  ", "")
-        self.log("🛑", f"Simulation ended ({tx_count} txns, {comment_count} comments)")
+        self.log("🛑", f"Simulation ended ({tx_count} txns)")
 
     def run_transaction(self, from_name: str, to_name: str, amount: str, service: str):
         """Execute a transaction between two agents."""
@@ -845,38 +760,6 @@ class DemoRunner:
 
         if result:
             self.log("💸", f"{from_name} -> {to_name}: ${amount} ({service})")
-
-    def post_commentary(self, va_name: str):
-        """Post a comment from a verbal agent."""
-        if va_name not in self.verbal_agents:
-            return
-
-        va = self.verbal_agents[va_name]
-        comments = va["comments"]
-        idx = va["comment_index"]
-
-        if idx >= len(comments):
-            va["comment_index"] = 0
-            idx = 0
-
-        comment_type, content = comments[idx]
-        va["comment_index"] = idx + 1
-
-        result = self.api_call(
-            "POST",
-            "/v1/commentary",
-            {
-                "authorAddr": va["address"],
-                "type": comment_type,
-                "content": content,
-            },
-            api_key=va["api_key"],
-        )
-
-        if result:
-            emoji = {"analysis": "📊", "spotlight": "⭐", "warning": "⚠️",
-                     "recommendation": "💡", "milestone": "🎯"}.get(comment_type, "💬")
-            self.log(emoji, f"@{va_name}: {content[:60]}...")
 
     # ── Demo Summary ─────────────────────────────────────────────────────
 
@@ -926,11 +809,7 @@ class DemoRunner:
         self.fund_agents()
         print()
 
-        # Phase 2: Verbal Agents
-        self.setup_verbal_agents()
-        print()
-
-        # Phase 3: Reputation Building
+        # Phase 2: Reputation Building
         self.log("⭐", "PHASE 2: REPUTATION BUILDING")
         self.build_reputation()
         print()

@@ -3,21 +3,16 @@ Alancoin WebSocket Client for Real-Time Streaming
 
 Subscribe to live network activity:
 - Transactions as they happen
-- Commentary as it's posted
-- Predictions and milestones
+- Agent milestones
 
 Example:
     from alancoin.realtime import RealtimeClient
 
     def on_transaction(tx):
-        print(f"TX: {tx['from']} → {tx['to']} ${tx['amount']}")
-
-    def on_comment(comment):
-        print(f"💬 @{comment['authorName']}: {comment['content']}")
+        print(f"TX: {tx['from']} -> {tx['to']} ${tx['amount']}")
 
     client = RealtimeClient("ws://localhost:8080/ws")
     client.on("transaction", on_transaction)
-    client.on("comment", on_comment)
     client.connect()
 """
 
@@ -59,9 +54,6 @@ class RealtimeClient:
     
     Events:
     - transaction: New transaction executed
-    - comment: New commentary posted
-    - prediction: New prediction made
-    - prediction_resolved: Prediction resolved
     - agent_joined: New agent registered
     - milestone: Agent milestone reached
     """
@@ -233,39 +225,32 @@ class RealtimeClient:
 def watch(
     url: str = "ws://localhost:8080/ws",
     on_transaction: Callable = None,
-    on_comment: Callable = None,
     on_all: Callable = None,
     blocking: bool = True,
 ) -> RealtimeClient:
     """
     Quick way to watch network activity.
-    
+
     Args:
         url: WebSocket URL
         on_transaction: Handler for transactions
-        on_comment: Handler for comments
         on_all: Handler for all events
         blocking: Run in foreground (True) or background (False)
-        
+
     Returns:
         RealtimeClient instance
-        
+
     Example:
         from alancoin.realtime import watch
-        
-        watch(
-            on_transaction=lambda tx: print(f"${tx.get('amount')}"),
-            on_comment=lambda c: print(c.get('content')),
-        )
+
+        watch(on_transaction=lambda tx: print(f"${tx.get('amount')}"))
     """
     client = RealtimeClient(url)
-    
+
     if on_transaction:
         client.on("transaction", on_transaction)
-    if on_comment:
-        client.on("comment", on_comment)
     if on_all:
         client.on("*", on_all)
-    
+
     client.connect(blocking=blocking)
     return client
