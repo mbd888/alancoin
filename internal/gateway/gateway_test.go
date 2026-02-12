@@ -1306,6 +1306,69 @@ func (r *retryMockLedger) SettleHold(ctx context.Context, buyerAddr, sellerAddr,
 	return r.mockLedger.SettleHold(ctx, buyerAddr, sellerAddr, amount, reference)
 }
 
+// TestProxy_SettlementFailure_ReturnsResponse verifies that when settlement
+// fails on ALL retries, the buyer still gets the service response (not a retry
+// to the next candidate). The buyer got value — don't throw it away.
+func TestProxy_SettlementFailure_ReturnsResponse(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"result": "translated"})
+	defer server.Close()
+
+	ml := newMockLedger()
+	settleAttempts := 0
+	customLedger := &retryMockLedger{
+		mockLedger:   ml,
+		failCount:    999, // Always fail settlement
+		attemptCount: &settleAttempts,
+	}
+
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller1", ServiceID: "svc1", ServiceName: "good", Price: "0.10", Endpoint: server.URL},
+			{AgentAddress: "0xseller2", ServiceID: "svc2", ServiceName: "backup", Price: "0.10", Endpoint: server.URL},
+		},
+	}
+
+	store := NewMemoryStore()
+	resolver := NewResolver(reg)
+	forwarder := NewForwarder(5 * time.Second)
+	svc := NewService(store, resolver, forwarder, customLedger, testLogger())
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	// Proxy should return the FIRST candidate's response (not try the second)
+	result, err := svc.Proxy(ctx, session.ID, ProxyRequest{
+		ServiceType: "test",
+	})
+	if err != nil {
+		t.Fatalf("should return success even with settlement failure: %v", err)
+	}
+
+	// Response came from the first candidate
+	if result.ServiceUsed != "0xseller1" {
+		t.Errorf("expected first candidate 0xseller1 (no retry to second), got %s", result.ServiceUsed)
+	}
+
+	// Amount paid is 0 because settlement failed
+	if result.AmountPaid != "0.000000" {
+		t.Errorf("expected 0.000000 paid (settlement failed), got %s", result.AmountPaid)
+	}
+
+	// Session spend should be unchanged (settlement didn't happen)
+	updated, _ := svc.GetSession(ctx, session.ID)
+	if updated.TotalSpent != "0.000000" {
+		t.Errorf("expected 0.000000 spent (settlement failed, buyer not charged), got %s", updated.TotalSpent)
+	}
+
+	// Settlement was attempted 3 times (retry loop)
+	if settleAttempts != 3 {
+		t.Errorf("expected 3 settle attempts, got %d", settleAttempts)
+	}
+}
+
 // TestProxy_ConcurrentIdempotencyDedup verifies that concurrent requests
 // with the same idempotency key result in exactly one forward and one
 // settlement (Bug #3 fix).

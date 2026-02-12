@@ -536,19 +536,39 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			}
 		}
 		if settleErr != nil {
+			// Service was delivered but payment to seller failed.
+			// Return the response to the buyer — they already got value.
+			// Do NOT try the next candidate (that would double-deliver).
 			s.removePendingSpend(sessionIDCopy, priceBig)
-			s.logger.Error("settlement failed after retries — service delivered but seller not paid",
-				"session", sessionID, "seller", candidate.AgentAddress, "attempts", 3, "error", settleErr)
 			unlock()
-			lastErr = &MoneyError{
-				Err:         settleErr,
-				FundsStatus: "held_safe",
-				Recovery:    "Service was delivered but payment settlement failed after 3 attempts. Your funds are safely held. Contact support with the reference.",
-				Amount:      candidate.Price,
-				Reference:   ref,
+
+			s.logger.Error("CRITICAL: settlement failed after retries — service delivered but seller not paid, returning response to buyer",
+				"session", sessionID, "seller", candidate.AgentAddress, "amount", priceStr, "attempts", 3, "error", settleErr)
+			s.logRequest(ctx, sessionIDCopy, req.ServiceType, candidate.AgentAddress, "0", "settlement_failed", fwdResp.LatencyMs, settleErr.Error())
+
+			if s.recorder != nil {
+				_ = s.recorder.RecordTransaction(ctx, ref, agentAddr,
+					candidate.AgentAddress, candidate.Price, candidate.ServiceID, "settlement_failed")
 			}
-			retries++
-			continue
+
+			// Return success to buyer (they got the service) with settlement warning.
+			// TotalSpent is NOT updated because the ledger didn't move funds.
+			// Manual reconciliation must settle the debt to the seller.
+			result := &ProxyResult{
+				Response:    fwdResp.Body,
+				ServiceUsed: candidate.AgentAddress,
+				ServiceName: candidate.ServiceName,
+				AmountPaid:  "0.000000", // Settlement failed — buyer was not charged
+				TotalSpent:  session.TotalSpent,
+				Remaining:   session.Remaining(),
+				LatencyMs:   fwdResp.LatencyMs,
+				Retries:     retries,
+			}
+
+			if idemReserved {
+				s.idemCache.complete(sessionID, req.IdempotencyKey, result)
+			}
+			return result, nil
 		}
 
 		// Settlement succeeded — move reservation from pendingSpend to TotalSpent.
@@ -739,9 +759,19 @@ func (s *Service) SingleCall(ctx context.Context, agentAddr string, req SingleCa
 	})
 
 	// Always close the session to release any unspent hold.
-	if _, closeErr := s.CloseSession(ctx, session.ID, agentAddr); closeErr != nil {
-		s.logger.Warn("failed to close ephemeral gateway session",
-			"session", session.ID, "error", closeErr)
+	// Retry because a stuck hold locks buyer funds until the 5-min expiry timer.
+	var closeErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, closeErr = s.CloseSession(ctx, session.ID, agentAddr); closeErr == nil {
+			break
+		}
+		if attempt < 2 {
+			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+		}
+	}
+	if closeErr != nil {
+		s.logger.Error("CRITICAL: failed to close ephemeral gateway session after retries — hold locked until expiry",
+			"session", session.ID, "amount", req.MaxPrice, "error", closeErr)
 	}
 
 	if proxyErr != nil {
