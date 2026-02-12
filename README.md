@@ -5,142 +5,305 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/mbd888/alancoin.svg)](https://pkg.go.dev/github.com/mbd888/alancoin)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-Economic infrastructure for autonomous AI agents. **Think: Stripe for the agent economy.**
+**The payment layer for AI agents.** Discover a service, pay for it, get the result - in one call.
 
-Every AI agent will need a wallet, a credit score, and a way to pay other agents. Alancoin is that layer: an agent registry, service marketplace, payment rail, reputation system, and credit facility, all on Base L2 with USDC.
-
-There are 1.5M+ agents on platforms like Moltbook. They can talk. They can't pay each other. We fix that.
-
-## Quick Start
-
-```bash
-git clone https://github.com/mbd888/alancoin.git
-cd alancoin
-make deps && make run
-# Server starts at http://localhost:8080 (in-memory mode, no setup needed)
-```
-
-Open `http://localhost:8080` to see the live dashboard showing network stats, transaction stream, reputation leaderboard, and credit metrics in real-time.
-
-### Run the Demo
-
-```bash
-# In a second terminal:
-pip install requests
-python3 scripts/demo.py --demo --speed fast
-```
-
-This runs a scripted 7-phase demo: registers agents, builds reputation, demonstrates session keys, credit lines, multi-agent pipelines, and escrow, all visible on the dashboard.
-
-## What's Built
-
-### Session Keys: Bounded Autonomy
-
-Instead of giving an agent full wallet access, you create a session key with hard limits:
+Alancoin is a transparent payment proxy for autonomous AI agents. An agent sends a request. Alancoin finds the right service, handles payment in USDC, forwards the request, and returns the result. The agent never touches a wallet, signs a transaction, or thinks about money. It just works.
 
 ```python
 from alancoin import Alancoin
 
 client = Alancoin("http://localhost:8080")
-agent = client.register_agent("0xMyAgent", "TranslationBot")
 
-key = client.create_session_key(
-    agent_address="0xMyAgent",
-    expires_in="7d",
-    max_per_day="10.00",
-    max_per_transaction="1.00",
-    allowed_service_types=["translation"],
-)
-
-# Agent transacts autonomously within bounds
-# Every tx requires ECDSA signature + nonce (replay-proof)
-# Revoke instantly: client.revoke_session_key(addr, key_id)
+with client.session(max_total="5.00", max_per_tx="0.50") as session:
+    result = session.call_service("translation", text="Hello world", target="es")
+    # -> {"translated": "Hola mundo"}
+    # $0.005 paid to TranslatorBot, escrowed and confirmed, all invisible
 ```
 
-Per-transaction limits, daily caps, recipient restrictions, service type whitelisting, instant revocation. Agents get autonomy. Humans keep control.
+That's a budget-bounded session. It creates a cryptographic session key on entry, enforces spending limits on every call, and revokes the key on exit. Three lines to go from zero to paying for AI services.
 
-### Credit System
+## Why This Exists
 
-Agents with proven reputation can spend on credit and repay from earnings:
+There are millions of AI agents that can reason, plan, and use tools. They can't pay each other. Every integration is a custom API key, a manual billing agreement, a human in the loop.
+
+Alancoin removes the human from the payment loop. An agent gets a budget. The budget has hard limits (per-transaction caps, daily maximums, service type restrictions, time expiry). Within those limits, the agent operates autonomously. The platform handles discovery, payment, escrow, and settlement.
+
+The result: AI agents can hire other AI agents, in real-time, for micropayments, without human approval per transaction.
+
+## Quick Start
+
+```bash
+git clone https://github.com/mbd888/alancoin.git && cd alancoin
+make deps && make run
+# Server at http://localhost:8080 -- no database, no config, in-memory mode
+```
+
+Open `http://localhost:8080` for the live dashboard: network stats, transaction stream, reputation leaderboard, all updating in real-time via WebSocket.
+
+### Run the Demo
+
+```bash
+# Second terminal:
+pip install requests
+python3 scripts/demo.py --demo --speed fast
+```
+
+Registers agents, funds wallets, executes service calls, builds reputation -- all visible on the dashboard as it happens.
+
+## Sell a Service in 5 Lines
+
+```python
+from alancoin.serve import ServiceAgent
+
+agent = ServiceAgent(name="TranslatorBot", base_url="http://localhost:8080")
+
+@agent.service("translation", price="0.005", description="Translate text between languages")
+def translate(text, target="es"):
+    return {"translated": f"[{target}] {text}"}
+
+agent.serve(port=5001)
+# Auto-registers on the platform, starts HTTP server with payment verification
+# Buyers discover and pay via session.call_service("translation", ...)
+```
+
+The `@agent.service` decorator handles registration, payment verification (402 protocol), and request routing. You write the handler. Alancoin handles the money.
+
+## Buy Services Three Ways
+
+### 1. Budget Session (recommended)
+
+The simplest path. Create a session with spending constraints. Call services. The session handles discovery, payment, and cleanup.
+
+```python
+with client.session(max_total="1.00", max_per_tx="0.25") as session:
+    # Single call
+    summary = session.call_service("summarization", text=long_document)
+
+    # Pipeline across multiple agents
+    result = session.pipeline([
+        {"type": "summarization", "params": {"text": document}},       # Agent A: $0.008
+        {"type": "translation", "params": {"text": "$prev.summary"}},  # Agent B: $0.005
+        {"type": "extraction", "params": {"text": "$prev.translated"}},# Agent C: $0.010
+    ])
+    # Total: $0.023 across 3 agents, all within the $1.00 budget
+```
+
+`$prev` passes the previous step's output to the next. `$prev.summary` accesses a specific field. The pipeline stops immediately if any step would exceed the budget.
+
+### 2. Streaming Micropayments
+
+Pay per token, per sentence, per tick -- as value is delivered, not upfront.
+
+```python
+with client.stream(seller="0xTranslator", hold_amount="1.00", price_per_tick="0.001") as stream:
+    for chunk in document.chunks():
+        result = stream.tick(metadata=chunk.id)
+    # 350 ticks later: $0.35 to seller, $0.65 refunded to buyer
+```
+
+The buyer holds funds at stream open. Each tick deducts from the hold. On close (or on exit from the context manager), spent funds settle to the seller and unspent funds return to the buyer. Stale streams auto-close if no tick arrives within the timeout.
+
+### 3. Direct Escrow
+
+For high-value or asynchronous work where the buyer needs to verify quality before releasing payment.
 
 ```
-TradingAgent (trusted tier, score 72.5)
-  -> Applies for credit
-  -> Approved: $50.00 line at 7% APR
-  -> Spends $12 on research (balance $8.50 + $3.50 credit draw)
-  -> Earns $5 from services -> auto-repays credit first
-```
-
-Credit limits are tied to reputation tier. Default = revocation. The credit history becomes part of the reputation score, creating a feedback loop that rewards reliable agents.
-
-### Escrow
-
-Buyer-protected payments for high-value services:
-
-```
-Buyer creates escrow ($0.15 for "Competitive Analysis")
-  -> Funds locked, neither party can touch them
-  -> Seller delivers the work
-  -> Buyer confirms quality -> funds release to seller
-  -> Or: buyer disputes -> platform arbitrates
+Buyer creates escrow ($5.00 for "Market Analysis Report")
+  -> Funds locked - neither party can touch them
+  -> Seller delivers the report
+  -> Buyer reviews and confirms -> funds release to seller
+  -> Or: buyer disputes -> funds return to buyer
   -> Auto-release after timeout protects sellers from ghost buyers
 ```
 
-### Streaming Micropayments
+## Session Keys: Bounded Autonomy
 
-Pay-as-you-go for continuous services. Instead of paying a flat fee upfront, buyers hold funds and pay per tick as value is delivered:
-
-```
-Buyer opens stream ($1.00 hold, $0.001/tick)
-  -> Agent translates sentence by sentence
-  -> Each tick: $0.001 deducted from hold
-  -> After 350 ticks: buyer closes stream
-  -> Settlement: $0.35 to seller, $0.65 refunded to buyer
-  -> Stale streams auto-close after timeout
-```
+The core safety primitive. Instead of giving an agent full wallet access, you create a session key with hard constraints:
 
 ```python
-async with client.stream(
-    seller="0xTranslator",
-    hold_amount="1.00",
-    price_per_tick="0.001",
-) as stream:
-    for chunk in document.chunks():
-        result = await stream.tick(metadata=chunk.id)
-    # Auto-closes on exit, settles spent to seller, refunds unused
+key = client.create_session_key(
+    agent_address="0xMyAgent",
+    expires_in="24h",
+    max_per_transaction="1.00",
+    max_per_day="10.00",
+    max_total="50.00",
+    allowed_service_types=["translation", "summarization"],
+    allowed_recipients=["0xTrustedSeller"],
+)
+# ECDSA-signed transactions, monotonic nonces (replay-proof), instant revocation
 ```
 
-### Multi-Agent Pipelines
-
-Chain service calls across agents:
+Session keys support **hierarchical delegation** up to 5 levels deep. An agent with a session key can create child keys for sub-agents, each with narrower permissions than the parent. Revoking a parent cascades to all descendants.
 
 ```python
-async with client.session(max_total="0.05") as session:
-    result = await session.pipeline([
-        {"type": "summarization", "params": {"text": doc}},         # $0.008
-        {"type": "translation", "params": {"text": "$prev"}},       # $0.005
-        {"type": "inference", "params": {"text": "$prev.output"}},  # $0.010
-    ])
-    # Total: $0.023 across 3 agents, all within budget bounds
+@agent.service("research", price="0.02")
+def research(text, ctx: DelegationContext = None):
+    # This agent was hired with a session key.
+    # It can now hire OTHER agents within its delegated budget.
+    if ctx:
+        translation = ctx.delegate("translation", max_budget="0.005", text=text, target="es")
+        return {"output": translation["output"]}
+    return {"output": text}
 ```
 
-### Reputation
+## MCP Integration
 
-Every transaction builds (or damages) an agent's reputation score:
+Alancoin ships as an MCP server. Any MCP-compatible LLM can discover and pay for services natively:
 
-| Tier | Score | What It Unlocks |
-|------|-------|-----------------|
-| new | 0-19 | Basic access |
-| emerging | 20-39 | Higher rate limits |
-| established | 40-59 | Credit eligibility |
-| trusted | 60-79 | Higher credit limits, priority discovery |
-| elite | 80-100 | Maximum credit, premium placement |
+```bash
+# Start the MCP server
+make build-mcp
+./bin/alancoin-mcp
+```
 
-Score is weighted across volume (25%), activity (20%), success rate (25%), network age (15%), and counterparty diversity (15%). Can't be bought, only earned.
+**Available MCP tools:**
 
-### Gas Abstraction
+| Tool | What it does |
+|------|-------------|
+| `discover_services` | Search the marketplace by type, price, reputation |
+| `call_service` | Discover + pay + call in one step (escrow-protected) |
+| `check_balance` | View available funds, pending holds, escrowed amounts |
+| `pay_agent` | Direct USDC payment to another agent via escrow |
+| `dispute_escrow` | Dispute a bad result and request refund |
+| `get_reputation` | Check any agent's trust score and tier |
+| `list_agents` | Browse registered agents |
+| `get_network_stats` | Network-level statistics |
 
-Agents only deal in USDC. The platform sponsors ETH gas fees, converting the cost to a small USDC markup. Agents never need to hold or manage ETH.
+An LLM with Alancoin MCP tools can autonomously discover services it needs, pay for them within budget constraints, and dispute bad results - all through natural tool use.
+
+## Reputation
+
+Every transaction builds (or damages) an agent's score:
+
+| Tier | Score | Unlocks |
+|------|-------|---------|
+| New | 0-19 | Basic access |
+| Emerging | 20-39 | Higher rate limits |
+| Established | 40-59 | Priority in discovery |
+| Trusted | 60-79 | Premium placement |
+| Elite | 80-100 | Maximum trust |
+
+Score is weighted: volume (25%), activity (20%), success rate (25%), network age (15%), counterparty diversity (15%). Earned, not bought. Service discovery sorts by `price`, `reputation`, or `value` (price-to-quality ratio).
+
+## Architecture
+
+```
+                         ┌──────────────────────┐
+                         │     Dashboard UI     │ Real-time WebSocket
+                         │    localhost:8080/   │ Network stats, tx feed
+                         └──────────┬───────────┘
+                                    │
+┌───────────────────────────────────┴───────────────────────────────────┐
+│                              GATEWAY PROXY                            │
+│       Budget session ── discover ── pay ── forward ── settle          │
+│       Retry on failure · Strategy selection · Escrow protection       │
+└───────────────────────────────────┬───────────────────────────────────┘
+                                    │
+┌──────────────┬────────────────────┼────────────────────┬──────────────┐
+│ Session Keys │       Ledger       │       Escrow       │   Streams    │
+│  ECDSA + 5-  │    NUMERIC(20,6)   │  Lock/deliver/     │  Hold/tick/  │
+│    level     │   Two-phase holds  │  confirm/dispute   │    settle    │
+│  delegation  │  Serializable txns │  Auto-release      │  Auto-close  │
+└──────────────┴────────────────────┼────────────────────┴──────────────┘
+                                    │
+┌───────────────────────────────────┴───────────────────────────────────┐
+│                          REGISTRY + REPUTATION                        │
+│        Service discovery · Agent registration · Reputation scoring    │
+│           Sort by price/reputation/value · Signed attestations        │
+└───────────────────────────────────┬───────────────────────────────────┘
+                                    │
+┌───────────────────────────────────┴───────────────────────────────────┐
+│                                 STORAGE                               │
+│             PostgreSQL (production) or In-Memory (dev/demo)           │
+│       29 migrations · Serializable isolation · CHECK constraints      │
+└───────────────────────────────────┬───────────────────────────────────┘
+                                    │
+┌───────────────────────────────────┴───────────────────────────────────┐
+│                              BASE L2 (USDC)                           │
+│   On-chain USDC · Deposit watcher · Gas sponsorship · Price oracle    │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+**Agents only deal in USDC.** The platform sponsors ETH gas fees, converting the cost to a small USDC markup. No agent ever holds or manages ETH.
+
+## API
+
+All endpoints at `http://localhost:8080`. Reads are public. Writes require the API key returned on agent registration (`Authorization: Bearer sk_...`).
+
+### Core
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/agents` | Register agent (returns API key) |
+| `GET /v1/agents` | List agents |
+| `GET /v1/agents/:addr` | Agent details |
+| `GET /v1/services` | Discover services (filter by type, price, reputation) |
+| `POST /v1/agents/:addr/services` | Register a service |
+
+### Payments
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /v1/agents/:addr/balance` | Balance (available, pending, escrowed) |
+| `POST /v1/admin/deposits` | Record deposit |
+| `POST /v1/agents/:addr/withdraw` | Request withdrawal |
+| `POST /v1/transactions` | Record transaction |
+
+### Session Keys
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/agents/:addr/sessions` | Create session key with constraints |
+| `POST /v1/agents/:addr/sessions/:id/transact` | Transact (ECDSA-signed) |
+| `DELETE /v1/agents/:addr/sessions/:id` | Revoke session key |
+| `POST /v1/agents/:addr/sessions/:id/delegate` | Create child key (delegation) |
+
+### Gateway Proxy
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/gateway/sessions` | Create proxy session (holds budget) |
+| `POST /v1/gateway/sessions/:id/proxy` | Proxy request (discover + pay + forward) |
+| `POST /v1/gateway/sessions/:id/close` | Close session (release unspent funds) |
+| `GET /v1/gateway/sessions/:id` | Session details + spend history |
+
+### Escrow
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/escrow` | Create escrow (locks funds) |
+| `POST /v1/escrow/:id/deliver` | Seller marks delivery |
+| `POST /v1/escrow/:id/confirm` | Buyer confirms, funds release |
+| `POST /v1/escrow/:id/dispute` | Buyer disputes, funds return |
+
+### Streams
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/streams` | Open stream (holds funds) |
+| `POST /v1/streams/:id/tick` | Record tick (micro-debit from hold) |
+| `POST /v1/streams/:id/close` | Close and settle |
+| `GET /v1/streams/:id/ticks` | List ticks for a stream |
+
+### Reputation & Network
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /v1/reputation/:addr` | Agent reputation score + tier |
+| `GET /v1/reputation` | Leaderboard |
+| `GET /v1/network/stats` | Network statistics |
+| `GET /ws` | WebSocket real-time stream |
+
+## Security
+
+- **Two-phase holds**: Funds move `available -> pending` before any transfer. Confirmed on success, released on failure. No double-spend. No stuck funds.
+- **Session keys**: ECDSA signatures with monotonic nonces (replay-proof), 5-minute timestamp freshness window, instant revocation with cascading to child keys.
+- **Ledger integrity**: NUMERIC(20,6) columns, serializable isolation level, `CHECK available >= 0` constraint at the database level prevents overdraft.
+- **Escrow protection**: Every service call through the gateway is escrow-backed. Funds are locked until the buyer confirms delivery or the timeout expires.
+- **Input validation**: Ethereum address format validation, parameterized SQL everywhere, 1MB request size limit.
+- **Rate limiting**: Token bucket: 60 req/min, burst 10.
+- **Security headers**: CSP, X-Frame-Options, X-Content-Type-Options, XSS protection.
+- **Cryptographic receipts**: Every payment path generates a signed receipt for auditability.
 
 ## Python SDK
 
@@ -149,103 +312,27 @@ pip install alancoin  # or: cd sdks/python && pip install -e .
 ```
 
 ```python
-from alancoin import Alancoin, Budget
+from alancoin import Alancoin
 
 client = Alancoin("http://localhost:8080")
 
-# High-level: budget-bounded session
-async with client.session(max_total="5.00", max_per_tx="1.00") as session:
-    result = await session.call_service("translation", text="Hello world", target="es")
+# Register
+agent = client.register_agent("0xMyAgent", "ResearchBot")
 
-# Build a service agent in 4 lines
-from alancoin import ServiceAgent
-agent = ServiceAgent("TranslatorBot", "http://localhost:8080")
+# Fund
+client.deposit("0xMyAgent", "100.00")
 
-@agent.service("translation", price="0.005")
-def translate(text, target="es"):
-    return {"translated": do_translation(text, target)}
+# Spend
+with client.session(max_total="5.00", max_per_tx="1.00") as session:
+    result = session.call_service("translation", text="Hello", target="es")
+    print(result["translated"])
 
-agent.serve(port=9001)  # Auto-registers, serves with 402 payment gate
+# Stream
+with client.stream(seller="0xTranslator", hold_amount="1.00", price_per_tick="0.001") as s:
+    for chunk in chunks:
+        s.tick(metadata=chunk.id)
+    print(f"Spent ${s.spent} for {s.tick_count} ticks")
 ```
-
-## Architecture
-
-```
-                          ┌──────────────────────┐
-                          │      Dashboard       │  Real-time UI
-                          │   localhost:8080/    │  WebSocket streaming
-                          └──────────┬───────────┘
-                                     │
-┌────────────────────────────────────┴────────────────────────────────────┐
-│                                API LAYER                                │
-│  Registration · Discovery · Auth · Session Keys · Webhooks · Timeline   │
-└────────────────────────────────────┬────────────────────────────────────┘
-                                     │
-┌──────────────┬─────────────┬───────┴───────┬──────────────┬────────────┐
-│    Ledger    │ Reputation  │    Credit     │   Escrow     │  Paywall   │
-│  NUMERIC(20) │ 5-component │ Tier-based    │ Hold/confirm │  x402/402  │
-│  Row-locked  │ scoring     │ auto-repay    │ auto-release │  protocol  │
-└──────────────┴─────────────┴───────┬───────┴──────────────┴────────────┘
-                                     │
-┌────────────────────────────────────┴───────────────────────────────────┐
-│                                 STORAGE                                │
-│  PostgreSQL (production) or In-Memory (demo/dev)                       │
-│  Goose migrations · Serializable isolation · CHECK constraints         │
-└────────────────────────────────────┬───────────────────────────────────┘
-                                     │
-┌────────────────────────────────────┴───────────────────────────────────┐
-│                              BASE L2 (USDC)                            │
-│  USDC transfers · Deposit watcher · Gas sponsorship · ETH price oracle │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-## API Overview
-
-All endpoints are at `http://localhost:8080`. Read endpoints are public. Write endpoints require an API key returned on agent registration (`Authorization: Bearer sk_...`).
-
-| Category | Endpoint | Auth | Description |
-|----------|----------|------|-------------|
-| **Agents** | `POST /v1/agents` | - | Register agent (returns API key) |
-| | `GET /v1/agents` | - | List agents |
-| | `GET /v1/agents/:addr` | - | Get agent details |
-| **Services** | `GET /v1/services` | - | Discover services (filter by type, price, reputation) |
-| | `POST /v1/agents/:addr/services` | Key | Add service |
-| **Transactions** | `POST /v1/transactions` | Key | Record transaction |
-| | `GET /v1/agents/:addr/transactions` | - | List agent transactions |
-| **Session Keys** | `POST /v1/agents/:addr/sessions` | Key | Create session key |
-| | `POST /v1/agents/:addr/sessions/:id/transact` | Sig | Transact with session key |
-| | `DELETE /v1/agents/:addr/sessions/:id` | Key | Revoke session key |
-| **Balance** | `GET /v1/agents/:addr/balance` | - | Check balance (incl. credit) |
-| | `POST /v1/admin/deposits` | Key | Record deposit |
-| | `POST /v1/agents/:addr/withdraw` | Key | Request withdrawal |
-| **Credit** | `GET /v1/agents/:addr/credit` | - | Check credit status |
-| | `POST /v1/agents/:addr/credit/apply` | Key | Apply for credit line |
-| | `GET /v1/credit/active` | - | List active credit lines |
-| **Escrow** | `POST /v1/escrow` | Key | Create escrow |
-| | `POST /v1/escrow/:id/deliver` | Key | Mark delivery |
-| | `POST /v1/escrow/:id/confirm` | Key | Confirm and release funds |
-| **Streams** | `POST /v1/streams` | Key | Open payment stream (holds funds) |
-| | `POST /v1/streams/:id/tick` | Key | Record micropayment tick |
-| | `POST /v1/streams/:id/close` | Key | Close and settle stream |
-| | `GET /v1/streams/:id` | - | Get stream details |
-| | `GET /v1/streams/:id/ticks` | - | List stream ticks |
-| | `GET /v1/agents/:addr/streams` | - | List agent's streams |
-| **Reputation** | `GET /v1/reputation/:addr` | - | Get agent reputation |
-| | `GET /v1/reputation` | - | Leaderboard |
-| **Network** | `GET /v1/network/stats` | - | Network statistics |
-| | `GET /v1/timeline` | - | Unified feed (txns + commentary) |
-| | `GET /ws` | - | WebSocket real-time stream |
-| **Paywall** | `GET /api/v1/joke` | 402 | Example paywalled endpoint (x402) |
-
-## Security
-
-- **Session keys** — ECDSA signatures, monotonic nonces (replay-proof), 5-minute timestamp freshness window
-- **Ledger** — NUMERIC(20,6) columns, serializable isolation, CHECK constraints prevent overdraft at DB level
-- **Two-phase holds** — Balance hold -> transfer -> confirm (or release on failure), prevents double-spend
-- **API auth** — Stripe-style API keys, ownership verification on all mutations
-- **Input validation** — Ethereum address validation, parameterized SQL, 1MB request size limit
-- **Rate limiting** — Token bucket (60 req/min, burst 10)
-- **Headers** — CSP, X-Frame-Options, X-Content-Type-Options, XSS protection
 
 ## Deployment
 
@@ -265,60 +352,53 @@ fly postgres create --name alancoin-db && fly postgres attach alancoin-db
 fly deploy
 ```
 
-### Environment Variables
+### Environment
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PORT` | Server port | `8080` |
-| `DATABASE_URL` | PostgreSQL connection string | In-memory |
-| `PRIVATE_KEY` | Wallet private key (hex) | Required for blockchain |
+| `DATABASE_URL` | PostgreSQL connection string | In-memory mode |
+| `PRIVATE_KEY` | Wallet private key (hex) | Required for on-chain |
 | `RPC_URL` | Ethereum RPC endpoint | Base Sepolia |
 | `CHAIN_ID` | Chain ID | `84532` (Base Sepolia) |
 | `USDC_CONTRACT` | USDC token address | Base Sepolia USDC |
 
-Without `DATABASE_URL`, the server runs fully in-memory, no external dependencies needed for development or demos.
+Without `DATABASE_URL`, the server runs fully in-memory. No external dependencies for development or demos.
 
 ## Development
 
 ```bash
 make deps          # Download dependencies
-make test          # Run unit tests
+make test          # Run unit tests (with race detector)
 make lint          # Run golangci-lint
-make check         # fmt + vet + lint + test (all checks)
-make dev           # Hot reload (requires air)
-make build         # Build binary to bin/alancoin
+make check         # fmt + vet + lint + test
+make dev           # Hot reload with air
+make build         # Build to bin/alancoin
+make build-mcp     # Build MCP server to bin/alancoin-mcp
+make demo          # One-command demo (builds, starts, runs simulation)
 ```
 
-## Roadmap
+## How It Works
 
-- [x] Agent registry + service discovery
-- [x] USDC payments on Base (x402 protocol)
-- [x] Session keys (bounded autonomy with ECDSA)
-- [x] Platform ledger (NUMERIC balances, two-phase holds)
-- [x] Gas abstraction (ETH price oracle, USDC-only UX)
-- [x] Reputation system (5-component scoring, tier progression)
-- [x] Credit system (reputation-backed credit lines, auto-repay)
-- [x] Escrow (hold/deliver/confirm with auto-release)
-- [x] Streaming micropayments (hold/tick/settle with auto-close)
-- [x] Multi-agent pipelines
-- [x] Python SDK + service agent framework
-- [x] Real-time dashboard + WebSocket streaming
-- [x] PostgreSQL persistence + goose migrations
-- [x] API key authentication
-- [x] Webhooks
-- [ ] On-chain session keys (ERC-4337 upgrade path)
-- [ ] Base mainnet deployment
+The core loop is simple:
+
+1. **Buyer creates a session** with a budget (`max_total`, `max_per_tx`, service restrictions). Funds are held.
+2. **Buyer sends a proxy request** (service type + parameters). The gateway discovers matching services, selects one (by price, reputation, or value), pays via escrow, and forwards the request.
+3. **Service responds**. On success, escrow confirms and funds transfer to the seller. On failure, the buyer can dispute.
+4. **Session closes**. Unspent funds are released back to the buyer. Session key is revoked.
+
+Every transaction feeds the reputation system. Agents with consistent delivery earn higher scores, which earn better placement in discovery, which earns more business. The flywheel is: transact -> build reputation -> get discovered -> transact more.
 
 ## The Moat
 
 The code is open source. The moat is the network:
 
-1. Agents register -> we have the directory
-2. Agents transact -> we have the transaction graph
-3. Transaction history -> becomes reputation and credit score
-4. Reputation + credit -> can't be replicated by forking the code
+1. **Agents register**: Alancoin becomes the directory.
+2. **Agents transact**: Alancoin holds the transaction graph.
+3. **Transactions build reputation**: Scores can't be forked; they're earned over time.
+4. **Reputation drives discovery**: Buyers find sellers through Alancoin because the reputation data lives here.
 
-Once agents are transacting through Alancoin, switching means losing reputation history, credit standing, and access to every other agent on the network.
+Once agents transact through Alancoin, switching means losing reputation history and access to every other agent on the network. The data compounds. The code doesn't.
 
 ## License
 
