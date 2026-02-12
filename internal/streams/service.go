@@ -7,9 +7,9 @@ import (
 	"log"
 	"math/big"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/syncutil"
 	"github.com/mbd888/alancoin/internal/usdc"
 )
 
@@ -20,17 +20,8 @@ type Service struct {
 	recorder      TransactionRecorder
 	revenue       RevenueAccumulator
 	receiptIssuer ReceiptIssuer
-	locks         sync.Map // per-stream ID locks to prevent race conditions
+	locks         syncutil.ShardedMutex
 }
-
-// streamLock returns a mutex for the given stream ID.
-func (s *Service) streamLock(id string) *sync.Mutex {
-	v, _ := s.locks.LoadOrStore(id, &sync.Mutex{})
-	return v.(*sync.Mutex)
-}
-
-// cleanupLock removes the per-stream mutex after settlement to prevent memory leaks.
-func (s *Service) cleanupLock(id string) { s.locks.Delete(id) }
 
 // NewService creates a new streaming micropayment service.
 func NewService(store Store, ledger LedgerService) *Service {
@@ -112,9 +103,8 @@ func (s *Service) Open(ctx context.Context, req OpenRequest) (*Stream, error) {
 
 // RecordTick records a micropayment tick on an open stream.
 func (s *Service) RecordTick(ctx context.Context, streamID string, req TickRequest) (*Tick, *Stream, error) {
-	mu := s.streamLock(streamID)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock := s.locks.Lock(streamID)
+	defer unlock()
 
 	stream, err := s.store.Get(ctx, streamID)
 	if err != nil {
@@ -182,9 +172,8 @@ func (s *Service) RecordTick(ctx context.Context, streamID string, req TickReque
 
 // Close settles a stream: pays seller for spent amount, refunds unused hold to buyer.
 func (s *Service) Close(ctx context.Context, streamID, callerAddr, reason string) (*Stream, error) {
-	mu := s.streamLock(streamID)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock := s.locks.Lock(streamID)
+	defer unlock()
 
 	stream, err := s.store.Get(ctx, streamID)
 	if err != nil {
@@ -205,9 +194,8 @@ func (s *Service) Close(ctx context.Context, streamID, callerAddr, reason string
 
 // AutoClose settles a stale stream (no tick within timeout).
 func (s *Service) AutoClose(ctx context.Context, stream *Stream) error {
-	mu := s.streamLock(stream.ID)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock := s.locks.Lock(stream.ID)
+	defer unlock()
 
 	// Re-read under lock to prevent stale-state races
 	fresh, err := s.store.Get(ctx, stream.ID)
@@ -251,14 +239,28 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 	stream.ClosedAt = &now
 	stream.UpdatedAt = now
 
-	if err := s.store.Update(ctx, stream); err != nil {
-		// CRITICAL: Funds already moved. Log for manual resolution.
-		log.Printf("CRITICAL: stream %s funds settled but status update failed: %v",
-			stream.ID, err)
-		return nil, fmt.Errorf("failed to update stream after settlement (requires manual resolution): %w", err)
+	// CRITICAL: Funds already moved. Retry the status update because if this fails
+	// and the stream stays "open", the auto-close timer could settle again (double payment).
+	var updateErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if updateErr = s.store.Update(ctx, stream); updateErr == nil {
+			break
+		}
+		log.Printf("WARN: stream %s status update attempt %d failed: %v", stream.ID, attempt+1, updateErr)
+		time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
 	}
-
-	s.cleanupLock(stream.ID)
+	if updateErr != nil {
+		// All retries exhausted. Mark as settlement_failed so auto-close won't re-settle.
+		stream.Status = StatusSettlementFailed
+		if retryErr := s.store.Update(ctx, stream); retryErr != nil {
+			log.Printf("CRITICAL: stream %s funds settled but ALL status updates failed (including sentinel): %v",
+				stream.ID, retryErr)
+		} else {
+			log.Printf("CRITICAL: stream %s marked as settlement_failed — funds moved but target status %q could not be set. Requires manual resolution.",
+				stream.ID, status)
+		}
+		return nil, fmt.Errorf("failed to update stream after settlement (requires manual resolution): %w", updateErr)
+	}
 
 	// Record transaction for reputation
 	if s.recorder != nil && spentBig.Sign() > 0 {

@@ -378,8 +378,9 @@ class BudgetSession:
         if service.endpoint:
             response_data = self._call_endpoint(service, tx_result, params)
 
-            # Auto-confirm escrow on successful endpoint call
-            if escrow and escrow_id and "error" not in response_data:
+            # Auto-confirm escrow on successful endpoint call.
+            # Require non-null output to prevent paying for garbage responses.
+            if escrow and escrow_id and "error" not in response_data and response_data.get("output") is not None:
                 try:
                     self._client.confirm_escrow(escrow_id)
                 except Exception as e:
@@ -389,6 +390,14 @@ class BudgetSession:
                         "funds_status": "locked_in_escrow",
                         "recovery": f"Service succeeded but escrow {escrow_id} was not confirmed. Funds may auto-release to seller or require manual confirmation.",
                     }
+            elif escrow and escrow_id:
+                # Service returned no usable output — do not confirm escrow
+                logger.warning("Escrow %s not confirmed: service returned no output (response had %s)", escrow_id, list(response_data.keys()))
+                response_data["_escrow_warning"] = {
+                    "escrow_id": escrow_id,
+                    "funds_status": "held_in_escrow",
+                    "recovery": f"Service did not return valid output. Escrow {escrow_id} was not confirmed. Funds will auto-release after timeout or can be disputed.",
+                }
 
             return ServiceResult(
                 data=response_data,

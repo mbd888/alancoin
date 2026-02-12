@@ -6,10 +6,10 @@ import (
 	"log/slog"
 	"math/big"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/mbd888/alancoin/internal/idgen"
+	"github.com/mbd888/alancoin/internal/syncutil"
 	"github.com/mbd888/alancoin/internal/usdc"
 )
 
@@ -26,7 +26,7 @@ type Service struct {
 	receiptIssuer     ReceiptIssuer
 	guaranteeFundAddr string // platform address receiving guarantee premiums
 	logger            *slog.Logger
-	locks             sync.Map // per-session mutex
+	locks             syncutil.ShardedMutex
 }
 
 // NewService creates a new gateway service.
@@ -75,15 +75,6 @@ func (s *Service) WithGuaranteeFundAddr(addr string) *Service {
 	s.guaranteeFundAddr = strings.ToLower(addr)
 	return s
 }
-
-// sessionLock returns a mutex for the given session ID.
-func (s *Service) sessionLock(id string) *sync.Mutex {
-	v, _ := s.locks.LoadOrStore(id, &sync.Mutex{})
-	return v.(*sync.Mutex)
-}
-
-// cleanupLock removes the per-session mutex after a terminal state to prevent memory leaks.
-func (s *Service) cleanupLock(id string) { s.locks.Delete(id) }
 
 // CreateSession creates a gateway session and holds the buyer's budget.
 func (s *Service) CreateSession(ctx context.Context, agentAddr string, req CreateSessionRequest) (*Session, error) {
@@ -160,9 +151,8 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr string, req Creat
 
 // Proxy handles a single proxy request within a session.
 func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest) (*ProxyResult, error) {
-	mu := s.sessionLock(sessionID)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock := s.locks.Lock(sessionID)
+	defer unlock()
 
 	session, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
@@ -271,12 +261,17 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			continue
 		}
 
-		// Settle premium to guarantee fund
+		// Settle premium to guarantee fund.
+		// Track actual settled amount so TotalSpent matches what was debited from pending.
+		settledCostBig := new(big.Int).Set(priceBig)
 		if premiumBig.Sign() > 0 {
 			premiumStr := usdc.Format(premiumBig)
 			if err := s.ledger.SettleHold(ctx, session.AgentAddr, s.guaranteeFundAddr, premiumStr, "gpremium:"+ref); err != nil {
-				// Non-fatal: base payment succeeded, premium settle is best-effort
+				// Non-fatal: base payment succeeded, premium settle is best-effort.
+				// Do NOT add premium to settledCostBig — it was not debited from pending.
 				s.logger.Warn("guarantee premium settle failed", "session", sessionID, "premium", premiumStr, "error", err)
+			} else {
+				settledCostBig.Add(settledCostBig, premiumBig)
 			}
 		}
 
@@ -324,8 +319,9 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 					candidate.AgentAddress, candidate.Price, candidate.ServiceID, "failed", "forward_failed")
 			}
 
-			// Update session spend even though forward failed (payment was made)
-			newSpent := new(big.Int).Add(spentBig, totalCostBig)
+			// Update session spend even though forward failed (payment was made).
+			// Use settledCostBig (not totalCostBig) to match what was actually debited from pending.
+			newSpent := new(big.Int).Add(spentBig, settledCostBig)
 			session.TotalSpent = usdc.Format(newSpent)
 			session.RequestCount++
 			session.UpdatedAt = time.Now()
@@ -344,8 +340,9 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			continue
 		}
 
-		// Success — update session
-		newSpent := new(big.Int).Add(spentBig, totalCostBig)
+		// Success — update session.
+		// Use settledCostBig to match what was actually debited from pending.
+		newSpent := new(big.Int).Add(spentBig, settledCostBig)
 		session.TotalSpent = usdc.Format(newSpent)
 		session.RequestCount++
 		session.UpdatedAt = time.Now()
@@ -401,9 +398,8 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 
 // CloseSession settles a session, releasing unspent funds.
 func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string) (*Session, error) {
-	mu := s.sessionLock(sessionID)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock := s.locks.Lock(sessionID)
+	defer unlock()
 
 	session, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
@@ -439,11 +435,28 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 	session.Status = StatusClosed
 	session.UpdatedAt = time.Now()
 
-	if err := s.store.UpdateSession(ctx, session); err != nil {
-		s.logger.Error("CRITICAL: gateway session funds settled but status update failed",
-			"session", sessionID, "error", err)
+	// CRITICAL: Funds already moved. Retry the status update because if this fails
+	// and the session stays "active", the auto-close timer could release holds that no longer exist.
+	var updateErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if updateErr = s.store.UpdateSession(ctx, session); updateErr == nil {
+			break
+		}
+		s.logger.Warn("gateway session status update retry", "session", sessionID, "attempt", attempt+1, "error", updateErr)
+		time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+	}
+	if updateErr != nil {
+		// All retries exhausted. Mark as settlement_failed so auto-close won't re-process.
+		session.Status = StatusSettlementFailed
+		if retryErr := s.store.UpdateSession(ctx, session); retryErr != nil {
+			s.logger.Error("CRITICAL: gateway session ALL status updates failed including sentinel",
+				"session", sessionID, "error", retryErr)
+		} else {
+			s.logger.Error("CRITICAL: gateway session marked as settlement_failed — funds moved but closed status could not be set",
+				"session", sessionID)
+		}
 		return nil, &MoneyError{
-			Err:         fmt.Errorf("failed to update session after close: %w", err),
+			Err:         fmt.Errorf("failed to update session after close: %w", updateErr),
 			FundsStatus: "settled_safe",
 			Recovery:    "All funds were correctly settled but the session status could not be updated. No action needed regarding your funds.",
 			Amount:      session.TotalSpent,
@@ -451,7 +464,6 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 		}
 	}
 
-	s.cleanupLock(session.ID)
 	return session, nil
 }
 
@@ -497,9 +509,8 @@ func (s *Service) logRequest(ctx context.Context, sessionID, serviceType, agentC
 // AutoCloseExpired closes an expired session without caller authorization.
 // Called by the Timer goroutine. Sets status to StatusExpired and releases unspent funds.
 func (s *Service) AutoCloseExpired(ctx context.Context, session *Session) error {
-	mu := s.sessionLock(session.ID)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock := s.locks.Lock(session.ID)
+	defer unlock()
 
 	// Re-read under lock
 	fresh, err := s.store.GetSession(ctx, session.ID)
@@ -525,10 +536,20 @@ func (s *Service) AutoCloseExpired(ctx context.Context, session *Session) error 
 	fresh.Status = StatusExpired
 	fresh.UpdatedAt = time.Now()
 
-	if err := s.store.UpdateSession(ctx, fresh); err != nil {
-		return fmt.Errorf("failed to update expired session: %w", err)
+	// Funds already released. Retry status update to prevent re-processing.
+	var updateErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if updateErr = s.store.UpdateSession(ctx, fresh); updateErr == nil {
+			return nil
+		}
+		s.logger.Warn("auto-close status update retry", "session", fresh.ID, "attempt", attempt+1, "error", updateErr)
+		time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
 	}
-
-	s.cleanupLock(fresh.ID)
-	return nil
+	// Mark as settlement_failed so next auto-close cycle skips it.
+	fresh.Status = StatusSettlementFailed
+	if retryErr := s.store.UpdateSession(ctx, fresh); retryErr != nil {
+		s.logger.Error("CRITICAL: auto-close ALL status updates failed including sentinel",
+			"session", fresh.ID, "error", retryErr)
+	}
+	return fmt.Errorf("failed to update expired session: %w", updateErr)
 }
