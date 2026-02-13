@@ -36,6 +36,7 @@ import (
 	"github.com/mbd888/alancoin/internal/security"
 	"github.com/mbd888/alancoin/internal/sessionkeys"
 	"github.com/mbd888/alancoin/internal/streams"
+	"github.com/mbd888/alancoin/internal/supervisor"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/validation"
 	"github.com/mbd888/alancoin/internal/webhooks"
@@ -52,6 +53,7 @@ type Server struct {
 	sessionMgr             *sessionkeys.Manager
 	authMgr                *auth.Manager
 	ledger                 *ledger.Ledger
+	ledgerService          ledger.Service // supervised access for payment paths
 	webhooks               *webhooks.Dispatcher
 	realtimeHub            *realtime.Hub
 	escrowService          *escrow.Service
@@ -162,6 +164,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		auditLogger := ledger.NewPostgresAuditLogger(db)
 		s.ledger = ledger.NewWithEvents(ledgerStore, eventStore).
 			WithAuditLogger(auditLogger)
+		s.ledgerService = supervisor.New(s.ledger, supervisor.WithLogger(s.logger))
 		s.logger.Info("agent balance tracking enabled")
 
 		// Webhooks with Postgres
@@ -174,16 +177,16 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Escrow with PostgreSQL store
 		escrowStore := escrow.NewPostgresStore(db)
-		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledger}).WithLogger(s.logger)
+		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledgerService}).WithLogger(s.logger)
 		s.escrowTimer = escrow.NewTimer(s.escrowService, escrowStore, s.logger)
 		s.multiStepEscrowService = escrow.NewMultiStepService(
-			escrow.NewMultiStepPostgresStore(db), &escrowLedgerAdapter{s.ledger},
+			escrow.NewMultiStepPostgresStore(db), &escrowLedgerAdapter{s.ledgerService},
 		).WithLogger(s.logger)
 		s.logger.Info("escrow enabled (postgres)")
 
 		// Streams with PostgreSQL store (streaming micropayments)
 		streamStore := streams.NewPostgresStore(db)
-		s.streamService = streams.NewService(streamStore, &streamLedgerAdapter{s.ledger})
+		s.streamService = streams.NewService(streamStore, &streamLedgerAdapter{s.ledgerService})
 		s.streamTimer = streams.NewTimer(s.streamService, streamStore, s.logger)
 		s.logger.Info("streams enabled (postgres)")
 
@@ -200,7 +203,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		gwStore := gateway.NewMemoryStore()
 		gwResolver := gateway.NewResolver(&gatewayRegistryAdapter{s.registry})
 		gwForwarder := gateway.NewForwarder(0)
-		s.gatewayService = gateway.NewService(gwStore, gwResolver, gwForwarder, &gatewayLedgerAdapter{s.ledger}, s.logger)
+		s.gatewayService = gateway.NewService(gwStore, gwResolver, gwForwarder, &gatewayLedgerAdapter{s.ledgerService}, s.logger)
 		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore, s.logger)
 		s.logger.Info("gateway enabled")
 
@@ -238,6 +241,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		memAuditLogger := ledger.NewMemoryAuditLogger()
 		s.ledger = ledger.NewWithEvents(memStore, memEventStore).
 			WithAuditLogger(memAuditLogger)
+		s.ledgerService = supervisor.New(s.ledger, supervisor.WithLogger(s.logger))
 		s.logger.Info("agent balance tracking enabled (in-memory)")
 
 		// Webhooks with in-memory store
@@ -245,16 +249,16 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Escrow with in-memory store
 		escrowStore := escrow.NewMemoryStore()
-		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledger}).WithLogger(s.logger)
+		s.escrowService = escrow.NewService(escrowStore, &escrowLedgerAdapter{s.ledgerService}).WithLogger(s.logger)
 		s.escrowTimer = escrow.NewTimer(s.escrowService, escrowStore, s.logger)
 		s.multiStepEscrowService = escrow.NewMultiStepService(
-			escrow.NewMultiStepMemoryStore(), &escrowLedgerAdapter{s.ledger},
+			escrow.NewMultiStepMemoryStore(), &escrowLedgerAdapter{s.ledgerService},
 		).WithLogger(s.logger)
 		s.logger.Info("escrow enabled (in-memory)")
 
 		// Streams with in-memory store (streaming micropayments)
 		streamStore := streams.NewMemoryStore()
-		s.streamService = streams.NewService(streamStore, &streamLedgerAdapter{s.ledger})
+		s.streamService = streams.NewService(streamStore, &streamLedgerAdapter{s.ledgerService})
 		s.streamTimer = streams.NewTimer(s.streamService, streamStore, s.logger)
 		s.logger.Info("streams enabled (in-memory)")
 
@@ -267,7 +271,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		gwStore2 := gateway.NewMemoryStore()
 		gwResolver2 := gateway.NewResolver(&gatewayRegistryAdapter{s.registry})
 		gwForwarder2 := gateway.NewForwarder(0)
-		s.gatewayService = gateway.NewService(gwStore2, gwResolver2, gwForwarder2, &gatewayLedgerAdapter{s.ledger}, s.logger)
+		s.gatewayService = gateway.NewService(gwStore2, gwResolver2, gwForwarder2, &gatewayLedgerAdapter{s.ledgerService}, s.logger)
 		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore2, s.logger)
 		s.logger.Info("gateway enabled (in-memory)")
 
@@ -457,6 +461,11 @@ func (s *Server) setupRoutes() {
 	// Wire reputation into discovery so agents see trust scores when searching
 	reputationProvider := reputation.NewRegistryProvider(s.registry)
 	registryHandler.SetReputation(reputationProvider)
+
+	// Wire reputation into supervisor so spending rules are tier-aware
+	if sv, ok := s.ledgerService.(*supervisor.Supervisor); ok {
+		sv.SetReputation(reputationProvider)
+	}
 
 	// Wire reputation impact tracking into escrow (dispute/confirm outcomes)
 	s.escrowService.WithReputationImpactor(reputationProvider)
@@ -1206,9 +1215,9 @@ func generateRequestID() string {
 	return hex.EncodeToString(bytes)
 }
 
-// escrowLedgerAdapter adapts ledger.Ledger to escrow.LedgerService
+// escrowLedgerAdapter adapts ledger.Service to escrow.LedgerService
 type escrowLedgerAdapter struct {
-	l *ledger.Ledger
+	l ledger.Service
 }
 
 func (a *escrowLedgerAdapter) EscrowLock(ctx context.Context, agentAddr, amount, reference string) error {
@@ -1227,9 +1236,9 @@ func (a *escrowLedgerAdapter) PartialEscrowSettle(ctx context.Context, buyerAddr
 	return a.l.PartialEscrowSettle(ctx, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference)
 }
 
-// streamLedgerAdapter adapts ledger.Ledger to streams.LedgerService
+// streamLedgerAdapter adapts ledger.Service to streams.LedgerService
 type streamLedgerAdapter struct {
-	l *ledger.Ledger
+	l ledger.Service
 }
 
 func (a *streamLedgerAdapter) Hold(ctx context.Context, agentAddr, amount, reference string) error {
@@ -1337,9 +1346,9 @@ func (a *gatewayRecorderAdapter) RecordTransaction(ctx context.Context, txHash, 
 	return a.r.RecordTransaction(ctx, tx)
 }
 
-// gatewayLedgerAdapter adapts ledger.Ledger to gateway.LedgerService
+// gatewayLedgerAdapter adapts ledger.Service to gateway.LedgerService
 type gatewayLedgerAdapter struct {
-	l *ledger.Ledger
+	l ledger.Service
 }
 
 func (a *gatewayLedgerAdapter) Hold(ctx context.Context, agentAddr, amount, reference string) error {

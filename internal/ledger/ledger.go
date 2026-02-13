@@ -61,6 +61,34 @@ type Balance struct {
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
+// Service is the high-level interface that all payment-path adapters use.
+// It captures every money-moving and read-only operation on the ledger.
+// The Supervisor decorator implements this interface to evaluate spending
+// patterns before delegating to the real *Ledger.
+type Service interface {
+	// Money-moving
+	Deposit(ctx context.Context, agentAddr, amount, txHash string) error
+	Spend(ctx context.Context, agentAddr, amount, reference string) error
+	Transfer(ctx context.Context, from, to, amount, reference string) error
+	Hold(ctx context.Context, agentAddr, amount, reference string) error
+	ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error
+	ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error
+	SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error
+	EscrowLock(ctx context.Context, agentAddr, amount, reference string) error
+	ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error
+	RefundEscrow(ctx context.Context, agentAddr, amount, reference string) error
+	PartialEscrowSettle(ctx context.Context, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference string) error
+	Refund(ctx context.Context, agentAddr, amount, reference string) error
+	Withdraw(ctx context.Context, agentAddr, amount, txHash string) error
+	// Read-only
+	GetBalance(ctx context.Context, agentAddr string) (*Balance, error)
+	CanSpend(ctx context.Context, agentAddr, amount string) (bool, error)
+	GetHistory(ctx context.Context, agentAddr string, limit int) ([]*Entry, error)
+}
+
+// Compile-time check: *Ledger implements Service.
+var _ Service = (*Ledger)(nil)
+
 // Store persists ledger data
 type Store interface {
 	GetBalance(ctx context.Context, agentAddr string) (*Balance, error)
