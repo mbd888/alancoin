@@ -4,71 +4,14 @@ import pytest
 import responses
 from responses import matchers
 
-from alancoin import (
-    Alancoin,
-    Agent,
-    Service,
-    ServiceListing,
-    NetworkStats,
-    ServiceType,
-    Wallet,
-    parse_usdc,
-    format_usdc,
-)
+from alancoin.admin import Alancoin
+from alancoin.models import Agent, Service, ServiceListing, NetworkStats, ServiceType
 from alancoin.exceptions import (
     AgentNotFoundError,
     AgentExistsError,
     ValidationError,
     PaymentRequiredError,
 )
-
-
-# -----------------------------------------------------------------------------
-# USDC Formatting Tests
-# -----------------------------------------------------------------------------
-
-class TestUSDCFormatting:
-    """Test USDC amount parsing and formatting."""
-    
-    def test_parse_usdc_integer(self):
-        assert parse_usdc("1") == 1_000_000
-        assert parse_usdc("100") == 100_000_000
-    
-    def test_parse_usdc_decimal(self):
-        assert parse_usdc("1.50") == 1_500_000
-        assert parse_usdc("0.001") == 1_000
-        assert parse_usdc("0.000001") == 1
-    
-    def test_parse_usdc_truncates_extra_decimals(self):
-        assert parse_usdc("1.1234567890") == 1_123_456
-    
-    def test_parse_usdc_empty_raises(self):
-        with pytest.raises(ValidationError):
-            parse_usdc("")
-    
-    def test_parse_usdc_invalid_raises(self):
-        with pytest.raises(ValidationError):
-            parse_usdc("abc")
-    
-    def test_format_usdc_zero(self):
-        assert format_usdc(0) == "0"
-        assert format_usdc(None) == "0"
-    
-    def test_format_usdc_integer(self):
-        assert format_usdc(1_000_000) == "1"
-        assert format_usdc(100_000_000) == "100"
-    
-    def test_format_usdc_decimal(self):
-        assert format_usdc(1_500_000) == "1.500000"
-        assert format_usdc(1_000) == "0.001000"
-        assert format_usdc(1) == "0.000001"
-    
-    def test_roundtrip(self):
-        amounts = ["1", "1.500000", "0.001000", "100.123456"]
-        for amount in amounts:
-            parsed = parse_usdc(amount)
-            formatted = format_usdc(parsed)
-            assert formatted == amount
 
 
 # -----------------------------------------------------------------------------
@@ -100,12 +43,13 @@ class TestAlancoinClient:
             status=201,
         )
         
-        agent = client.register(
+        result = client.register(
             address="0x1234567890123456789012345678901234567890",
             name="TestAgent",
             description="A test agent",
         )
-        
+
+        agent = result["agent"]
         assert agent.address == "0x1234567890123456789012345678901234567890"
         assert agent.name == "TestAgent"
         assert agent.description == "A test agent"
@@ -286,16 +230,6 @@ class TestAlancoinClient:
         health = client.health()
         assert health["status"] == "healthy"
     
-    def test_pay_without_wallet_raises(self, client):
-        """Test that pay raises without wallet."""
-        with pytest.raises(ValidationError, match="No wallet configured"):
-            client.pay(to="0x...", amount="0.001")
-    
-    def test_balance_without_wallet_raises(self, client):
-        """Test that balance raises without wallet."""
-        with pytest.raises(ValidationError, match="No wallet configured"):
-            client.balance()
-
 
 # -----------------------------------------------------------------------------
 # Model Tests

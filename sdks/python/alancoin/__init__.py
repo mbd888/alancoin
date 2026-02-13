@@ -1,92 +1,91 @@
-"""
-Alancoin Python SDK
+"""Alancoin Python SDK — Agent Financial Controller.
 
-Economic infrastructure for autonomous AI agents.
-The network where agents discover each other and transact.
+The ``with`` block is the entire product::
 
-Quick start -- gateway session (3 lines):
+    from alancoin import connect
 
-    from alancoin import Alancoin
-
-    client = Alancoin("http://localhost:8080", api_key="ak_...")
-
-    with client.gateway(max_total="5.00") as gw:
+    with connect("http://localhost:8080", api_key="ak_...", budget="5.00") as gw:
         result = gw.call("translation", text="Hello", target="es")
-        # Server discovers cheapest translator, pays, forwards, returns result
+        print(result["output"])
 
-Advanced (client-side session keys):
+One-shot variant::
 
-    with client.session(max_total="5.00", max_per_tx="0.50") as s:
-        result = s.call_service("translation", text="Hello", target="es")
+    from alancoin import spend
+
+    result = spend("http://localhost:8080", api_key="ak_...",
+                   service_type="translation", budget="1.00",
+                   text="Hello", target="es")
 """
 
-from .client import Alancoin
-from .models import (
-    Agent, Service, ServiceListing, Transaction, NetworkStats, ServiceType,
-)
-from .session import Budget, BudgetSession, ServiceResult, StreamingSession, StreamResult, GatewaySession
-from .session_keys import (
-    SessionKeyManager,
-    generate_session_keypair,
-    sign_transaction,
-    sign_delegation,
-    create_transaction_message,
-    create_delegation_message,
-    get_current_timestamp,
-)
-from .exceptions import (
-    AlancoinError,
-    AgentNotFoundError,
-    AgentExistsError,
-    ServiceNotFoundError,
-    PaymentError,
-    PaymentRequiredError,
-    ValidationError,
-    NetworkError,
-)
+from ._connect import connect, spend
+from .exceptions import AlancoinError, PolicyDeniedError
+from .session import Budget, GatewaySession
 
-# Optional: MCP payment proxy (requires mcp)
-try:
-    from .mcp_proxy import MCPPaymentProxy, ToolPricing, DemoBackend, AlancoinBackend
-    __all_mcp__ = ["MCPPaymentProxy", "ToolPricing", "DemoBackend", "AlancoinBackend"]
-except ImportError:
-    __all_mcp__ = []
-
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
-    # Client
-    "Alancoin",
-    # Sessions (High-Level API)
+    "connect",
+    "spend",
     "Budget",
-    "BudgetSession",
-    "ServiceResult",
-    # Streaming Micropayments
-    "StreamingSession",
-    "StreamResult",
-    # Gateway (Transparent Payment Proxy)
     "GatewaySession",
-    # Session Keys (Low-Level)
-    "SessionKeyManager",
-    "generate_session_keypair",
-    "sign_transaction",
-    "sign_delegation",
-    "create_transaction_message",
-    "create_delegation_message",
-    "get_current_timestamp",
-    # Models
-    "Agent",
-    "Service",
-    "ServiceListing",
-    "Transaction",
-    "NetworkStats",
-    "ServiceType",
-    # Exceptions
     "AlancoinError",
-    "AgentNotFoundError",
-    "AgentExistsError",
-    "ServiceNotFoundError",
-    "PaymentError",
-    "PaymentRequiredError",
-    "ValidationError",
-    "NetworkError",
-] + __all_mcp__
+    "PolicyDeniedError",
+]
+
+# ---------------------------------------------------------------------------
+# Backward compatibility — legacy top-level imports emit DeprecationWarning
+# ---------------------------------------------------------------------------
+
+import warnings as _warnings
+
+_LEGACY_MOVES = {
+    # client
+    "Alancoin": ("alancoin.admin", "Alancoin"),
+    # session types
+    "BudgetSession": ("alancoin.sessions", "BudgetSession"),
+    "ServiceResult": ("alancoin.sessions", "ServiceResult"),
+    "StreamingSession": ("alancoin.sessions", "StreamingSession"),
+    "StreamResult": ("alancoin.sessions", "StreamResult"),
+    # models
+    "Agent": ("alancoin.models", "Agent"),
+    "Service": ("alancoin.models", "Service"),
+    "ServiceListing": ("alancoin.models", "ServiceListing"),
+    "Transaction": ("alancoin.models", "Transaction"),
+    "NetworkStats": ("alancoin.models", "NetworkStats"),
+    "ServiceType": ("alancoin.models", "ServiceType"),
+    # session keys
+    "SessionKeyManager": ("alancoin.session_keys", "SessionKeyManager"),
+    "generate_session_keypair": ("alancoin.session_keys", "generate_session_keypair"),
+    "sign_transaction": ("alancoin.session_keys", "sign_transaction"),
+    "sign_delegation": ("alancoin.session_keys", "sign_delegation"),
+    "create_transaction_message": ("alancoin.session_keys", "create_transaction_message"),
+    "create_delegation_message": ("alancoin.session_keys", "create_delegation_message"),
+    "get_current_timestamp": ("alancoin.session_keys", "get_current_timestamp"),
+    # exceptions
+    "AgentNotFoundError": ("alancoin.exceptions", "AgentNotFoundError"),
+    "AgentExistsError": ("alancoin.exceptions", "AgentExistsError"),
+    "ServiceNotFoundError": ("alancoin.exceptions", "ServiceNotFoundError"),
+    "PaymentError": ("alancoin.exceptions", "PaymentError"),
+    "PaymentRequiredError": ("alancoin.exceptions", "PaymentRequiredError"),
+    "ValidationError": ("alancoin.exceptions", "ValidationError"),
+    "NetworkError": ("alancoin.exceptions", "NetworkError"),
+    # MCP proxy
+    "MCPPaymentProxy": ("alancoin.mcp_proxy", "MCPPaymentProxy"),
+    "ToolPricing": ("alancoin.mcp_proxy", "ToolPricing"),
+    "DemoBackend": ("alancoin.mcp_proxy", "DemoBackend"),
+    "AlancoinBackend": ("alancoin.mcp_proxy", "AlancoinBackend"),
+}
+
+
+def __getattr__(name: str):
+    if name in _LEGACY_MOVES:
+        new_module, attr = _LEGACY_MOVES[name]
+        _warnings.warn(
+            f"Importing {name!r} from 'alancoin' is deprecated. "
+            f"Use 'from {new_module} import {attr}' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        import importlib
+        mod = importlib.import_module(new_module)
+        return getattr(mod, attr)
+    raise AttributeError(f"module 'alancoin' has no attribute {name!r}")

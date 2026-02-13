@@ -64,20 +64,6 @@ type BatchResponse struct {
 	ExpiresAt string         `json:"expiresAt,omitempty"`
 }
 
-// CompareRequest is a request for comparing agents.
-type CompareRequest struct {
-	Addresses []string `json:"addresses" binding:"required"`
-}
-
-// CompareResponse returns scores side-by-side.
-type CompareResponse struct {
-	Agents    []*Score `json:"agents"`
-	Best      string   `json:"best"`
-	Signature string   `json:"signature,omitempty"`
-	IssuedAt  string   `json:"issuedAt,omitempty"`
-	ExpiresAt string   `json:"expiresAt,omitempty"`
-}
-
 // HistoryQuery holds query parameters for historical scores.
 type HistoryQuery struct {
 	Address string

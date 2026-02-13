@@ -5,7 +5,8 @@ import responses
 from decimal import Decimal
 from responses import matchers
 
-from alancoin import Alancoin, GatewaySession
+from alancoin.admin import Alancoin
+from alancoin import GatewaySession
 from alancoin.exceptions import AlancoinError, NetworkError
 
 

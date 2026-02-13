@@ -168,7 +168,7 @@ func ValidateRules(rules []Rule) error {
 func evaluatePolicies(ctx context.Context, store PolicyStore, key *SessionKey) error {
 	attachments, err := store.GetAttachments(ctx, key.ID)
 	if err != nil {
-		return nil // store unavailable — fail open
+		return fmt.Errorf("policy check failed: %w", err)
 	}
 	if len(attachments) == 0 {
 		return nil
@@ -265,7 +265,7 @@ func recordPolicyUsage(ctx context.Context, store PolicyStore, keyID string) {
 func evalRateLimit(rule Rule, att *PolicyAttachment, now time.Time) error {
 	var p RateLimitParams
 	if err := json.Unmarshal(rule.Params, &p); err != nil {
-		return nil // malformed — skip
+		return fmt.Errorf("rate_limit rule has malformed params: %w", err)
 	}
 
 	state := parseRuleState(att.RuleState)
@@ -286,7 +286,7 @@ func evalRateLimit(rule Rule, att *PolicyAttachment, now time.Time) error {
 func evalTimeWindow(rule Rule, now time.Time) error {
 	var p TimeWindowParams
 	if err := json.Unmarshal(rule.Params, &p); err != nil {
-		return nil
+		return fmt.Errorf("time_window rule has malformed params: %w", err)
 	}
 
 	tz := "UTC"
@@ -295,7 +295,7 @@ func evalTimeWindow(rule Rule, now time.Time) error {
 	}
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
-		return nil // invalid tz — skip
+		return fmt.Errorf("time_window rule has invalid timezone %q: %w", tz, err)
 	}
 	localNow := now.In(loc)
 
@@ -334,7 +334,7 @@ func evalTimeWindow(rule Rule, now time.Time) error {
 func evalCooldown(rule Rule, key *SessionKey, now time.Time) error {
 	var p CooldownParams
 	if err := json.Unmarshal(rule.Params, &p); err != nil {
-		return nil
+		return fmt.Errorf("cooldown rule has malformed params: %w", err)
 	}
 
 	if key.Usage.LastUsed.IsZero() {
@@ -351,10 +351,45 @@ func evalCooldown(rule Rule, key *SessionKey, now time.Time) error {
 func evalTxCount(rule Rule, key *SessionKey) error {
 	var p TxCountParams
 	if err := json.Unmarshal(rule.Params, &p); err != nil {
-		return nil
+		return fmt.Errorf("tx_count rule has malformed params: %w", err)
 	}
 
 	if key.Usage.TransactionCount >= p.MaxCount {
+		return ErrTxCountExceeded
+	}
+	return nil
+}
+
+// --- Exported evaluators for cross-package use (gateway adapter) ---
+
+// EvalTimeWindowExported evaluates a time_window rule against the given time.
+func EvalTimeWindowExported(rule Rule, now time.Time) error {
+	return evalTimeWindow(rule, now)
+}
+
+// EvalCooldownExported evaluates a cooldown rule using a last-activity timestamp.
+func EvalCooldownExported(rule Rule, lastUsed time.Time, now time.Time) error {
+	var p CooldownParams
+	if err := json.Unmarshal(rule.Params, &p); err != nil {
+		return fmt.Errorf("cooldown rule has malformed params: %w", err)
+	}
+	if lastUsed.IsZero() {
+		return nil
+	}
+	elapsed := now.Sub(lastUsed)
+	if elapsed < time.Duration(p.MinSeconds)*time.Second {
+		return ErrCooldownActive
+	}
+	return nil
+}
+
+// EvalTxCountExported evaluates a tx_count rule against a request count.
+func EvalTxCountExported(rule Rule, requestCount int) error {
+	var p TxCountParams
+	if err := json.Unmarshal(rule.Params, &p); err != nil {
+		return fmt.Errorf("tx_count rule has malformed params: %w", err)
+	}
+	if requestCount >= p.MaxCount {
 		return ErrTxCountExceeded
 	}
 	return nil

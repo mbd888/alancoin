@@ -27,6 +27,7 @@ var (
 	ErrProxyFailed        = errors.New("gateway: all service candidates failed")
 	ErrInvalidAmount      = errors.New("gateway: invalid amount")
 	ErrUnauthorized       = errors.New("gateway: not authorized for this session")
+	ErrPolicyDenied       = errors.New("gateway: policy denied request")
 )
 
 // Status represents session state.
@@ -108,15 +109,16 @@ type ProxyResult struct {
 
 // RequestLog records a single proxy attempt.
 type RequestLog struct {
-	ID          string    `json:"id"`
-	SessionID   string    `json:"sessionId"`
-	ServiceType string    `json:"serviceType"`
-	AgentCalled string    `json:"agentCalled"`
-	Amount      string    `json:"amount"`
-	Status      string    `json:"status"` // "success", "forward_failed", "no_service"
-	LatencyMs   int64     `json:"latencyMs"`
-	Error       string    `json:"error,omitempty"`
-	CreatedAt   time.Time `json:"createdAt"`
+	ID           string          `json:"id"`
+	SessionID    string          `json:"sessionId"`
+	ServiceType  string          `json:"serviceType"`
+	AgentCalled  string          `json:"agentCalled"`
+	Amount       string          `json:"amount"`
+	Status       string          `json:"status"` // "success", "forward_failed", "no_service", "policy_denied"
+	LatencyMs    int64           `json:"latencyMs"`
+	Error        string          `json:"error,omitempty"`
+	PolicyResult *PolicyDecision `json:"policyResult,omitempty"`
+	CreatedAt    time.Time       `json:"createdAt"`
 }
 
 // CreateSessionRequest is the HTTP payload for session creation.

@@ -160,15 +160,16 @@ func (c *idempotencyCache) size() int {
 
 // Service implements gateway business logic.
 type Service struct {
-	store         Store
-	resolver      *Resolver
-	forwarder     *Forwarder
-	ledger        LedgerService
-	recorder      TransactionRecorder
-	receiptIssuer ReceiptIssuer
-	logger        *slog.Logger
-	locks         syncutil.ShardedMutex
-	idemCache     *idempotencyCache
+	store           Store
+	resolver        *Resolver
+	forwarder       *Forwarder
+	ledger          LedgerService
+	recorder        TransactionRecorder
+	receiptIssuer   ReceiptIssuer
+	policyEvaluator PolicyEvaluator
+	logger          *slog.Logger
+	locks           syncutil.ShardedMutex
+	idemCache       *idempotencyCache
 
 	// pendingSpend tracks in-flight budget reservations per session.
 	// Key: sessionID, Value: *big.Int (sum of reserved amounts).
@@ -202,6 +203,12 @@ func (s *Service) WithRecorder(r TransactionRecorder) *Service {
 // WithReceiptIssuer adds a receipt issuer for cryptographic payment proofs.
 func (s *Service) WithReceiptIssuer(r ReceiptIssuer) *Service {
 	s.receiptIssuer = r
+	return s
+}
+
+// WithPolicyEvaluator adds a policy evaluator for spending constraints.
+func (s *Service) WithPolicyEvaluator(p PolicyEvaluator) *Service {
+	s.policyEvaluator = p
 	return s
 }
 
@@ -291,6 +298,17 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr string, req Creat
 		ExpiresAt:     now.Add(expiresIn),
 		CreatedAt:     now,
 		UpdatedAt:     now,
+	}
+
+	// Policy check before holding funds (e.g. time_window enforcement).
+	if s.policyEvaluator != nil {
+		decision, err := s.policyEvaluator.EvaluateProxy(ctx, session, "")
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrPolicyDenied, err)
+		}
+		if decision != nil && !decision.Allowed {
+			return nil, fmt.Errorf("%w: %s", ErrPolicyDenied, decision.Reason)
+		}
 	}
 
 	// Hold the full budget from the buyer
@@ -446,6 +464,25 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			cancelIdem()
 			return nil, ErrSessionClosed
 		}
+
+		// Policy check (under lock, before budget reservation).
+		var policyDecision *PolicyDecision
+		if s.policyEvaluator != nil {
+			policyDecision, err = s.policyEvaluator.EvaluateProxy(ctx, session, req.ServiceType)
+			if err != nil {
+				s.logger.Info("policy denied proxy request",
+					"session", sessionID,
+					"agent", session.AgentAddr,
+					"policy", policyDecision.GetDeniedBy(),
+					"rule", policyDecision.GetDeniedRule(),
+					"reason", policyDecision.GetReason())
+				s.logRequestWithPolicy(ctx, sessionIDCopy, req.ServiceType, "", "0", "policy_denied", 0, err.Error(), policyDecision)
+				unlock()
+				cancelIdem()
+				return nil, fmt.Errorf("%w: %v", ErrPolicyDenied, err)
+			}
+		}
+		_ = policyDecision // used in logging below
 
 		// Budget check: account for both settled spend AND in-flight reservations.
 		spentBig, _ := usdc.Parse(session.TotalSpent)
@@ -810,16 +847,22 @@ func (s *Service) ListLogs(ctx context.Context, sessionID string, limit int) ([]
 
 // logRequest creates a request log entry.
 func (s *Service) logRequest(ctx context.Context, sessionID, serviceType, agentCalled, amount, status string, latencyMs int64, errMsg string) {
+	s.logRequestWithPolicy(ctx, sessionID, serviceType, agentCalled, amount, status, latencyMs, errMsg, nil)
+}
+
+// logRequestWithPolicy creates a request log entry with an optional policy decision.
+func (s *Service) logRequestWithPolicy(ctx context.Context, sessionID, serviceType, agentCalled, amount, status string, latencyMs int64, errMsg string, policy *PolicyDecision) {
 	log := &RequestLog{
-		ID:          idgen.WithPrefix("gwlog_"),
-		SessionID:   sessionID,
-		ServiceType: serviceType,
-		AgentCalled: agentCalled,
-		Amount:      amount,
-		Status:      status,
-		LatencyMs:   latencyMs,
-		Error:       errMsg,
-		CreatedAt:   time.Now(),
+		ID:           idgen.WithPrefix("gwlog_"),
+		SessionID:    sessionID,
+		ServiceType:  serviceType,
+		AgentCalled:  agentCalled,
+		Amount:       amount,
+		Status:       status,
+		LatencyMs:    latencyMs,
+		Error:        errMsg,
+		PolicyResult: policy,
+		CreatedAt:    time.Now(),
 	}
 	if err := s.store.CreateLog(ctx, log); err != nil {
 		s.logger.Warn("failed to create gateway request log", "error", err)

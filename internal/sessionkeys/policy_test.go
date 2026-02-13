@@ -3,6 +3,8 @@ package sessionkeys
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -659,5 +661,225 @@ func TestEvalTimeWindowOvernight(t *testing.T) {
 	at = time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
 	if err := evalTimeWindow(rule, at); err != ErrOutsideTimeWindow {
 		t.Errorf("12:00 should be blocked in 22-6 window, got %v", err)
+	}
+}
+
+// --- Fail-closed: store errors must deny, not allow ---
+
+// errorPolicyStore is a PolicyStore that always returns errors.
+type errorPolicyStore struct{}
+
+func (e *errorPolicyStore) CreatePolicy(context.Context, *Policy) error {
+	return fmt.Errorf("store unavailable")
+}
+func (e *errorPolicyStore) GetPolicy(context.Context, string) (*Policy, error) {
+	return nil, fmt.Errorf("store unavailable")
+}
+func (e *errorPolicyStore) ListPolicies(context.Context, string) ([]*Policy, error) {
+	return nil, fmt.Errorf("store unavailable")
+}
+func (e *errorPolicyStore) UpdatePolicy(context.Context, *Policy) error {
+	return fmt.Errorf("store unavailable")
+}
+func (e *errorPolicyStore) DeletePolicy(context.Context, string) error {
+	return fmt.Errorf("store unavailable")
+}
+func (e *errorPolicyStore) AttachPolicy(context.Context, *PolicyAttachment) error {
+	return fmt.Errorf("store unavailable")
+}
+func (e *errorPolicyStore) DetachPolicy(context.Context, string, string) error {
+	return fmt.Errorf("store unavailable")
+}
+func (e *errorPolicyStore) GetAttachments(context.Context, string) ([]*PolicyAttachment, error) {
+	return nil, fmt.Errorf("store unavailable")
+}
+func (e *errorPolicyStore) UpdateAttachment(context.Context, *PolicyAttachment) error {
+	return fmt.Errorf("store unavailable")
+}
+
+func TestEvaluatePoliciesFailClosed(t *testing.T) {
+	key := &SessionKey{ID: "sk_failtest", Usage: SessionKeyUsage{TransactionCount: 0}}
+	err := evaluatePolicies(context.Background(), &errorPolicyStore{}, key)
+	if err == nil {
+		t.Fatal("expected error when store is unavailable, got nil (fail-open bug)")
+	}
+	if !strings.Contains(err.Error(), "policy check failed") {
+		t.Errorf("expected 'policy check failed' in error, got: %v", err)
+	}
+}
+
+func TestEvalMalformedParamsFailClosed(t *testing.T) {
+	malformed := json.RawMessage(`{"invalid`)
+
+	tests := []struct {
+		name     string
+		ruleType string
+	}{
+		{"rate_limit", "rate_limit"},
+		{"time_window", "time_window"},
+		{"cooldown", "cooldown"},
+		{"tx_count", "tx_count"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rule := Rule{Type: tc.ruleType, Params: malformed}
+			var err error
+			switch tc.ruleType {
+			case "rate_limit":
+				att := &PolicyAttachment{RuleState: []byte(`{}`)}
+				err = evalRateLimit(rule, att, time.Now())
+			case "time_window":
+				err = evalTimeWindow(rule, time.Now())
+			case "cooldown":
+				key := &SessionKey{}
+				err = evalCooldown(rule, key, time.Now())
+			case "tx_count":
+				key := &SessionKey{}
+				err = evalTxCount(rule, key)
+			}
+			if err == nil {
+				t.Errorf("%s: expected error for malformed params, got nil", tc.ruleType)
+			}
+		})
+	}
+}
+
+// --- Exported evaluator tests (used by gateway adapter) ---
+
+func TestEvalTimeWindowExported_CurrentHourAllowed(t *testing.T) {
+	now := time.Now().UTC()
+	rule := Rule{
+		Type: "time_window",
+		Params: mustJSON(t, TimeWindowParams{
+			StartHour: now.Hour(),
+			EndHour:   (now.Hour() + 1) % 24,
+			Timezone:  "UTC",
+		}),
+	}
+	if err := EvalTimeWindowExported(rule, now); err != nil {
+		t.Errorf("expected allowed during current hour, got: %v", err)
+	}
+}
+
+func TestEvalTimeWindowExported_OutsideHourBlocked(t *testing.T) {
+	now := time.Now().UTC()
+	blockedStart := (now.Hour() + 3) % 24
+	blockedEnd := (now.Hour() + 4) % 24
+	if blockedEnd <= blockedStart {
+		blockedEnd = blockedStart + 1
+	}
+	rule := Rule{
+		Type: "time_window",
+		Params: mustJSON(t, TimeWindowParams{
+			StartHour: blockedStart,
+			EndHour:   blockedEnd,
+			Timezone:  "UTC",
+		}),
+	}
+	err := EvalTimeWindowExported(rule, now)
+	if err != ErrOutsideTimeWindow {
+		t.Errorf("expected ErrOutsideTimeWindow, got: %v", err)
+	}
+}
+
+func TestEvalTimeWindowExported_MalformedParams(t *testing.T) {
+	rule := Rule{Type: "time_window", Params: json.RawMessage(`{bad`)}
+	err := EvalTimeWindowExported(rule, time.Now())
+	if err == nil {
+		t.Error("expected error for malformed params")
+	}
+}
+
+func TestEvalCooldownExported_ZeroLastUsed(t *testing.T) {
+	rule := Rule{
+		Type:   "cooldown",
+		Params: mustJSON(t, CooldownParams{MinSeconds: 60}),
+	}
+	// Zero time = first transaction, should always allow
+	if err := EvalCooldownExported(rule, time.Time{}, time.Now()); err != nil {
+		t.Errorf("expected allow for zero lastUsed (first tx), got: %v", err)
+	}
+}
+
+func TestEvalCooldownExported_WithinCooldown(t *testing.T) {
+	rule := Rule{
+		Type:   "cooldown",
+		Params: mustJSON(t, CooldownParams{MinSeconds: 60}),
+	}
+	now := time.Now()
+	lastUsed := now.Add(-10 * time.Second) // 10s ago, cooldown is 60s
+	err := EvalCooldownExported(rule, lastUsed, now)
+	if err != ErrCooldownActive {
+		t.Errorf("expected ErrCooldownActive, got: %v", err)
+	}
+}
+
+func TestEvalCooldownExported_AfterCooldown(t *testing.T) {
+	rule := Rule{
+		Type:   "cooldown",
+		Params: mustJSON(t, CooldownParams{MinSeconds: 60}),
+	}
+	now := time.Now()
+	lastUsed := now.Add(-120 * time.Second) // 120s ago, cooldown is 60s
+	if err := EvalCooldownExported(rule, lastUsed, now); err != nil {
+		t.Errorf("expected allow after cooldown elapsed, got: %v", err)
+	}
+}
+
+func TestEvalCooldownExported_MalformedParams(t *testing.T) {
+	rule := Rule{Type: "cooldown", Params: json.RawMessage(`{bad`)}
+	err := EvalCooldownExported(rule, time.Now(), time.Now())
+	if err == nil {
+		t.Error("expected error for malformed params")
+	}
+}
+
+func TestEvalTxCountExported_UnderLimit(t *testing.T) {
+	rule := Rule{
+		Type:   "tx_count",
+		Params: mustJSON(t, TxCountParams{MaxCount: 10}),
+	}
+	if err := EvalTxCountExported(rule, 5); err != nil {
+		t.Errorf("expected allow (5 < 10), got: %v", err)
+	}
+}
+
+func TestEvalTxCountExported_AtLimit(t *testing.T) {
+	rule := Rule{
+		Type:   "tx_count",
+		Params: mustJSON(t, TxCountParams{MaxCount: 10}),
+	}
+	err := EvalTxCountExported(rule, 10)
+	if err != ErrTxCountExceeded {
+		t.Errorf("expected ErrTxCountExceeded at boundary (10 >= 10), got: %v", err)
+	}
+}
+
+func TestEvalTxCountExported_OverLimit(t *testing.T) {
+	rule := Rule{
+		Type:   "tx_count",
+		Params: mustJSON(t, TxCountParams{MaxCount: 5}),
+	}
+	err := EvalTxCountExported(rule, 999)
+	if err != ErrTxCountExceeded {
+		t.Errorf("expected ErrTxCountExceeded, got: %v", err)
+	}
+}
+
+func TestEvalTxCountExported_ZeroCount(t *testing.T) {
+	rule := Rule{
+		Type:   "tx_count",
+		Params: mustJSON(t, TxCountParams{MaxCount: 5}),
+	}
+	if err := EvalTxCountExported(rule, 0); err != nil {
+		t.Errorf("expected allow (0 < 5), got: %v", err)
+	}
+}
+
+func TestEvalTxCountExported_MalformedParams(t *testing.T) {
+	rule := Rule{Type: "tx_count", Params: json.RawMessage(`{bad`)}
+	err := EvalTxCountExported(rule, 0)
+	if err == nil {
+		t.Error("expected error for malformed params")
 	}
 }

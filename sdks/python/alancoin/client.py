@@ -14,6 +14,7 @@ from .exceptions import (
     AgentExistsError,
     ServiceNotFoundError,
     PaymentRequiredError,
+    PolicyDeniedError,
     NetworkError,
     ValidationError,
     PaymentError,
@@ -1764,7 +1765,18 @@ class Alancoin:
             except (ValueError, KeyError):
                 raise ValidationError("Invalid request")
             raise ValidationError(data.get("message", "Invalid request"))
-        
+
+        if response.status_code == 403:
+            try:
+                data = response.json()
+            except (ValueError, KeyError):
+                data = {}
+            if data.get("error") == "policy_denied":
+                raise PolicyDeniedError(
+                    message=data.get("message") or "Request denied by policy",
+                    contact=data.get("contact") or "",
+                )
+
         if response.status_code >= 400:
             try:
                 data = response.json()

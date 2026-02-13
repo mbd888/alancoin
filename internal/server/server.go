@@ -208,6 +208,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.logger.Info("gateway enabled")
 
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
+		s.gatewayService.WithPolicyEvaluator(&gatewayPolicyAdapter{policyStore})
 
 		// Wire receipt issuer into all payment paths
 		if s.receiptService != nil {
@@ -276,6 +277,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.logger.Info("gateway enabled (in-memory)")
 
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
+		s.gatewayService.WithPolicyEvaluator(&gatewayPolicyAdapter{policyStore})
 
 		// Wire receipt issuer into all payment paths
 		if s.receiptService != nil {
@@ -1361,6 +1363,58 @@ func (a *gatewayLedgerAdapter) SettleHold(ctx context.Context, buyerAddr, seller
 
 func (a *gatewayLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
 	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
+}
+
+// gatewayPolicyAdapter adapts sessionkeys.PolicyStore to gateway.PolicyEvaluator.
+// Looks up all policies owned by the session's agent address and evaluates
+// time_window, cooldown (mapped from session.UpdatedAt), and tx_count
+// (mapped from session.RequestCount) rules.
+type gatewayPolicyAdapter struct {
+	store sessionkeys.PolicyStore
+}
+
+func (a *gatewayPolicyAdapter) EvaluateProxy(ctx context.Context, session *gateway.Session, serviceType string) (*gateway.PolicyDecision, error) {
+	start := time.Now()
+
+	policies, err := a.store.ListPolicies(ctx, session.AgentAddr)
+	if err != nil {
+		return nil, fmt.Errorf("policy check failed: %w", err) // Fail closed
+	}
+
+	decision := &gateway.PolicyDecision{Evaluated: len(policies), Allowed: true}
+
+	for _, policy := range policies {
+		for _, rule := range policy.Rules {
+			if evalErr := evaluateRuleForGateway(rule, session); evalErr != nil {
+				decision.Allowed = false
+				decision.DeniedBy = policy.Name
+				decision.DeniedRule = rule.Type
+				decision.Reason = evalErr.Error()
+				decision.LatencyUs = time.Since(start).Microseconds()
+				return decision, evalErr
+			}
+		}
+	}
+
+	decision.LatencyUs = time.Since(start).Microseconds()
+	return decision, nil
+}
+
+// evaluateRuleForGateway maps gateway session state onto sessionkeys rule evaluators.
+// Supports time_window, cooldown, and tx_count. Rate_limit is skipped (requires
+// per-session RuleState tracking not yet implemented for gateway).
+func evaluateRuleForGateway(rule sessionkeys.Rule, session *gateway.Session) error {
+	switch rule.Type {
+	case "time_window":
+		return sessionkeys.EvalTimeWindowExported(rule, time.Now())
+	case "cooldown":
+		return sessionkeys.EvalCooldownExported(rule, session.UpdatedAt, time.Now())
+	case "tx_count":
+		return sessionkeys.EvalTxCountExported(rule, session.RequestCount)
+	default:
+		// rate_limit and unknown types: skip for gateway
+		return nil
+	}
 }
 
 // gatewayRegistryAdapter adapts registry.Store to gateway.RegistryProvider

@@ -1611,6 +1611,262 @@ func TestProxy_BudgetLow(t *testing.T) {
 // Idempotency cache sweep test
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Policy evaluator tests
+// ---------------------------------------------------------------------------
+
+// mockPolicyEvaluator implements PolicyEvaluator for testing.
+type mockPolicyEvaluator struct {
+	decision *PolicyDecision
+	err      error
+	calls    int // number of times EvaluateProxy was called
+	// denyAfter: if > 0, allow the first N calls then deny
+	denyAfter int
+}
+
+func (m *mockPolicyEvaluator) EvaluateProxy(_ context.Context, _ *Session, _ string) (*PolicyDecision, error) {
+	m.calls++
+	if m.denyAfter > 0 && m.calls <= m.denyAfter {
+		return &PolicyDecision{Evaluated: 0, Allowed: true}, nil
+	}
+	return m.decision, m.err
+}
+
+func TestProxy_PolicyDenied(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.10", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	policy := &mockPolicyEvaluator{
+		decision: &PolicyDecision{
+			Evaluated:  1,
+			Allowed:    false,
+			DeniedBy:   "rate_policy",
+			DeniedRule: "tx_count",
+			Reason:     "maximum transaction count exceeded",
+		},
+		err:       fmt.Errorf("maximum transaction count exceeded"),
+		denyAfter: 1, // allow CreateSession (1st call), deny Proxy (2nd call)
+	}
+	svc.WithPolicyEvaluator(policy)
+
+	ctx := context.Background()
+	session, err := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, err = svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "translation"})
+	if err == nil {
+		t.Fatal("expected error when policy denies")
+	}
+	if !strings.Contains(err.Error(), "policy denied") {
+		t.Errorf("expected 'policy denied' in error, got: %v", err)
+	}
+
+	// No settlement should have occurred
+	if len(ml.settlements) != 0 {
+		t.Errorf("expected 0 settlements (policy denied before forwarding), got %d", len(ml.settlements))
+	}
+
+	// Session spend should be unchanged
+	updated, _ := svc.GetSession(ctx, session.ID)
+	if updated.TotalSpent != "0.000000" {
+		t.Errorf("expected 0 spent, got %s", updated.TotalSpent)
+	}
+}
+
+func TestProxy_PolicyAllowed(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.10", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	policy := &mockPolicyEvaluator{
+		decision: &PolicyDecision{Evaluated: 2, Allowed: true, LatencyUs: 50},
+	}
+	svc.WithPolicyEvaluator(policy)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	result, err := svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "translation"})
+	if err != nil {
+		t.Fatalf("proxy should succeed when policy allows: %v", err)
+	}
+	if result.AmountPaid != "0.100000" {
+		t.Errorf("expected 0.100000 paid, got %s", result.AmountPaid)
+	}
+
+	// Policy should have been evaluated (once in CreateSession + once in Proxy phase 2a)
+	if policy.calls < 2 {
+		t.Errorf("expected at least 2 policy evaluations (create + proxy), got %d", policy.calls)
+	}
+}
+
+func TestCreateSession_PolicyDenied(t *testing.T) {
+	ml := newMockLedger()
+	svc := newTestServiceWithLogger(ml, &mockRegistry{})
+
+	policy := &mockPolicyEvaluator{
+		decision: &PolicyDecision{
+			Evaluated:  1,
+			Allowed:    false,
+			DeniedBy:   "time_policy",
+			DeniedRule: "time_window",
+			Reason:     "outside allowed hours",
+		},
+		err: fmt.Errorf("outside allowed hours"),
+	}
+	svc.WithPolicyEvaluator(policy)
+
+	_, err := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+	if err == nil {
+		t.Fatal("expected error when policy denies session creation")
+	}
+	if !strings.Contains(err.Error(), "policy denied") {
+		t.Errorf("expected 'policy denied' in error, got: %v", err)
+	}
+
+	// No hold should have been created (policy denied before hold)
+	if len(ml.holds) != 0 {
+		t.Errorf("expected 0 holds (policy denied before hold), got %d", len(ml.holds))
+	}
+}
+
+func TestProxy_PolicyDeniedLogsDecision(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.10", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	policy := &mockPolicyEvaluator{
+		decision: &PolicyDecision{
+			Evaluated:  1,
+			Allowed:    false,
+			DeniedBy:   "spending_limit",
+			DeniedRule: "tx_count",
+			Reason:     "limit exceeded",
+			LatencyUs:  42,
+		},
+		err:       fmt.Errorf("limit exceeded"),
+		denyAfter: 1, // allow CreateSession (1st call), deny Proxy (2nd call)
+	}
+	svc.WithPolicyEvaluator(policy)
+
+	ctx := context.Background()
+	session, err := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, _ = svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "translation"})
+
+	// Check request logs for the policy_denied entry
+	logs, err := svc.ListLogs(ctx, session.ID, 10)
+	if err != nil {
+		t.Fatalf("list logs: %v", err)
+	}
+
+	var found bool
+	for _, log := range logs {
+		if log.Status == "policy_denied" {
+			found = true
+			if log.PolicyResult == nil {
+				t.Error("expected PolicyResult in log entry")
+			} else {
+				if log.PolicyResult.DeniedBy != "spending_limit" {
+					t.Errorf("expected DeniedBy 'spending_limit', got %q", log.PolicyResult.DeniedBy)
+				}
+				if log.PolicyResult.DeniedRule != "tx_count" {
+					t.Errorf("expected DeniedRule 'tx_count', got %q", log.PolicyResult.DeniedRule)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("expected a 'policy_denied' log entry")
+	}
+}
+
+func TestProxy_NilPolicyEvaluator(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.10", Endpoint: server.URL},
+		},
+	}
+	// No policy evaluator set — should work fine
+	svc := newTestServiceWithLogger(ml, reg)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	result, err := svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "test"})
+	if err != nil {
+		t.Fatalf("proxy should succeed without policy evaluator: %v", err)
+	}
+	if result.AmountPaid != "0.100000" {
+		t.Errorf("expected 0.100000, got %s", result.AmountPaid)
+	}
+}
+
+func TestPolicyDecision_NilSafeAccessors(t *testing.T) {
+	var d *PolicyDecision
+
+	if d.GetDeniedBy() != "" {
+		t.Error("GetDeniedBy on nil should return empty")
+	}
+	if d.GetDeniedRule() != "" {
+		t.Error("GetDeniedRule on nil should return empty")
+	}
+	if d.GetReason() != "" {
+		t.Error("GetReason on nil should return empty")
+	}
+
+	d = &PolicyDecision{DeniedBy: "p", DeniedRule: "r", Reason: "x"}
+	if d.GetDeniedBy() != "p" {
+		t.Errorf("expected 'p', got %q", d.GetDeniedBy())
+	}
+}
+
 func TestIdempotencyCacheSweep(t *testing.T) {
 	cache := newIdempotencyCache(50 * time.Millisecond) // 50ms TTL
 

@@ -110,9 +110,25 @@ class PaymentRequiredError(AlancoinError):
         self.contract = contract
 
 
+class PolicyDeniedError(AlancoinError):
+    """Request denied by spend supervisor policy (HTTP 403).
+
+    Carries operator contact info so the caller can escalate,
+    but never exposes policy internals.
+    """
+
+    def __init__(self, message: str, contact: str = ""):
+        super().__init__(
+            message=message,
+            code="policy_denied",
+            status_code=403,
+        )
+        self.contact = contact
+
+
 class NetworkError(AlancoinError):
     """Network/connection error."""
-    
+
     def __init__(self, message: str, original_error: Exception = None):
         super().__init__(
             message=message,
