@@ -142,9 +142,14 @@ func (h *Handler) CreateSession(c *gin.Context) {
 		status := http.StatusInternalServerError
 		code := "session_failed"
 		msg := "Failed to create gateway session"
-		if errors.Is(err, ErrInvalidAmount) {
+		switch {
+		case errors.Is(err, ErrInvalidAmount):
 			status = http.StatusBadRequest
 			code = "invalid_amount"
+			msg = err.Error()
+		case errors.Is(err, ErrPolicyDenied):
+			status = http.StatusForbidden
+			code = "policy_denied"
 			msg = err.Error()
 		}
 		resp := gin.H{"error": code, "message": msg}
@@ -274,6 +279,9 @@ func (h *Handler) Proxy(c *gin.Context) {
 		case errors.Is(err, ErrNoServiceAvailable):
 			status = http.StatusNotFound
 			code = "no_service"
+		case errors.Is(err, ErrPolicyDenied):
+			status = http.StatusForbidden
+			code = "policy_denied"
 		case errors.Is(err, ErrProxyFailed):
 			status = http.StatusBadGateway
 			code = "proxy_failed"
@@ -321,9 +329,15 @@ func (h *Handler) SingleCall(c *gin.Context) {
 		case errors.Is(err, ErrNoServiceAvailable):
 			status = http.StatusNotFound
 			code = "no_service"
+		case errors.Is(err, ErrPolicyDenied):
+			status = http.StatusForbidden
+			code = "policy_denied"
 		case errors.Is(err, ErrProxyFailed):
 			status = http.StatusBadGateway
 			code = "proxy_failed"
+		case errors.Is(err, ErrBudgetExceeded):
+			status = http.StatusPaymentRequired
+			code = "budget_exceeded"
 		}
 		resp := gin.H{"error": code, "message": err.Error()}
 		if extra := moneyFields(err); extra != nil {

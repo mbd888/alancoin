@@ -199,13 +199,17 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.receiptService = receipts.NewService(receiptStore, receiptSigner)
 		s.logger.Info("receipt signing enabled (postgres)")
 
-		// Gateway with in-memory store (transparent payment proxy)
-		gwStore := gateway.NewMemoryStore()
+		// Gateway with PostgreSQL store (transparent payment proxy)
+		gwStore := gateway.NewPostgresStore(db)
 		gwResolver := gateway.NewResolver(&gatewayRegistryAdapter{s.registry})
 		gwForwarder := gateway.NewForwarder(0)
-		s.gatewayService = gateway.NewService(gwStore, gwResolver, gwForwarder, &gatewayLedgerAdapter{s.ledgerService}, s.logger)
+		gwLedger := &gatewayLedgerAdapter{s.ledgerService}
+		s.gatewayService = gateway.NewService(gwStore, gwResolver, gwForwarder, gwLedger, s.logger)
 		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore, s.logger)
-		s.logger.Info("gateway enabled")
+		s.logger.Info("gateway enabled (postgres)")
+
+		// Release any ledger holds orphaned by a previous crash.
+		gateway.ReconcileOrphanedHolds(ctx, db, gwLedger, s.logger)
 
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
 		s.gatewayService.WithPolicyEvaluator(&gatewayPolicyAdapter{policyStore})
