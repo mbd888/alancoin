@@ -56,6 +56,7 @@ func setupTestDB(t *testing.T) (*PostgresStore, *sql.DB, func()) {
 			service_type TEXT NOT NULL,
 			agent_called TEXT NOT NULL DEFAULT '',
 			amount       NUMERIC(20,6) NOT NULL DEFAULT 0,
+			fee_amount   NUMERIC(20,6) DEFAULT 0,
 			status       TEXT NOT NULL,
 			latency_ms   BIGINT NOT NULL DEFAULT 0,
 			error        TEXT NOT NULL DEFAULT '',
