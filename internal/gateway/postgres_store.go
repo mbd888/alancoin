@@ -22,15 +22,16 @@ func NewPostgresStore(db *sql.DB) *PostgresStore {
 func (p *PostgresStore) CreateSession(ctx context.Context, session *Session) error {
 	_, err := p.db.ExecContext(ctx, `
 		INSERT INTO gateway_sessions (
-			id, agent_addr, max_total, max_per_request, total_spent,
+			id, agent_addr, tenant_id, max_total, max_per_request, total_spent,
 			request_count, strategy, allowed_types, warn_at_percent,
 			status, expires_at, created_at, updated_at
 		) VALUES (
-			$1, $2, $3::NUMERIC(20,6), $4::NUMERIC(20,6), $5::NUMERIC(20,6),
-			$6, $7, $8, $9,
-			$10, $11, $12, $13
+			$1, $2, $3, $4::NUMERIC(20,6), $5::NUMERIC(20,6), $6::NUMERIC(20,6),
+			$7, $8, $9, $10,
+			$11, $12, $13, $14
 		)`,
-		session.ID, session.AgentAddr, session.MaxTotal, session.MaxPerRequest, session.TotalSpent,
+		session.ID, session.AgentAddr, nullString(session.TenantID),
+		session.MaxTotal, session.MaxPerRequest, session.TotalSpent,
 		session.RequestCount, session.Strategy, pq.Array(session.AllowedTypes), session.WarnAtPercent,
 		string(session.Status), session.ExpiresAt, session.CreatedAt, session.UpdatedAt,
 	)
@@ -39,7 +40,7 @@ func (p *PostgresStore) CreateSession(ctx context.Context, session *Session) err
 
 func (p *PostgresStore) GetSession(ctx context.Context, id string) (*Session, error) {
 	s, err := scanSession(p.db.QueryRowContext(ctx, `
-		SELECT id, agent_addr, max_total, max_per_request, total_spent,
+		SELECT id, agent_addr, tenant_id, max_total, max_per_request, total_spent,
 		       request_count, strategy, allowed_types, warn_at_percent,
 		       status, expires_at, created_at, updated_at
 		FROM gateway_sessions WHERE id = $1`, id))
@@ -87,7 +88,7 @@ func (p *PostgresStore) UpdateSession(ctx context.Context, session *Session) err
 
 func (p *PostgresStore) ListSessions(ctx context.Context, agentAddr string, limit int) ([]*Session, error) {
 	rows, err := p.db.QueryContext(ctx, `
-		SELECT id, agent_addr, max_total, max_per_request, total_spent,
+		SELECT id, agent_addr, tenant_id, max_total, max_per_request, total_spent,
 		       request_count, strategy, allowed_types, warn_at_percent,
 		       status, expires_at, created_at, updated_at
 		FROM gateway_sessions
@@ -102,9 +103,26 @@ func (p *PostgresStore) ListSessions(ctx context.Context, agentAddr string, limi
 	return scanSessions(rows)
 }
 
+func (p *PostgresStore) ListSessionsByTenant(ctx context.Context, tenantID string, limit int) ([]*Session, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT id, agent_addr, tenant_id, max_total, max_per_request, total_spent,
+		       request_count, strategy, allowed_types, warn_at_percent,
+		       status, expires_at, created_at, updated_at
+		FROM gateway_sessions
+		WHERE tenant_id = $1
+		ORDER BY created_at DESC
+		LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	return scanSessions(rows)
+}
+
 func (p *PostgresStore) ListExpired(ctx context.Context, before time.Time, limit int) ([]*Session, error) {
 	rows, err := p.db.QueryContext(ctx, `
-		SELECT id, agent_addr, max_total, max_per_request, total_spent,
+		SELECT id, agent_addr, tenant_id, max_total, max_per_request, total_spent,
 		       request_count, strategy, allowed_types, warn_at_percent,
 		       status, expires_at, created_at, updated_at
 		FROM gateway_sessions
@@ -131,13 +149,13 @@ func (p *PostgresStore) CreateLog(ctx context.Context, log *RequestLog) error {
 
 	_, err := p.db.ExecContext(ctx, `
 		INSERT INTO gateway_request_logs (
-			id, session_id, service_type, agent_called, amount,
+			id, session_id, tenant_id, service_type, agent_called, amount,
 			status, latency_ms, error, policy_result, created_at
 		) VALUES (
-			$1, $2, $3, $4, $5::NUMERIC(20,6),
-			$6, $7, $8, $9, $10
+			$1, $2, $3, $4, $5, $6::NUMERIC(20,6),
+			$7, $8, $9, $10, $11
 		)`,
-		log.ID, log.SessionID, log.ServiceType, log.AgentCalled, log.Amount,
+		log.ID, log.SessionID, nullString(log.TenantID), log.ServiceType, log.AgentCalled, log.Amount,
 		log.Status, log.LatencyMs, log.Error, policyJSON, log.CreatedAt,
 	)
 	return err
@@ -145,7 +163,7 @@ func (p *PostgresStore) CreateLog(ctx context.Context, log *RequestLog) error {
 
 func (p *PostgresStore) ListLogs(ctx context.Context, sessionID string, limit int) ([]*RequestLog, error) {
 	rows, err := p.db.QueryContext(ctx, `
-		SELECT id, session_id, service_type, agent_called, amount,
+		SELECT id, session_id, tenant_id, service_type, agent_called, amount,
 		       status, latency_ms, error, policy_result, created_at
 		FROM gateway_request_logs
 		WHERE session_id = $1
@@ -176,12 +194,13 @@ type sessionScanner interface {
 func scanSession(sc sessionScanner) (*Session, error) {
 	s := &Session{}
 	var (
+		tenantID     sql.NullString
 		allowedTypes pq.StringArray
 		status       string
 	)
 
 	err := sc.Scan(
-		&s.ID, &s.AgentAddr, &s.MaxTotal, &s.MaxPerRequest, &s.TotalSpent,
+		&s.ID, &s.AgentAddr, &tenantID, &s.MaxTotal, &s.MaxPerRequest, &s.TotalSpent,
 		&s.RequestCount, &s.Strategy, &allowedTypes, &s.WarnAtPercent,
 		&status, &s.ExpiresAt, &s.CreatedAt, &s.UpdatedAt,
 	)
@@ -189,6 +208,9 @@ func scanSession(sc sessionScanner) (*Session, error) {
 		return nil, err
 	}
 
+	if tenantID.Valid {
+		s.TenantID = tenantID.String
+	}
 	s.Status = Status(status)
 	s.AllowedTypes = []string(allowedTypes)
 	if len(s.AllowedTypes) == 0 {
@@ -211,16 +233,22 @@ func scanSessions(rows *sql.Rows) ([]*Session, error) {
 
 func scanLog(sc sessionScanner) (*RequestLog, error) {
 	l := &RequestLog{}
-	var policyJSON []byte
+	var (
+		tenantID   sql.NullString
+		policyJSON []byte
+	)
 
 	err := sc.Scan(
-		&l.ID, &l.SessionID, &l.ServiceType, &l.AgentCalled, &l.Amount,
+		&l.ID, &l.SessionID, &tenantID, &l.ServiceType, &l.AgentCalled, &l.Amount,
 		&l.Status, &l.LatencyMs, &l.Error, &policyJSON, &l.CreatedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
 
+	if tenantID.Valid {
+		l.TenantID = tenantID.String
+	}
 	if len(policyJSON) > 0 {
 		l.PolicyResult = &PolicyDecision{}
 		if err := json.Unmarshal(policyJSON, l.PolicyResult); err != nil {
@@ -228,6 +256,14 @@ func scanLog(sc sessionScanner) (*RequestLog, error) {
 		}
 	}
 	return l, nil
+}
+
+// nullString converts an empty string to sql.NullString{Valid: false}.
+func nullString(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
 }
 
 // Compile-time assertion.

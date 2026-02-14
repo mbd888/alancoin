@@ -242,7 +242,8 @@ func (s *Service) removePendingSpend(sessionID string, amount *big.Int) {
 }
 
 // CreateSession creates a gateway session and holds the buyer's budget.
-func (s *Service) CreateSession(ctx context.Context, agentAddr string, req CreateSessionRequest) (*Session, error) {
+// tenantID is optional; pass "" for non-tenant sessions.
+func (s *Service) CreateSession(ctx context.Context, agentAddr, tenantID string, req CreateSessionRequest) (*Session, error) {
 	maxTotalBig, ok := usdc.Parse(req.MaxTotal)
 	if !ok || maxTotalBig.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: maxTotal", ErrInvalidAmount)
@@ -287,6 +288,7 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr string, req Creat
 	session := &Session{
 		ID:            idgen.WithPrefix("gw_"),
 		AgentAddr:     strings.ToLower(agentAddr),
+		TenantID:      tenantID,
 		MaxTotal:      req.MaxTotal,
 		MaxPerRequest: req.MaxPerRequest,
 		TotalSpent:    "0.000000",
@@ -778,9 +780,9 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 
 // SingleCall creates an ephemeral session, proxies one request, and closes.
 // This is the simplest path: one HTTP call does everything.
-func (s *Service) SingleCall(ctx context.Context, agentAddr string, req SingleCallRequest) (*SingleCallResult, error) {
+func (s *Service) SingleCall(ctx context.Context, agentAddr, tenantID string, req SingleCallRequest) (*SingleCallResult, error) {
 	// Create ephemeral session sized to maxPrice.
-	session, err := s.CreateSession(ctx, agentAddr, CreateSessionRequest{
+	session, err := s.CreateSession(ctx, agentAddr, tenantID, CreateSessionRequest{
 		MaxTotal:      req.MaxPrice,
 		MaxPerRequest: req.MaxPrice,
 		ExpiresInSec:  300, // 5 minute safety net

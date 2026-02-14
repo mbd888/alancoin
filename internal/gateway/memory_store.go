@@ -80,6 +80,28 @@ func (m *MemoryStore) ListSessions(_ context.Context, agentAddr string, limit in
 	return result, nil
 }
 
+func (m *MemoryStore) ListSessionsByTenant(_ context.Context, tenantID string, limit int) ([]*Session, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []*Session
+	for _, s := range m.sessions {
+		if s.TenantID == tenantID {
+			cp := *s
+			result = append(result, &cp)
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
+
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
 func (m *MemoryStore) ListExpired(_ context.Context, before time.Time, limit int) ([]*Session, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

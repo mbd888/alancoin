@@ -18,9 +18,9 @@ func NewPostgresStore(db *sql.DB) *PostgresStore {
 // Create stores a new API key
 func (p *PostgresStore) Create(ctx context.Context, key *APIKey) error {
 	_, err := p.db.ExecContext(ctx, `
-		INSERT INTO api_keys (id, hash, agent_address, name, created_at, expires_at, revoked)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, key.ID, key.Hash, key.AgentAddr, key.Name, key.CreatedAt, key.ExpiresAt, key.Revoked)
+		INSERT INTO api_keys (id, hash, agent_address, tenant_id, name, created_at, expires_at, revoked)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, key.ID, key.Hash, key.AgentAddr, nullString(key.TenantID), key.Name, key.CreatedAt, key.ExpiresAt, key.Revoked)
 	return err
 }
 
@@ -29,14 +29,15 @@ func (p *PostgresStore) GetByHash(ctx context.Context, hash string) (*APIKey, er
 	key := &APIKey{}
 	var expiresAt sql.NullTime
 	var lastUsed sql.NullTime
+	var tenantID sql.NullString
 
 	err := p.db.QueryRowContext(ctx, `
-		SELECT id, hash, agent_address, name, created_at, last_used, expires_at, revoked
+		SELECT id, hash, agent_address, tenant_id, name, created_at, last_used, expires_at, revoked
 		FROM api_keys WHERE hash = $1
 		  AND revoked = FALSE
 		  AND (expires_at IS NULL OR expires_at > NOW())
 	`, hash).Scan(
-		&key.ID, &key.Hash, &key.AgentAddr, &key.Name,
+		&key.ID, &key.Hash, &key.AgentAddr, &tenantID, &key.Name,
 		&key.CreatedAt, &lastUsed, &expiresAt, &key.Revoked,
 	)
 	if err == sql.ErrNoRows {
@@ -46,6 +47,9 @@ func (p *PostgresStore) GetByHash(ctx context.Context, hash string) (*APIKey, er
 		return nil, err
 	}
 
+	if tenantID.Valid {
+		key.TenantID = tenantID.String
+	}
 	if expiresAt.Valid {
 		key.ExpiresAt = &expiresAt.Time
 	}
@@ -58,7 +62,7 @@ func (p *PostgresStore) GetByHash(ctx context.Context, hash string) (*APIKey, er
 // GetByAgent retrieves all API keys for an agent
 func (p *PostgresStore) GetByAgent(ctx context.Context, addr string) ([]*APIKey, error) {
 	rows, err := p.db.QueryContext(ctx, `
-		SELECT id, hash, agent_address, name, created_at, last_used, expires_at, revoked
+		SELECT id, hash, agent_address, tenant_id, name, created_at, last_used, expires_at, revoked
 		FROM api_keys WHERE agent_address = $1 ORDER BY created_at DESC
 	`, addr)
 	if err != nil {
@@ -71,14 +75,18 @@ func (p *PostgresStore) GetByAgent(ctx context.Context, addr string) ([]*APIKey,
 		key := &APIKey{}
 		var expiresAt sql.NullTime
 		var lastUsed sql.NullTime
+		var tenantID sql.NullString
 
 		if err := rows.Scan(
-			&key.ID, &key.Hash, &key.AgentAddr, &key.Name,
+			&key.ID, &key.Hash, &key.AgentAddr, &tenantID, &key.Name,
 			&key.CreatedAt, &lastUsed, &expiresAt, &key.Revoked,
 		); err != nil {
 			return nil, err
 		}
 
+		if tenantID.Valid {
+			key.TenantID = tenantID.String
+		}
 		if expiresAt.Valid {
 			key.ExpiresAt = &expiresAt.Time
 		}
@@ -93,8 +101,8 @@ func (p *PostgresStore) GetByAgent(ctx context.Context, addr string) ([]*APIKey,
 // Update updates an API key
 func (p *PostgresStore) Update(ctx context.Context, key *APIKey) error {
 	_, err := p.db.ExecContext(ctx, `
-		UPDATE api_keys SET last_used = $1, revoked = $2 WHERE id = $3
-	`, key.LastUsed, key.Revoked, key.ID)
+		UPDATE api_keys SET last_used = $1, revoked = $2, tenant_id = $3 WHERE id = $4
+	`, key.LastUsed, key.Revoked, nullString(key.TenantID), key.ID)
 	return err
 }
 
@@ -111,6 +119,7 @@ func (p *PostgresStore) Migrate(ctx context.Context) error {
 			id              VARCHAR(36) PRIMARY KEY,
 			hash            VARCHAR(64) NOT NULL UNIQUE,
 			agent_address   VARCHAR(42) NOT NULL,
+			tenant_id       TEXT,
 			name            VARCHAR(255),
 			created_at      TIMESTAMPTZ DEFAULT NOW(),
 			last_used       TIMESTAMPTZ,
@@ -121,4 +130,12 @@ func (p *PostgresStore) Migrate(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_api_keys_agent ON api_keys(agent_address);
 	`)
 	return err
+}
+
+// nullString converts an empty string to sql.NullString{Valid: false}.
+func nullString(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
 }

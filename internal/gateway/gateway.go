@@ -50,9 +50,10 @@ const (
 type Session struct {
 	ID            string    `json:"id"`
 	AgentAddr     string    `json:"agentAddr"`
-	MaxTotal      string    `json:"maxTotal"`      // Total budget held
-	MaxPerRequest string    `json:"maxPerRequest"` // Max per single proxy call
-	TotalSpent    string    `json:"totalSpent"`    // Accumulated spend
+	TenantID      string    `json:"tenantId,omitempty"` // Tenant that owns this session (empty = no tenant)
+	MaxTotal      string    `json:"maxTotal"`           // Total budget held
+	MaxPerRequest string    `json:"maxPerRequest"`      // Max per single proxy call
+	TotalSpent    string    `json:"totalSpent"`         // Accumulated spend
 	RequestCount  int       `json:"requestCount"`
 	Strategy      string    `json:"strategy"`                // cheapest, reputation, best_value
 	AllowedTypes  []string  `json:"allowedTypes,omitempty"`  // Empty = all types allowed
@@ -111,6 +112,7 @@ type ProxyResult struct {
 type RequestLog struct {
 	ID           string          `json:"id"`
 	SessionID    string          `json:"sessionId"`
+	TenantID     string          `json:"tenantId,omitempty"`
 	ServiceType  string          `json:"serviceType"`
 	AgentCalled  string          `json:"agentCalled"`
 	Amount       string          `json:"amount"`

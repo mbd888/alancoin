@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/mbd888/alancoin/internal/auth"
 	"github.com/mbd888/alancoin/internal/validation"
 )
 
@@ -136,8 +137,9 @@ func (h *Handler) CreateSession(c *gin.Context) {
 	}
 
 	agentAddr := c.GetString("authAgentAddr")
+	tenantID := auth.GetTenantID(c)
 
-	session, err := h.service.CreateSession(c.Request.Context(), agentAddr, req)
+	session, err := h.service.CreateSession(c.Request.Context(), agentAddr, tenantID, req)
 	if err != nil {
 		status := http.StatusInternalServerError
 		code := "session_failed"
@@ -317,8 +319,9 @@ func (h *Handler) SingleCall(c *gin.Context) {
 	}
 
 	agentAddr := c.GetString("authAgentAddr")
+	tenantID := auth.GetTenantID(c)
 
-	result, err := h.service.SingleCall(c.Request.Context(), agentAddr, req)
+	result, err := h.service.SingleCall(c.Request.Context(), agentAddr, tenantID, req)
 	if err != nil {
 		status := http.StatusInternalServerError
 		code := "call_failed"

@@ -29,9 +29,10 @@ var (
 // APIKey represents an API key
 type APIKey struct {
 	ID        string     `json:"id"`
-	Hash      string     `json:"-"`         // SHA256 hash of key (stored)
-	AgentAddr string     `json:"agentAddr"` // The agent this key belongs to
-	Name      string     `json:"name"`      // Friendly name
+	Hash      string     `json:"-"`                  // SHA256 hash of key (stored)
+	AgentAddr string     `json:"agentAddr"`          // The agent this key belongs to
+	TenantID  string     `json:"tenantId,omitempty"` // Tenant this key belongs to (empty = no tenant)
+	Name      string     `json:"name"`               // Friendly name
 	CreatedAt time.Time  `json:"createdAt"`
 	LastUsed  time.Time  `json:"lastUsed,omitempty"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
@@ -55,6 +56,11 @@ type Manager struct {
 // NewManager creates a new auth manager
 func NewManager(store Store) *Manager {
 	return &Manager{store: store}
+}
+
+// Store returns the underlying store (used by tenant handlers to set tenant_id on keys).
+func (m *Manager) Store() Store {
+	return m.store
 }
 
 // GenerateKey creates a new API key for an agent

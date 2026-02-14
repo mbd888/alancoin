@@ -15,6 +15,8 @@ const (
 	ContextKeyAPIKey = "apiKey"
 	// ContextKeyAgentAddr is the key for storing authenticated agent address
 	ContextKeyAgentAddr = "authAgentAddr"
+	// ContextKeyTenantID is the key for storing tenant ID from API key
+	ContextKeyTenantID = "authTenantID"
 )
 
 // Middleware extracts and validates API key from request
@@ -32,6 +34,9 @@ func Middleware(m *Manager) gin.HandlerFunc {
 			if err == nil {
 				c.Set(ContextKeyAPIKey, key)
 				c.Set(ContextKeyAgentAddr, key.AgentAddr)
+				if key.TenantID != "" {
+					c.Set(ContextKeyTenantID, key.TenantID)
+				}
 			}
 		}
 
@@ -101,6 +106,13 @@ func GetAPIKey(c *gin.Context) (*APIKey, bool) {
 		return nil, false
 	}
 	return apiKey, true
+}
+
+// GetTenantID returns the tenant ID from context (empty if no tenant).
+func GetTenantID(c *gin.Context) string {
+	v, _ := c.Get(ContextKeyTenantID)
+	s, _ := v.(string)
+	return s
 }
 
 // GetAuthenticatedAgent returns the authenticated agent's address

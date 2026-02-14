@@ -37,6 +37,7 @@ import (
 	"github.com/mbd888/alancoin/internal/sessionkeys"
 	"github.com/mbd888/alancoin/internal/streams"
 	"github.com/mbd888/alancoin/internal/supervisor"
+	"github.com/mbd888/alancoin/internal/tenant"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/validation"
 	"github.com/mbd888/alancoin/internal/webhooks"
@@ -72,6 +73,7 @@ type Server struct {
 	rateLimiter            *ratelimit.Limiter
 	baselineTimer          *supervisor.BaselineTimer
 	eventWriter            *supervisor.EventWriter
+	tenantStore            tenant.Store
 	db                     *sql.DB // nil if using in-memory
 	router                 *gin.Engine
 	httpSrv                *http.Server
@@ -233,6 +235,14 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			s.escrowService.WithReceiptIssuer(rcptAdapter)
 		}
 
+		// Tenant store (PostgreSQL)
+		tenantPgStore := tenant.NewPostgresStore(db)
+		if err := tenantPgStore.Migrate(ctx); err != nil {
+			s.logger.Warn("failed to migrate tenant store", "error", err)
+		}
+		s.tenantStore = tenantPgStore
+		s.logger.Info("tenant store enabled (postgres)")
+
 		// Reputation snapshots (PostgreSQL)
 		s.reputationStore = reputation.NewPostgresSnapshotStore(db)
 		s.logger.Info("reputation snapshots enabled (postgres)")
@@ -301,6 +311,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			s.streamService.WithReceiptIssuer(rcptAdapter)
 			s.escrowService.WithReceiptIssuer(rcptAdapter)
 		}
+
+		// Tenant store (in-memory)
+		s.tenantStore = tenant.NewMemoryStore()
+		s.logger.Info("tenant store enabled (in-memory)")
 
 		// Reputation snapshots (in-memory)
 		s.reputationStore = reputation.NewMemorySnapshotStore()
@@ -593,6 +607,23 @@ func (s *Server) setupRoutes() {
 		protectedProxy := v1.Group("")
 		protectedProxy.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
 		gatewayHandler.RegisterProxyRoute(protectedProxy)
+	}
+
+	// =========================================================================
+	// Tenant management — multi-tenancy CRUD + agent binding
+	// =========================================================================
+	if s.tenantStore != nil {
+		tenantHandler := tenant.NewHandler(s.tenantStore, s.authMgr, s.registry)
+
+		// Admin routes: create tenant (requires admin secret)
+		adminTenants := v1.Group("")
+		adminTenants.Use(auth.Middleware(s.authMgr), auth.RequireAdmin())
+		tenantHandler.RegisterAdminRoutes(adminTenants)
+
+		// Protected routes: tenant CRUD, agent binding, key management (requires API key)
+		protectedTenants := v1.Group("")
+		protectedTenants.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		tenantHandler.RegisterProtectedRoutes(protectedTenants)
 	}
 
 	// Ledger routes (agent balances)

@@ -114,7 +114,7 @@ func TestCreateSession_Success(t *testing.T) {
 	ml := newMockLedger()
 	svc := newTestService(ml, &mockRegistry{})
 
-	session, err := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	session, err := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 		Strategy:      "cheapest",
@@ -137,7 +137,7 @@ func TestCreateSession_InvalidAmount(t *testing.T) {
 	ml := newMockLedger()
 	svc := newTestService(ml, &mockRegistry{})
 
-	_, err := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	_, err := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "invalid",
 		MaxPerRequest: "1.00",
 	})
@@ -151,7 +151,7 @@ func TestCreateSession_HoldFails(t *testing.T) {
 	ml.holdErr = fmt.Errorf("insufficient balance")
 	svc := newTestService(ml, &mockRegistry{})
 
-	_, err := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	_, err := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -181,7 +181,7 @@ func TestProxy_Success(t *testing.T) {
 
 	svc := newTestServiceWithLogger(ml, reg)
 
-	session, err := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	session, err := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -220,7 +220,7 @@ func TestProxy_NoService(t *testing.T) {
 
 	svc := newTestServiceWithLogger(ml, reg)
 
-	session, _ := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -238,7 +238,7 @@ func TestProxy_SessionClosed(t *testing.T) {
 	reg := &mockRegistry{}
 	svc := newTestServiceWithLogger(ml, reg)
 
-	session, _ := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -274,7 +274,7 @@ func TestProxy_RetryOnForwardFailure(t *testing.T) {
 
 	svc := newTestServiceWithLogger(ml, reg)
 
-	session, _ := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -314,7 +314,7 @@ func TestProxy_AllowedTypes(t *testing.T) {
 	reg := &mockRegistry{}
 	svc := newTestServiceWithLogger(ml, reg)
 
-	session, _ := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 		AllowedTypes:  []string{"translation"},
@@ -332,7 +332,7 @@ func TestCloseSession_Success(t *testing.T) {
 	ml := newMockLedger()
 	svc := newTestService(ml, &mockRegistry{})
 
-	session, _ := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -350,7 +350,7 @@ func TestCloseSession_WrongOwner(t *testing.T) {
 	ml := newMockLedger()
 	svc := newTestService(ml, &mockRegistry{})
 
-	session, _ := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -365,7 +365,7 @@ func TestCloseSession_Idempotent(t *testing.T) {
 	ml := newMockLedger()
 	svc := newTestService(ml, &mockRegistry{})
 
-	session, _ := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -466,7 +466,7 @@ func TestGatewayTokenAuth(t *testing.T) {
 	svc := newTestServiceWithLogger(ml, &mockRegistry{})
 
 	// Create a session to use as token
-	session, _ := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -638,7 +638,7 @@ func TestSessionExpiry(t *testing.T) {
 		},
 	})
 
-	session, _ := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 		ExpiresInSec:  -1, // Already expired (in the past)
@@ -686,7 +686,7 @@ func TestProxy_PaymentHeadersSentToService(t *testing.T) {
 
 	svc := newTestServiceWithLogger(ml, reg)
 
-	session, err := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	session, err := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -744,7 +744,7 @@ func TestAutoCloseExpired(t *testing.T) {
 	svc := newTestServiceWithLogger(ml, &mockRegistry{})
 
 	ctx := context.Background()
-	session, err := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, err := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -774,7 +774,7 @@ func TestAutoCloseExpired_AlreadyClosed(t *testing.T) {
 	svc := newTestServiceWithLogger(ml, &mockRegistry{})
 
 	ctx := context.Background()
-	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -802,7 +802,7 @@ func TestAutoCloseExpired_ReleasesUnspent(t *testing.T) {
 	svc := newTestServiceWithLogger(ml, reg)
 
 	ctx := context.Background()
-	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "5.00",
 	})
@@ -882,7 +882,7 @@ func TestProxy_RecorderCalled(t *testing.T) {
 	svc.WithRecorder(rec)
 
 	ctx := context.Background()
-	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -925,7 +925,7 @@ func TestProxy_RecorderCalledOnForwardFailure(t *testing.T) {
 	svc.WithRecorder(rec)
 
 	ctx := context.Background()
-	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -1003,7 +1003,7 @@ func TestProxy_IdempotencyKey_ReturnsCachedResult(t *testing.T) {
 	svc := newTestServiceWithLogger(ml, reg)
 
 	ctx := context.Background()
-	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -1061,7 +1061,7 @@ func TestProxy_DifferentIdempotencyKey_ProcessesBoth(t *testing.T) {
 	svc := newTestServiceWithLogger(ml, reg)
 
 	ctx := context.Background()
-	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -1107,7 +1107,7 @@ func TestProxy_NoIdempotencyKey_ProcessesEveryTime(t *testing.T) {
 	svc := newTestServiceWithLogger(ml, reg)
 
 	ctx := context.Background()
-	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -1154,7 +1154,7 @@ func TestProxy_ConcurrentBudgetRace(t *testing.T) {
 	svc := newTestServiceWithLogger(ml, reg)
 
 	ctx := context.Background()
-	session, err := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, err := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "1.00",
 		MaxPerRequest: "0.50",
 	})
@@ -1245,7 +1245,7 @@ func TestProxy_SettlementRetry(t *testing.T) {
 	svc := newTestServiceWithLogger(ml, reg)
 
 	ctx := context.Background()
-	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -1265,7 +1265,7 @@ func TestProxy_SettlementRetry(t *testing.T) {
 	forwarder := NewForwarder(5 * time.Second)
 	svc2 := NewService(store, resolver, forwarder, customLedger, testLogger())
 
-	session2, _ := svc2.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session2, _ := svc2.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -1334,7 +1334,7 @@ func TestProxy_SettlementFailure_ReturnsResponse(t *testing.T) {
 	svc := NewService(store, resolver, forwarder, customLedger, testLogger())
 
 	ctx := context.Background()
-	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -1391,7 +1391,7 @@ func TestProxy_ConcurrentIdempotencyDedup(t *testing.T) {
 	svc := newTestServiceWithLogger(ml, reg)
 
 	ctx := context.Background()
-	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -1465,7 +1465,7 @@ func TestSingleCall_Success(t *testing.T) {
 	}
 	svc := newTestServiceWithLogger(ml, reg)
 
-	result, err := svc.SingleCall(context.Background(), "0xbuyer", SingleCallRequest{
+	result, err := svc.SingleCall(context.Background(), "0xbuyer", "", SingleCallRequest{
 		MaxPrice:    "1.00",
 		ServiceType: "translation",
 		Params:      map[string]interface{}{"text": "hello"},
@@ -1494,7 +1494,7 @@ func TestSingleCall_NoService(t *testing.T) {
 	reg := &mockRegistry{services: nil}
 	svc := newTestServiceWithLogger(ml, reg)
 
-	_, err := svc.SingleCall(context.Background(), "0xbuyer", SingleCallRequest{
+	_, err := svc.SingleCall(context.Background(), "0xbuyer", "", SingleCallRequest{
 		MaxPrice:    "1.00",
 		ServiceType: "translation",
 	})
@@ -1511,7 +1511,7 @@ func TestCreateSession_InvalidServiceType(t *testing.T) {
 	ml := newMockLedger()
 	svc := newTestService(ml, &mockRegistry{})
 
-	_, err := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	_, err := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 		AllowedTypes:  []string{"valid-type", "invalid type with spaces"},
@@ -1525,7 +1525,7 @@ func TestCreateSession_ExpiryTooShort(t *testing.T) {
 	ml := newMockLedger()
 	svc := newTestService(ml, &mockRegistry{})
 
-	_, err := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	_, err := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 		ExpiresInSec:  10, // Too short (min 60)
@@ -1539,7 +1539,7 @@ func TestCreateSession_ExpiryTooLong(t *testing.T) {
 	ml := newMockLedger()
 	svc := newTestService(ml, &mockRegistry{})
 
-	_, err := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	_, err := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 		ExpiresInSec:  100000, // Too long (max 86400)
@@ -1554,7 +1554,7 @@ func TestProxy_InvalidServiceType(t *testing.T) {
 	reg := &mockRegistry{}
 	svc := newTestServiceWithLogger(ml, reg)
 
-	session, _ := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -1583,7 +1583,7 @@ func TestProxy_BudgetLow(t *testing.T) {
 	}
 	svc := newTestServiceWithLogger(ml, reg)
 
-	session, _ := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "1.00",
 		MaxPerRequest: "1.00",
 		WarnAtPercent: 20, // Warn when < 20% remaining
@@ -1658,7 +1658,7 @@ func TestProxy_PolicyDenied(t *testing.T) {
 	svc.WithPolicyEvaluator(policy)
 
 	ctx := context.Background()
-	session, err := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, err := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -1704,7 +1704,7 @@ func TestProxy_PolicyAllowed(t *testing.T) {
 	svc.WithPolicyEvaluator(policy)
 
 	ctx := context.Background()
-	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -1739,7 +1739,7 @@ func TestCreateSession_PolicyDenied(t *testing.T) {
 	}
 	svc.WithPolicyEvaluator(policy)
 
-	_, err := svc.CreateSession(context.Background(), "0xbuyer", CreateSessionRequest{
+	_, err := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -1783,7 +1783,7 @@ func TestProxy_PolicyDeniedLogsDecision(t *testing.T) {
 	svc.WithPolicyEvaluator(policy)
 
 	ctx := context.Background()
-	session, err := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, err := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
@@ -1834,7 +1834,7 @@ func TestProxy_NilPolicyEvaluator(t *testing.T) {
 	svc := newTestServiceWithLogger(ml, reg)
 
 	ctx := context.Background()
-	session, _ := svc.CreateSession(ctx, "0xbuyer", CreateSessionRequest{
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
 		MaxTotal:      "10.00",
 		MaxPerRequest: "1.00",
 	})
