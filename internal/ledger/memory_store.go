@@ -563,6 +563,82 @@ func (m *MemoryStore) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amo
 	return nil
 }
 
+func (m *MemoryStore) SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	buyerBal, ok := m.balances[buyerAddr]
+	if !ok {
+		return ErrAgentNotFound
+	}
+
+	sellerAmt, _ := usdc.Parse(sellerAmount)
+	feeAmt, _ := usdc.Parse(feeAmount)
+	total := new(big.Int).Add(sellerAmt, feeAmt)
+
+	pend, _ := usdc.Parse(buyerBal.Pending)
+	totalOut, _ := usdc.Parse(buyerBal.TotalOut)
+
+	if pend.Cmp(total) < 0 {
+		return ErrInsufficientBalance
+	}
+
+	pend.Sub(pend, total)
+	totalOut.Add(totalOut, total)
+	buyerBal.Pending = usdc.Format(pend)
+	buyerBal.TotalOut = usdc.Format(totalOut)
+	buyerBal.UpdatedAt = time.Now()
+
+	// Credit seller
+	sellerBal, ok := m.balances[sellerAddr]
+	if !ok {
+		sellerBal = &Balance{
+			AgentAddr: sellerAddr, Available: "0", Pending: "0", Escrowed: "0",
+			CreditLimit: "0", CreditUsed: "0", TotalIn: "0", TotalOut: "0",
+		}
+		m.balances[sellerAddr] = sellerBal
+	}
+	sellerAvail, _ := usdc.Parse(sellerBal.Available)
+	sellerTotalIn, _ := usdc.Parse(sellerBal.TotalIn)
+	sellerAvail.Add(sellerAvail, sellerAmt)
+	sellerTotalIn.Add(sellerTotalIn, sellerAmt)
+	sellerBal.Available = usdc.Format(sellerAvail)
+	sellerBal.TotalIn = usdc.Format(sellerTotalIn)
+	sellerBal.UpdatedAt = time.Now()
+
+	// Credit platform (if fee > 0)
+	if feeAmt.Sign() > 0 {
+		platBal, ok := m.balances[platformAddr]
+		if !ok {
+			platBal = &Balance{
+				AgentAddr: platformAddr, Available: "0", Pending: "0", Escrowed: "0",
+				CreditLimit: "0", CreditUsed: "0", TotalIn: "0", TotalOut: "0",
+			}
+			m.balances[platformAddr] = platBal
+		}
+		platAvail, _ := usdc.Parse(platBal.Available)
+		platTotalIn, _ := usdc.Parse(platBal.TotalIn)
+		platAvail.Add(platAvail, feeAmt)
+		platTotalIn.Add(platTotalIn, feeAmt)
+		platBal.Available = usdc.Format(platAvail)
+		platBal.TotalIn = usdc.Format(platTotalIn)
+		platBal.UpdatedAt = time.Now()
+	}
+
+	now := time.Now()
+	m.entries = append(m.entries,
+		&Entry{ID: idgen.WithPrefix("entry_"), AgentAddr: buyerAddr, Type: "spend", Amount: usdc.Format(total), Reference: reference, Description: "settle_hold", CreatedAt: now},
+		&Entry{ID: idgen.WithPrefix("entry_"), AgentAddr: sellerAddr, Type: "deposit", Amount: sellerAmount, Reference: reference, Description: "settle_hold_receive", CreatedAt: now},
+	)
+	if feeAmt.Sign() > 0 {
+		m.entries = append(m.entries,
+			&Entry{ID: idgen.WithPrefix("entry_"), AgentAddr: platformAddr, Type: "deposit", Amount: feeAmount, Reference: reference, Description: "platform_fee", CreatedAt: now},
+		)
+	}
+
+	return nil
+}
+
 func (m *MemoryStore) PartialEscrowSettle(ctx context.Context, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

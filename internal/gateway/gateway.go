@@ -116,7 +116,8 @@ type RequestLog struct {
 	ServiceType  string          `json:"serviceType"`
 	AgentCalled  string          `json:"agentCalled"`
 	Amount       string          `json:"amount"`
-	Status       string          `json:"status"` // "success", "forward_failed", "no_service", "policy_denied"
+	FeeAmount    string          `json:"feeAmount,omitempty"` // platform fee deducted (basis-point take rate)
+	Status       string          `json:"status"`              // "success", "forward_failed", "no_service", "policy_denied"
 	LatencyMs    int64           `json:"latencyMs"`
 	Error        string          `json:"error,omitempty"`
 	PolicyResult *PolicyDecision `json:"policyResult,omitempty"`
@@ -137,7 +138,13 @@ type CreateSessionRequest struct {
 type LedgerService interface {
 	Hold(ctx context.Context, agentAddr, amount, reference string) error
 	SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error
+	SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error
 	ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error
+}
+
+// TenantSettingsProvider looks up a tenant's take rate.
+type TenantSettingsProvider interface {
+	GetTakeRateBPS(ctx context.Context, tenantID string) (int, error)
 }
 
 // RegistryProvider abstracts service discovery.

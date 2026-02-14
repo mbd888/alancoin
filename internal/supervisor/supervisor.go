@@ -225,6 +225,24 @@ func (s *Supervisor) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amou
 	return nil
 }
 
+func (s *Supervisor) SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error {
+	if err := s.inner.SettleHoldWithFee(ctx, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference); err != nil {
+		return err
+	}
+	// Track the seller payment for spend graph + baseline learning.
+	// Fee goes to platform — no spend-graph edge needed for that.
+	s.recordEdge(buyerAddr, sellerAddr, sellerAmount)
+	totalBig, ok1 := usdc.Parse(sellerAmount)
+	feeBig, ok2 := usdc.Parse(feeAmount)
+	if ok1 && ok2 {
+		totalBig.Add(totalBig, feeBig)
+		s.persistSpend(buyerAddr, sellerAddr, usdc.Format(totalBig))
+	} else {
+		s.persistSpend(buyerAddr, sellerAddr, sellerAmount)
+	}
+	return nil
+}
+
 func (s *Supervisor) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error {
 	if err := s.inner.ReleaseEscrow(ctx, buyerAddr, sellerAddr, amount, reference); err != nil {
 		return err

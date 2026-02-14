@@ -60,6 +60,10 @@ func (m *mockLedgerService) SettleHold(_ context.Context, _, _, _, _ string) err
 	m.record("SettleHold")
 	return m.err
 }
+func (m *mockLedgerService) SettleHoldWithFee(_ context.Context, _, _, _, _, _, _ string) error {
+	m.record("SettleHoldWithFee")
+	return m.err
+}
 func (m *mockLedgerService) EscrowLock(_ context.Context, _, _, _ string) error {
 	m.record("EscrowLock")
 	return m.err

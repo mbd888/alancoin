@@ -226,6 +226,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
 		s.gatewayService.WithPolicyEvaluator(&gatewayPolicyAdapter{policyStore})
+		s.gatewayService.WithPlatformAddress(cfg.PlatformAddress)
 
 		// Wire receipt issuer into all payment paths
 		if s.receiptService != nil {
@@ -242,6 +243,9 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		}
 		s.tenantStore = tenantPgStore
 		s.logger.Info("tenant store enabled (postgres)")
+
+		// Wire tenant settings into gateway for fee computation
+		s.gatewayService.WithTenantSettings(&gatewayTenantSettingsAdapter{s.tenantStore})
 
 		// Reputation snapshots (PostgreSQL)
 		s.reputationStore = reputation.NewPostgresSnapshotStore(db)
@@ -303,6 +307,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
 		s.gatewayService.WithPolicyEvaluator(&gatewayPolicyAdapter{policyStore})
+		s.gatewayService.WithPlatformAddress(cfg.PlatformAddress)
 
 		// Wire receipt issuer into all payment paths
 		if s.receiptService != nil {
@@ -315,6 +320,9 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		// Tenant store (in-memory)
 		s.tenantStore = tenant.NewMemoryStore()
 		s.logger.Info("tenant store enabled (in-memory)")
+
+		// Wire tenant settings into gateway for fee computation
+		s.gatewayService.WithTenantSettings(&gatewayTenantSettingsAdapter{s.tenantStore})
 
 		// Reputation snapshots (in-memory)
 		s.reputationStore = reputation.NewMemorySnapshotStore()
@@ -1425,8 +1433,25 @@ func (a *gatewayLedgerAdapter) SettleHold(ctx context.Context, buyerAddr, seller
 	return a.l.SettleHold(ctx, buyerAddr, sellerAddr, amount, reference)
 }
 
+func (a *gatewayLedgerAdapter) SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error {
+	return a.l.SettleHoldWithFee(ctx, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference)
+}
+
 func (a *gatewayLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
 	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
+}
+
+// gatewayTenantSettingsAdapter adapts tenant.Store to gateway.TenantSettingsProvider
+type gatewayTenantSettingsAdapter struct {
+	store tenant.Store
+}
+
+func (a *gatewayTenantSettingsAdapter) GetTakeRateBPS(ctx context.Context, tenantID string) (int, error) {
+	t, err := a.store.Get(ctx, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	return t.Settings.TakeRateBPS, nil
 }
 
 // gatewayPolicyAdapter adapts sessionkeys.PolicyStore to gateway.PolicyEvaluator.

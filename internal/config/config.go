@@ -42,6 +42,9 @@ type Config struct {
 	ReputationHMACSecret string // HMAC secret for signing reputation responses (optional)
 	AdminSecret          string // Admin API secret
 
+	// Platform fee
+	PlatformAddress string // Ledger address for collecting basis-point fees (from PLATFORM_ADDRESS env var)
+
 	// Receipt signing
 	ReceiptHMACSecret string // HMAC secret for signing payment receipts (optional)
 
@@ -118,6 +121,7 @@ func Load() (*Config, error) {
 			}
 			return int(rpm)
 		}(),
+		PlatformAddress:      getEnv("PLATFORM_ADDRESS", "0x0000000000000000000000000000000000000001"),
 		ReputationHMACSecret: os.Getenv("REPUTATION_HMAC_SECRET"),
 		AdminSecret:          os.Getenv("ADMIN_SECRET"),
 		ReceiptHMACSecret:    os.Getenv("RECEIPT_HMAC_SECRET"),

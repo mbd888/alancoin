@@ -6,7 +6,7 @@ type PlanConfig struct {
 	RateLimitRPM     int
 	MaxAgents        int    // 0 = unlimited
 	MaxSessionBudget string // "0" = unlimited
-	IncludedUSDC     string
+	TakeRateBPS      int    // basis-point fee on each settled hold (0 = free)
 }
 
 // Plans is the hardcoded plan catalogue.
@@ -16,28 +16,28 @@ var Plans = map[Plan]PlanConfig{
 		RateLimitRPM:     60,
 		MaxAgents:        3,
 		MaxSessionBudget: "10.000000",
-		IncludedUSDC:     "0.000000",
+		TakeRateBPS:      0,
 	},
 	PlanStarter: {
 		Plan:             PlanStarter,
 		RateLimitRPM:     300,
 		MaxAgents:        10,
 		MaxSessionBudget: "100.000000",
-		IncludedUSDC:     "100.000000",
+		TakeRateBPS:      50,
 	},
 	PlanGrowth: {
 		Plan:             PlanGrowth,
 		RateLimitRPM:     1000,
 		MaxAgents:        50,
 		MaxSessionBudget: "1000.000000",
-		IncludedUSDC:     "1000.000000",
+		TakeRateBPS:      35,
 	},
 	PlanEnterprise: {
 		Plan:             PlanEnterprise,
 		RateLimitRPM:     5000,
 		MaxAgents:        0,
 		MaxSessionBudget: "0",
-		IncludedUSDC:     "10000.000000",
+		TakeRateBPS:      25,
 	},
 }
 
@@ -51,6 +51,7 @@ func DefaultSettingsForPlan(p Plan) Settings {
 		RateLimitRPM:     cfg.RateLimitRPM,
 		MaxAgents:        cfg.MaxAgents,
 		MaxSessionBudget: cfg.MaxSessionBudget,
+		TakeRateBPS:      cfg.TakeRateBPS,
 	}
 }
 

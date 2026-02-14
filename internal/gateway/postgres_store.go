@@ -150,13 +150,13 @@ func (p *PostgresStore) CreateLog(ctx context.Context, log *RequestLog) error {
 	_, err := p.db.ExecContext(ctx, `
 		INSERT INTO gateway_request_logs (
 			id, session_id, tenant_id, service_type, agent_called, amount,
-			status, latency_ms, error, policy_result, created_at
+			fee_amount, status, latency_ms, error, policy_result, created_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6::NUMERIC(20,6),
-			$7, $8, $9, $10, $11
+			$7::NUMERIC(20,6), $8, $9, $10, $11, $12
 		)`,
 		log.ID, log.SessionID, nullString(log.TenantID), log.ServiceType, log.AgentCalled, log.Amount,
-		log.Status, log.LatencyMs, log.Error, policyJSON, log.CreatedAt,
+		feeOrZero(log.FeeAmount), log.Status, log.LatencyMs, log.Error, policyJSON, log.CreatedAt,
 	)
 	return err
 }
@@ -164,7 +164,7 @@ func (p *PostgresStore) CreateLog(ctx context.Context, log *RequestLog) error {
 func (p *PostgresStore) ListLogs(ctx context.Context, sessionID string, limit int) ([]*RequestLog, error) {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT id, session_id, tenant_id, service_type, agent_called, amount,
-		       status, latency_ms, error, policy_result, created_at
+		       fee_amount, status, latency_ms, error, policy_result, created_at
 		FROM gateway_request_logs
 		WHERE session_id = $1
 		ORDER BY created_at DESC
@@ -235,12 +235,13 @@ func scanLog(sc sessionScanner) (*RequestLog, error) {
 	l := &RequestLog{}
 	var (
 		tenantID   sql.NullString
+		feeAmount  sql.NullString
 		policyJSON []byte
 	)
 
 	err := sc.Scan(
 		&l.ID, &l.SessionID, &tenantID, &l.ServiceType, &l.AgentCalled, &l.Amount,
-		&l.Status, &l.LatencyMs, &l.Error, &policyJSON, &l.CreatedAt,
+		&feeAmount, &l.Status, &l.LatencyMs, &l.Error, &policyJSON, &l.CreatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -248,6 +249,9 @@ func scanLog(sc sessionScanner) (*RequestLog, error) {
 
 	if tenantID.Valid {
 		l.TenantID = tenantID.String
+	}
+	if feeAmount.Valid {
+		l.FeeAmount = feeAmount.String
 	}
 	if len(policyJSON) > 0 {
 		l.PolicyResult = &PolicyDecision{}
@@ -264,6 +268,14 @@ func nullString(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+// feeOrZero returns "0" for empty fee amounts to satisfy NUMERIC casting.
+func feeOrZero(s string) string {
+	if s == "" {
+		return "0"
+	}
+	return s
 }
 
 // Compile-time assertion.

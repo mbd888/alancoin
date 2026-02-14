@@ -459,6 +459,9 @@ func (m *reconcileMockLedger) Hold(ctx context.Context, agentAddr, amount, refer
 func (m *reconcileMockLedger) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error {
 	return nil
 }
+func (m *reconcileMockLedger) SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error {
+	return nil
+}
 func (m *reconcileMockLedger) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
 	m.released = append(m.released, reconcileReleaseCall{agentAddr, amount, reference})
 	return nil

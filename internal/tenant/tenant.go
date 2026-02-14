@@ -38,6 +38,7 @@ type Settings struct {
 	MaxAgents        int      `json:"maxAgents"`
 	MaxSessionBudget string   `json:"maxSessionBudget"`
 	AllowedOrigins   []string `json:"allowedOrigins,omitempty"`
+	TakeRateBPS      int      `json:"takeRateBps"` // basis-point fee on settlement (0 = no fee)
 }
 
 // Tenant represents an organisation using the platform.

@@ -167,6 +167,8 @@ type Service struct {
 	recorder        TransactionRecorder
 	receiptIssuer   ReceiptIssuer
 	policyEvaluator PolicyEvaluator
+	tenantSettings  TenantSettingsProvider
+	platformAddr    string // ledger address collecting platform fees
 	logger          *slog.Logger
 	locks           syncutil.ShardedMutex
 	idemCache       *idempotencyCache
@@ -209,6 +211,18 @@ func (s *Service) WithReceiptIssuer(r ReceiptIssuer) *Service {
 // WithPolicyEvaluator adds a policy evaluator for spending constraints.
 func (s *Service) WithPolicyEvaluator(p PolicyEvaluator) *Service {
 	s.policyEvaluator = p
+	return s
+}
+
+// WithTenantSettings adds a tenant settings provider for fee computation.
+func (s *Service) WithTenantSettings(ts TenantSettingsProvider) *Service {
+	s.tenantSettings = ts
+	return s
+}
+
+// WithPlatformAddress sets the ledger address that collects platform fees.
+func (s *Service) WithPlatformAddress(addr string) *Service {
+	s.platformAddr = strings.ToLower(addr)
 	return s
 }
 
@@ -563,10 +577,17 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		// Update reference with authoritative request count.
 		ref = fmt.Sprintf("%s:req:%d:%s", session.ID, session.RequestCount+1, candidate.ServiceID)
 
+		// Compute platform fee based on tenant's take rate.
+		sellerAmountStr, feeAmountStr := s.computeFee(ctx, session.TenantID, priceBig)
+
 		// Settle payment with retry (handles transient DB errors).
 		var settleErr error
 		for attempt := 0; attempt < 3; attempt++ {
-			settleErr = s.ledger.SettleHold(ctx, agentAddr, candidate.AgentAddress, candidate.Price, ref)
+			if feeAmountStr != "0.000000" && s.platformAddr != "" {
+				settleErr = s.ledger.SettleHoldWithFee(ctx, agentAddr, candidate.AgentAddress, sellerAmountStr, s.platformAddr, feeAmountStr, ref)
+			} else {
+				settleErr = s.ledger.SettleHold(ctx, agentAddr, candidate.AgentAddress, candidate.Price, ref)
+			}
 			if settleErr == nil {
 				break
 			}
@@ -634,7 +655,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		unlock() // Done with state — release lock
 
 		// Fire-and-forget: logging, reputation, receipts (no lock needed)
-		s.logRequest(ctx, sessionIDCopy, req.ServiceType, candidate.AgentAddress, priceStr, "success", fwdResp.LatencyMs, "")
+		s.logRequestFull(ctx, sessionIDCopy, req.ServiceType, candidate.AgentAddress, priceStr, feeAmountStr, "success", fwdResp.LatencyMs, "", nil)
 
 		if s.recorder != nil {
 			_ = s.recorder.RecordTransaction(ctx, ref, agentAddr,
@@ -847,19 +868,53 @@ func (s *Service) ListLogs(ctx context.Context, sessionID string, limit int) ([]
 	return s.store.ListLogs(ctx, sessionID, limit)
 }
 
+// computeFee calculates the platform fee for a given price and tenant.
+// Returns the fee amount as a USDC string and the seller amount (price - fee).
+// If there's no tenant, no settings provider, or bps is 0, fee is "0.000000".
+func (s *Service) computeFee(ctx context.Context, tenantID string, priceBig *big.Int) (sellerAmount, feeAmount string) {
+	zero := "0.000000"
+	priceStr := usdc.Format(priceBig)
+
+	if tenantID == "" || s.tenantSettings == nil || s.platformAddr == "" {
+		return priceStr, zero
+	}
+
+	bps, err := s.tenantSettings.GetTakeRateBPS(ctx, tenantID)
+	if err != nil || bps <= 0 {
+		return priceStr, zero
+	}
+
+	// fee = price * bps / 10000
+	feeBig := new(big.Int).Mul(priceBig, big.NewInt(int64(bps)))
+	feeBig.Div(feeBig, big.NewInt(10000))
+
+	if feeBig.Sign() <= 0 {
+		return priceStr, zero
+	}
+
+	sellerBig := new(big.Int).Sub(priceBig, feeBig)
+	return usdc.Format(sellerBig), usdc.Format(feeBig)
+}
+
 // logRequest creates a request log entry.
 func (s *Service) logRequest(ctx context.Context, sessionID, serviceType, agentCalled, amount, status string, latencyMs int64, errMsg string) {
-	s.logRequestWithPolicy(ctx, sessionID, serviceType, agentCalled, amount, status, latencyMs, errMsg, nil)
+	s.logRequestFull(ctx, sessionID, serviceType, agentCalled, amount, "", status, latencyMs, errMsg, nil)
 }
 
 // logRequestWithPolicy creates a request log entry with an optional policy decision.
 func (s *Service) logRequestWithPolicy(ctx context.Context, sessionID, serviceType, agentCalled, amount, status string, latencyMs int64, errMsg string, policy *PolicyDecision) {
+	s.logRequestFull(ctx, sessionID, serviceType, agentCalled, amount, "", status, latencyMs, errMsg, policy)
+}
+
+// logRequestFull creates a request log entry with all fields.
+func (s *Service) logRequestFull(ctx context.Context, sessionID, serviceType, agentCalled, amount, feeAmount, status string, latencyMs int64, errMsg string, policy *PolicyDecision) {
 	log := &RequestLog{
 		ID:           idgen.WithPrefix("gwlog_"),
 		SessionID:    sessionID,
 		ServiceType:  serviceType,
 		AgentCalled:  agentCalled,
 		Amount:       amount,
+		FeeAmount:    feeAmount,
 		Status:       status,
 		LatencyMs:    latencyMs,
 		Error:        errMsg,

@@ -49,6 +49,14 @@ func (m *mockLedger) SettleHold(_ context.Context, buyerAddr, sellerAddr, amount
 	return nil
 }
 
+func (m *mockLedger) SettleHoldWithFee(_ context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error {
+	if m.settleErr != nil {
+		return m.settleErr
+	}
+	m.settlements[reference] = sellerAmount
+	return nil
+}
+
 func (m *mockLedger) ReleaseHold(_ context.Context, agentAddr, amount, reference string) error {
 	if m.releaseErr != nil {
 		return m.releaseErr
@@ -1304,6 +1312,14 @@ func (r *retryMockLedger) SettleHold(ctx context.Context, buyerAddr, sellerAddr,
 		return fmt.Errorf("transient DB error (attempt %d)", *r.attemptCount)
 	}
 	return r.mockLedger.SettleHold(ctx, buyerAddr, sellerAddr, amount, reference)
+}
+
+func (r *retryMockLedger) SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error {
+	*r.attemptCount++
+	if *r.attemptCount <= r.failCount {
+		return fmt.Errorf("transient DB error (attempt %d)", *r.attemptCount)
+	}
+	return r.mockLedger.SettleHoldWithFee(ctx, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference)
 }
 
 // TestProxy_SettlementFailure_ReturnsResponse verifies that when settlement

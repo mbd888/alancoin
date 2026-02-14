@@ -74,6 +74,7 @@ type Service interface {
 	ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error
 	ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error
 	SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error
+	SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error
 	EscrowLock(ctx context.Context, agentAddr, amount, reference string) error
 	ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error
 	RefundEscrow(ctx context.Context, agentAddr, amount, reference string) error
@@ -137,6 +138,12 @@ type Store interface {
 	// seller available += amount, seller total_in += amount.
 	// Does NOT touch credit_draw_hold entries — credit tracking stays for ReleaseHold.
 	SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error
+
+	// SettleHoldWithFee atomically splits a hold three ways:
+	// buyer pending -= (sellerAmount + feeAmount),
+	// seller available += sellerAmount, platform available += feeAmount.
+	// All three movements share the same reference.
+	SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error
 
 	// PartialEscrowSettle atomically splits escrowed funds between seller and buyer.
 	// Single transaction: buyer escrowed -= (release+refund), buyer total_out += release,
@@ -508,6 +515,49 @@ func (l *Ledger) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, 
 
 	buyerAfter, _ := l.store.GetBalance(ctx, buyer)
 	l.logAudit(ctx, buyer, "settle_hold", amount, reference, buyerBefore, buyerAfter)
+	return nil
+}
+
+// SettleHoldWithFee atomically splits a hold three ways: buyer → seller + platform fee.
+func (l *Ledger) SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error {
+	ctx, span := traces.StartSpan(ctx, "ledger.SettleHoldWithFee",
+		attribute.String("buyer.addr", buyerAddr), attribute.String("seller.addr", sellerAddr),
+		attribute.String("seller_amount", sellerAmount), attribute.String("fee_amount", feeAmount),
+		traces.Reference(reference))
+	defer span.End()
+
+	sellerBig, ok1 := usdc.Parse(sellerAmount)
+	feeBig, ok2 := usdc.Parse(feeAmount)
+	if !ok1 || !ok2 || sellerBig.Sign() <= 0 {
+		span.SetStatus(codes.Error, "invalid amount")
+		return ErrInvalidAmount
+	}
+	totalBig := new(big.Int).Add(sellerBig, feeBig)
+	if totalBig.Sign() <= 0 {
+		span.SetStatus(codes.Error, "invalid amount")
+		return ErrInvalidAmount
+	}
+
+	buyer := strings.ToLower(buyerAddr)
+	seller := strings.ToLower(sellerAddr)
+	platform := strings.ToLower(platformAddr)
+	done := observeOp("settle_hold_with_fee")
+	defer done()
+
+	buyerBefore, _ := l.store.GetBalance(ctx, buyer)
+
+	if err := l.store.SettleHoldWithFee(ctx, buyer, seller, sellerAmount, platform, feeAmount, reference); err != nil {
+		return err
+	}
+
+	l.appendEvent(ctx, buyer, "settle_hold_out", usdc.Format(totalBig), reference, seller)
+	l.appendEvent(ctx, seller, "settle_hold_in", sellerAmount, reference, buyer)
+	if feeBig.Sign() > 0 {
+		l.appendEvent(ctx, platform, "fee_in", feeAmount, reference, buyer)
+	}
+
+	buyerAfter, _ := l.store.GetBalance(ctx, buyer)
+	l.logAudit(ctx, buyer, "settle_hold_with_fee", usdc.Format(totalBig), reference, buyerBefore, buyerAfter)
 	return nil
 }
 

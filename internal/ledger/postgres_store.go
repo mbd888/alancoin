@@ -616,6 +616,101 @@ func (p *PostgresStore) SettleHold(ctx context.Context, buyerAddr, sellerAddr, a
 	return tx.Commit()
 }
 
+// SettleHoldWithFee atomically splits a hold three ways: buyer → seller + platform fee.
+func (p *PostgresStore) SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error {
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Total = sellerAmount + feeAmount (computed in SQL for precision)
+	totalAmount := fmt.Sprintf("(%s::NUMERIC(20,6) + %s::NUMERIC(20,6))", sellerAmount, feeAmount)
+	_ = totalAmount // used inline below
+
+	// Debit buyer's pending by total (seller + fee), increment total_out
+	result, err := tx.ExecContext(ctx, `
+		UPDATE agent_balances SET
+			pending    = pending   - ($2::NUMERIC(20,6) + $3::NUMERIC(20,6)),
+			total_out  = total_out + ($2::NUMERIC(20,6) + $3::NUMERIC(20,6)),
+			updated_at = NOW()
+		WHERE agent_address = $1
+		  AND pending >= ($2::NUMERIC(20,6) + $3::NUMERIC(20,6))
+	`, buyerAddr, sellerAmount, feeAmount)
+	if err != nil {
+		return fmt.Errorf("failed to debit buyer pending: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if rows == 0 {
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, buyerAddr).Scan(&exists)
+		if !exists {
+			return ErrAgentNotFound
+		}
+		return ErrInsufficientBalance
+	}
+
+	// Credit seller's available (upsert)
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO agent_balances (agent_address, available, total_in, updated_at)
+		VALUES ($1, $2::NUMERIC(20,6), $2::NUMERIC(20,6), NOW())
+		ON CONFLICT (agent_address) DO UPDATE SET
+			available  = agent_balances.available + $2::NUMERIC(20,6),
+			total_in   = agent_balances.total_in  + $2::NUMERIC(20,6),
+			updated_at = NOW()
+	`, sellerAddr, sellerAmount)
+	if err != nil {
+		return fmt.Errorf("failed to credit seller: %w", err)
+	}
+
+	// Credit platform's available (upsert) — only if fee > 0
+	if feeAmount != "0" && feeAmount != "0.000000" {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO agent_balances (agent_address, available, total_in, updated_at)
+			VALUES ($1, $2::NUMERIC(20,6), $2::NUMERIC(20,6), NOW())
+			ON CONFLICT (agent_address) DO UPDATE SET
+				available  = agent_balances.available + $2::NUMERIC(20,6),
+				total_in   = agent_balances.total_in  + $2::NUMERIC(20,6),
+				updated_at = NOW()
+		`, platformAddr, feeAmount)
+		if err != nil {
+			return fmt.Errorf("failed to credit platform: %w", err)
+		}
+	}
+
+	// Record entries for all parties
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
+		VALUES ($1, $2, 'spend', ($3::NUMERIC(20,6) + $4::NUMERIC(20,6)), $5, 'settle_hold', NOW())
+	`, idgen.New(), buyerAddr, sellerAmount, feeAmount, reference)
+	if err != nil {
+		return fmt.Errorf("failed to record buyer entry: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
+		VALUES ($1, $2, 'deposit', $3::NUMERIC(20,6), $4, 'settle_hold_receive', NOW())
+	`, idgen.New(), sellerAddr, sellerAmount, reference)
+	if err != nil {
+		return fmt.Errorf("failed to record seller entry: %w", err)
+	}
+
+	if feeAmount != "0" && feeAmount != "0.000000" {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO ledger_entries (id, agent_address, type, amount, reference, description, created_at)
+			VALUES ($1, $2, 'deposit', $3::NUMERIC(20,6), $4, 'platform_fee', NOW())
+		`, idgen.New(), platformAddr, feeAmount, reference)
+		if err != nil {
+			return fmt.Errorf("failed to record platform fee entry: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}
+
 // EscrowLock moves funds from available to escrowed.
 func (p *PostgresStore) EscrowLock(ctx context.Context, agentAddr, amount, reference string) error {
 	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
