@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -145,6 +146,43 @@ func (m *MemoryStore) ListLogs(_ context.Context, sessionID string, limit int) (
 		result[i] = &cp
 	}
 	return result, nil
+}
+
+func (m *MemoryStore) GetBillingSummary(_ context.Context, tenantID string) (*BillingSummaryRow, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	row := &BillingSummaryRow{SettledVolume: "0", FeesCollected: "0"}
+	for _, logs := range m.logs {
+		for _, l := range logs {
+			if l.TenantID != tenantID {
+				continue
+			}
+			row.TotalRequests++
+			if l.Status == "success" {
+				row.SettledRequests++
+				// Simple string-to-float addition is fine for in-memory demo.
+				row.SettledVolume = addDecimalStrings(row.SettledVolume, l.Amount)
+				row.FeesCollected = addDecimalStrings(row.FeesCollected, l.FeeAmount)
+			}
+		}
+	}
+	return row, nil
+}
+
+// addDecimalStrings adds two USDC decimal strings for in-memory billing aggregation.
+func addDecimalStrings(a, b string) string {
+	fa, fb := parseDecimal(a), parseDecimal(b)
+	return fmt.Sprintf("%.6f", fa+fb)
+}
+
+func parseDecimal(s string) float64 {
+	if s == "" {
+		return 0
+	}
+	var f float64
+	_, _ = fmt.Sscanf(s, "%f", &f)
+	return f
 }
 
 // Compile-time assertion.

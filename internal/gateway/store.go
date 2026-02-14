@@ -16,4 +16,6 @@ type Store interface {
 
 	CreateLog(ctx context.Context, log *RequestLog) error
 	ListLogs(ctx context.Context, sessionID string, limit int) ([]*RequestLog, error)
+
+	GetBillingSummary(ctx context.Context, tenantID string) (*BillingSummaryRow, error)
 }

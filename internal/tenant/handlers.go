@@ -1,6 +1,7 @@
 package tenant
 
 import (
+	"context"
 	"net/http"
 	"regexp"
 	"strings"
@@ -15,16 +16,37 @@ import (
 
 var validSlug = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$`)
 
+// BillingProvider returns aggregated billing data for a tenant.
+type BillingProvider interface {
+	GetBillingSummary(ctx context.Context, tenantID string) (*BillingSummary, error)
+}
+
+// BillingSummary is the response payload for the billing endpoint.
+type BillingSummary struct {
+	TotalRequests   int64  `json:"totalRequests"`
+	SettledRequests int64  `json:"settledRequests"`
+	SettledVolume   string `json:"settledVolume"`
+	FeesCollected   string `json:"feesCollected"`
+	TakeRateBPS     int    `json:"takeRateBps"`
+	Plan            string `json:"plan"`
+}
+
 // Handler provides HTTP endpoints for tenant management.
 type Handler struct {
 	store    Store
 	authMgr  *auth.Manager
 	registry registry.Store
+	billing  BillingProvider
 }
 
 // NewHandler creates a new tenant handler.
 func NewHandler(store Store, authMgr *auth.Manager, reg registry.Store) *Handler {
 	return &Handler{store: store, authMgr: authMgr, registry: reg}
+}
+
+// WithBilling sets the billing data provider.
+func (h *Handler) WithBilling(bp BillingProvider) {
+	h.billing = bp
 }
 
 // RegisterAdminRoutes sets up the admin-only tenant creation route.
@@ -42,6 +64,7 @@ func (h *Handler) RegisterProtectedRoutes(r *gin.RouterGroup) {
 	r.POST("/tenants/:id/keys", h.CreateKey)
 	r.GET("/tenants/:id/keys", h.ListKeys)
 	r.DELETE("/tenants/:id/keys/:keyId", h.RevokeKey)
+	r.GET("/tenants/:id/billing", h.GetBilling)
 }
 
 // ---------- Admin endpoints ----------
@@ -402,6 +425,42 @@ func (h *Handler) RevokeKey(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusNotFound, gin.H{"error": "key_not_found", "message": "key not found in this tenant"})
+}
+
+// ---------- Billing ----------
+
+// GetBilling handles GET /v1/tenants/:id/billing
+func (h *Handler) GetBilling(c *gin.Context) {
+	tenantID := c.Param("id")
+	if !h.requireTenantOwnership(c, tenantID) {
+		return
+	}
+
+	if h.billing == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "not_implemented", "message": "billing not configured"})
+		return
+	}
+
+	t, err := h.store.Get(c.Request.Context(), tenantID)
+	if err != nil {
+		if err == ErrTenantNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "tenant not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		return
+	}
+
+	summary, err := h.billing.GetBillingSummary(c.Request.Context(), tenantID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "failed to fetch billing summary"})
+		return
+	}
+
+	summary.TakeRateBPS = t.Settings.TakeRateBPS
+	summary.Plan = string(t.Plan)
+
+	c.JSON(http.StatusOK, gin.H{"billing": summary})
 }
 
 // ---------- helpers ----------

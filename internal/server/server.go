@@ -74,7 +74,8 @@ type Server struct {
 	baselineTimer          *supervisor.BaselineTimer
 	eventWriter            *supervisor.EventWriter
 	tenantStore            tenant.Store
-	db                     *sql.DB // nil if using in-memory
+	gatewayStore           gateway.Store // for billing aggregation
+	db                     *sql.DB       // nil if using in-memory
 	router                 *gin.Engine
 	httpSrv                *http.Server
 	logger                 *slog.Logger
@@ -217,6 +218,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		gwResolver := gateway.NewResolver(&gatewayRegistryAdapter{s.registry})
 		gwForwarder := gateway.NewForwarder(0)
 		gwLedger := &gatewayLedgerAdapter{s.ledgerService}
+		s.gatewayStore = gwStore
 		s.gatewayService = gateway.NewService(gwStore, gwResolver, gwForwarder, gwLedger, s.logger)
 		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore, s.logger)
 		s.logger.Info("gateway enabled (postgres)")
@@ -301,6 +303,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		gwStore2 := gateway.NewMemoryStore()
 		gwResolver2 := gateway.NewResolver(&gatewayRegistryAdapter{s.registry})
 		gwForwarder2 := gateway.NewForwarder(0)
+		s.gatewayStore = gwStore2
 		s.gatewayService = gateway.NewService(gwStore2, gwResolver2, gwForwarder2, &gatewayLedgerAdapter{s.ledgerService}, s.logger)
 		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore2, s.logger)
 		s.logger.Info("gateway enabled (in-memory)")
@@ -622,6 +625,9 @@ func (s *Server) setupRoutes() {
 	// =========================================================================
 	if s.tenantStore != nil {
 		tenantHandler := tenant.NewHandler(s.tenantStore, s.authMgr, s.registry)
+		if s.gatewayStore != nil {
+			tenantHandler.WithBilling(&gatewayBillingAdapter{s.gatewayStore})
+		}
 
 		// Admin routes: create tenant (requires admin secret)
 		adminTenants := v1.Group("")
@@ -1439,6 +1445,24 @@ func (a *gatewayLedgerAdapter) SettleHoldWithFee(ctx context.Context, buyerAddr,
 
 func (a *gatewayLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
 	return a.l.ReleaseHold(ctx, agentAddr, amount, reference)
+}
+
+// gatewayBillingAdapter adapts gateway.Store to tenant.BillingProvider
+type gatewayBillingAdapter struct {
+	store gateway.Store
+}
+
+func (a *gatewayBillingAdapter) GetBillingSummary(ctx context.Context, tenantID string) (*tenant.BillingSummary, error) {
+	row, err := a.store.GetBillingSummary(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return &tenant.BillingSummary{
+		TotalRequests:   row.TotalRequests,
+		SettledRequests: row.SettledRequests,
+		SettledVolume:   row.SettledVolume,
+		FeesCollected:   row.FeesCollected,
+	}, nil
 }
 
 // gatewayTenantSettingsAdapter adapts tenant.Store to gateway.TenantSettingsProvider

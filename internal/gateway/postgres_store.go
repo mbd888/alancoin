@@ -185,6 +185,23 @@ func (p *PostgresStore) ListLogs(ctx context.Context, sessionID string, limit in
 	return result, rows.Err()
 }
 
+func (p *PostgresStore) GetBillingSummary(ctx context.Context, tenantID string) (*BillingSummaryRow, error) {
+	row := &BillingSummaryRow{}
+	err := p.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*),
+			COUNT(*) FILTER (WHERE status = 'success'),
+			COALESCE(SUM(amount) FILTER (WHERE status = 'success'), 0),
+			COALESCE(SUM(fee_amount) FILTER (WHERE status = 'success'), 0)
+		FROM gateway_request_logs
+		WHERE tenant_id = $1`, tenantID,
+	).Scan(&row.TotalRequests, &row.SettledRequests, &row.SettledVolume, &row.FeesCollected)
+	if err != nil {
+		return nil, err
+	}
+	return row, nil
+}
+
 // --- scanners ---
 
 type sessionScanner interface {

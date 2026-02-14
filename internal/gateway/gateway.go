@@ -192,6 +192,14 @@ type SingleCallResult struct {
 	LatencyMs   int64                  `json:"latencyMs"`
 }
 
+// BillingSummaryRow holds raw aggregation values from the request logs.
+type BillingSummaryRow struct {
+	TotalRequests   int64
+	SettledRequests int64
+	SettledVolume   string // USDC string
+	FeesCollected   string // USDC string
+}
+
 // ServiceCandidate is a discovered service suitable for proxying.
 type ServiceCandidate struct {
 	AgentAddress    string  `json:"agentAddress"`
