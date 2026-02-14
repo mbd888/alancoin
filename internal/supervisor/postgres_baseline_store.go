@@ -41,7 +41,7 @@ func (s *PostgresBaselineStore) SaveBaselineBatch(ctx context.Context, baselines
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer stmt.Close() //nolint:errcheck
 
 	for _, b := range baselines {
 		_, err := stmt.ExecContext(ctx,
@@ -65,7 +65,7 @@ func (s *PostgresBaselineStore) GetAllBaselines(ctx context.Context) ([]*AgentBa
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var out []*AgentBaseline
 	for rows.Next() {
@@ -115,7 +115,7 @@ func (s *PostgresBaselineStore) AppendSpendEventBatch(ctx context.Context, event
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer stmt.Close() //nolint:errcheck
 
 	for _, ev := range events {
 		if err := stmt.QueryRowContext(ctx,
@@ -137,7 +137,7 @@ func (s *PostgresBaselineStore) GetRecentSpendEvents(ctx context.Context, since 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var out []*SpendEventRecord
 	for rows.Next() {
@@ -161,7 +161,7 @@ func (s *PostgresBaselineStore) GetAllAgentsWithEvents(ctx context.Context, sinc
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var out []string
 	for rows.Next() {
@@ -184,7 +184,7 @@ func (s *PostgresBaselineStore) GetHourlyTotals(ctx context.Context, agentAddr s
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	totals := make(map[time.Time]*big.Int)
 	for rows.Next() {
