@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/mbd888/alancoin/internal/ledger"
@@ -28,6 +31,13 @@ type Supervisor struct {
 	engine     *RuleEngine
 	reputation ReputationProvider
 	logger     *slog.Logger
+
+	// Baseline learning fields (nil without WithBaselineStore)
+	baselineCache map[string]*AgentBaseline
+	baselineMu    sync.RWMutex
+	eventWriter   *EventWriter
+	denialStore   BaselineStore
+	denialSem     chan struct{} // bounds concurrent denial-logging goroutines
 }
 
 // Compile-time check.
@@ -51,6 +61,24 @@ func WithRules(rules ...EvalRule) Option {
 	return func(s *Supervisor) { s.engine = NewRuleEngine(rules...) }
 }
 
+// WithBaselineStore enables learned baselines. Injects BaselineRule between
+// NewAgentRule and CircularFlowRule and sets up denial logging.
+func WithBaselineStore(store BaselineStore) Option {
+	return func(s *Supervisor) {
+		s.baselineCache = make(map[string]*AgentBaseline)
+		s.denialStore = store
+		s.denialSem = make(chan struct{}, 16) // max 16 concurrent denial writes
+		// Inject BaselineRule into rule set: Velocity, NewAgent, **Baseline**, Circular, Counterparty
+		s.engine = NewRuleEngine(
+			&VelocityRule{},
+			&NewAgentRule{},
+			&BaselineRule{provider: s},
+			&CircularFlowRule{},
+			&CounterpartyConcentrationRule{},
+		)
+	}
+}
+
 // New creates a Supervisor wrapping inner with default rules.
 func New(inner ledger.Service, opts ...Option) *Supervisor {
 	s := &Supervisor{
@@ -69,6 +97,34 @@ func New(inner ledger.Service, opts ...Option) *Supervisor {
 // Used for late binding in server.setupRoutes().
 func (s *Supervisor) SetReputation(rp ReputationProvider) {
 	s.reputation = rp
+}
+
+// SetEventWriter wires the async event writer after construction.
+func (s *Supervisor) SetEventWriter(w *EventWriter) {
+	s.eventWriter = w
+}
+
+// GetCachedBaseline returns the learned baseline for an agent, or nil.
+// Implements BaselineProvider.
+func (s *Supervisor) GetCachedBaseline(agentAddr string) *AgentBaseline {
+	s.baselineMu.RLock()
+	defer s.baselineMu.RUnlock()
+	if s.baselineCache == nil {
+		return nil
+	}
+	return s.baselineCache[strings.ToLower(agentAddr)]
+}
+
+// RefreshBaselines merges new baselines into the cache.
+func (s *Supervisor) RefreshBaselines(updated map[string]*AgentBaseline) {
+	s.baselineMu.Lock()
+	defer s.baselineMu.Unlock()
+	if s.baselineCache == nil {
+		s.baselineCache = make(map[string]*AgentBaseline)
+	}
+	for k, v := range updated {
+		s.baselineCache[strings.ToLower(k)] = v
+	}
 }
 
 // -------------------------------------------------------------------------
@@ -121,6 +177,7 @@ func (s *Supervisor) Spend(ctx context.Context, agentAddr, amount, reference str
 		return err
 	}
 	s.record(agentAddr, "", amount)
+	s.persistSpend(agentAddr, "", amount)
 	return nil
 }
 
@@ -132,6 +189,7 @@ func (s *Supervisor) Transfer(ctx context.Context, from, to, amount, reference s
 		return err
 	}
 	s.record(from, to, amount)
+	s.persistSpend(from, to, amount)
 	return nil
 }
 
@@ -143,6 +201,7 @@ func (s *Supervisor) Withdraw(ctx context.Context, agentAddr, amount, txHash str
 		return err
 	}
 	s.record(agentAddr, "", amount)
+	s.persistSpend(agentAddr, "", amount)
 	return nil
 }
 
@@ -161,6 +220,8 @@ func (s *Supervisor) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amou
 	}
 	// Edge only: the spend was already counted in velocity when Hold was called.
 	s.recordEdge(buyerAddr, sellerAddr, amount)
+	// Persist settled amount for baseline learning (money actually moved).
+	s.persistSpend(buyerAddr, sellerAddr, amount)
 	return nil
 }
 
@@ -169,6 +230,7 @@ func (s *Supervisor) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr, a
 		return err
 	}
 	s.recordEdge(buyerAddr, sellerAddr, amount)
+	s.persistSpend(buyerAddr, sellerAddr, amount)
 	if !s.graph.ReleaseActiveEscrow(buyerAddr) {
 		s.logger.Error("escrow release underflow", "agent", buyerAddr)
 	}
@@ -180,6 +242,7 @@ func (s *Supervisor) PartialEscrowSettle(ctx context.Context, buyerAddr, sellerA
 		return err
 	}
 	s.recordEdge(buyerAddr, sellerAddr, releaseAmount)
+	s.persistSpend(buyerAddr, sellerAddr, releaseAmount)
 	if !s.graph.ReleaseActiveEscrow(buyerAddr) {
 		s.logger.Error("partial escrow settle underflow", "agent", buyerAddr)
 	}
@@ -268,6 +331,21 @@ func (s *Supervisor) evaluate(ctx context.Context, agentAddr, counterparty, amou
 		s.logger.Warn("supervisor denied operation",
 			"agent", agentAddr, "op", opType, "amount", amount,
 			"rule", verdict.Rule, "reason", verdict.Reason)
+
+		// Async denial logging — bounded by semaphore to prevent goroutine explosion
+		if s.denialStore != nil {
+			rec := s.buildDenialRecord(agentAddr, counterparty, amountBig, opType, tier, verdict)
+			select {
+			case s.denialSem <- struct{}{}:
+				go func() {
+					defer func() { <-s.denialSem }()
+					s.logDenialAsync(rec)
+				}()
+			default:
+				s.logger.Warn("denial log dropped (at concurrency limit)")
+			}
+		}
+
 		return fmt.Errorf("%w: %s", ErrDenied, verdict.Reason)
 	case Flag:
 		s.logger.Warn("supervisor flagged operation",
@@ -277,9 +355,59 @@ func (s *Supervisor) evaluate(ctx context.Context, agentAddr, counterparty, amou
 	return nil
 }
 
+// buildDenialRecord constructs a feature vector for a denied operation.
+func (s *Supervisor) buildDenialRecord(agentAddr, counterparty string, amount *big.Int, opType, tier string, verdict *Verdict) *DenialRecord {
+	rec := &DenialRecord{
+		AgentAddr:      agentAddr,
+		RuleName:       verdict.Rule,
+		Reason:         verdict.Reason,
+		Amount:         amount,
+		OpType:         opType,
+		Tier:           tier,
+		Counterparty:   counterparty,
+		HourlyTotal:    new(big.Int),
+		BaselineMean:   new(big.Int),
+		BaselineStddev: new(big.Int),
+		CreatedAt:      time.Now(),
+	}
+
+	// Enrich with current hourly total
+	if snap := s.graph.GetNode(agentAddr); snap != nil {
+		rec.HourlyTotal = snap.WindowTotals[2]
+	}
+
+	// Enrich with baseline if available
+	if baseline := s.GetCachedBaseline(agentAddr); baseline != nil {
+		rec.BaselineMean = baseline.HourlyMean
+		rec.BaselineStddev = baseline.HourlyStddev
+	}
+
+	return rec
+}
+
+// logDenialAsync persists a denial record with a bounded timeout.
+func (s *Supervisor) logDenialAsync(rec *DenialRecord) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("panic in denial logger", "panic", fmt.Sprint(r))
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := s.denialStore.LogDenial(ctx, rec); err != nil {
+		s.logger.Error("failed to log denial", "error", err, "rule", rec.RuleName)
+	}
+}
+
 // record adds a spend event to the graph (velocity windows + edge).
 // Used for operations where the spend is first being committed (Hold, EscrowLock,
 // Spend, Transfer, Withdraw).
+//
+// NOTE: This does NOT persist to the baseline store. Holds and escrow locks are
+// reservations, not actual spend. Only persistSpend (called from Spend, Transfer,
+// Withdraw, and settlement paths) writes to the baseline store.
 func (s *Supervisor) record(agent, counterparty, amount string) {
 	amountBig, ok := usdc.Parse(amount)
 	if !ok {
@@ -297,6 +425,21 @@ func (s *Supervisor) recordEdge(agent, counterparty, amount string) {
 		return
 	}
 	s.graph.RecordEdgeOnly(agent, counterparty, amountBig, time.Now())
+}
+
+// persistSpend sends a settled/actual spend event to the async writer for
+// baseline learning. Only called for operations where money actually moves
+// (Spend, Transfer, Withdraw, SettleHold, ReleaseEscrow, PartialEscrowSettle),
+// NOT for reservations (Hold, EscrowLock) which may be released without settling.
+func (s *Supervisor) persistSpend(agent, counterparty, amount string) {
+	if s.eventWriter == nil {
+		return
+	}
+	amountBig, ok := usdc.Parse(amount)
+	if !ok {
+		return
+	}
+	s.eventWriter.Send(agent, counterparty, amountBig, time.Now())
 }
 
 // concurrencyLimit resolves the max simultaneous holds+escrows for an agent's tier.

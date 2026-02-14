@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math/big"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 // Action is the outcome of a rule evaluation.
@@ -221,6 +223,102 @@ func (r *CounterpartyConcentrationRule) Evaluate(_ context.Context, graph *Spend
 			Rule:   r.Name(),
 			Reason: fmt.Sprintf("%d%% of volume concentrated on counterparty %s",
 				pct.Int64(), ec.Counterparty),
+		}
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// BaselineRule: learned per-agent anomaly detection (mean + 3*stddev)
+// ---------------------------------------------------------------------------
+
+// BaselineProvider supplies cached baselines for rule evaluation.
+type BaselineProvider interface {
+	GetCachedBaseline(agentAddr string) *AgentBaseline
+}
+
+// BaselineRule denies when projected hourly spend exceeds the agent's
+// learned baseline by more than 3 standard deviations. Falls through
+// to VelocityRule when no baseline exists or has insufficient data.
+type BaselineRule struct {
+	provider BaselineProvider
+}
+
+func (r *BaselineRule) Name() string { return "baseline_anomaly" }
+
+// minStddevOneDollar is the absolute minimum stddev ($1) to prevent
+// cold-start lock-in when an agent spends consistently.
+var minStddevOneDollar = mustParse("1") // $1
+
+func (r *BaselineRule) Evaluate(_ context.Context, graph *SpendGraph, ec *EvalContext) *Verdict {
+	if r.provider == nil {
+		return nil
+	}
+
+	baseline := r.provider.GetCachedBaseline(ec.AgentAddr)
+	if baseline == nil || baseline.SampleHours < 24 {
+		return nil // insufficient data, fall through to VelocityRule
+	}
+
+	// Get current 1hr window total from graph
+	snap := graph.GetNode(ec.AgentAddr)
+	var currentHourly *big.Int
+	if snap != nil {
+		currentHourly = snap.WindowTotals[2] // 1hr window
+	} else {
+		currentHourly = new(big.Int)
+	}
+
+	// Project: current + requested amount
+	projected := new(big.Int).Add(currentHourly, ec.Amount)
+
+	// Minimum stddev = max(20% of mean, $1) to prevent cold-start lock-in.
+	// Without this, an agent spending a consistent amount gets stddev≈0
+	// and is permanently capped at their historical rate.
+	effectiveStddev := new(big.Int).Set(baseline.HourlyStddev)
+	twentyPctMean := new(big.Int).Div(baseline.HourlyMean, big.NewInt(5))
+	if effectiveStddev.Cmp(twentyPctMean) < 0 {
+		effectiveStddev.Set(twentyPctMean)
+	}
+	if effectiveStddev.Cmp(minStddevOneDollar) < 0 {
+		effectiveStddev.Set(minStddevOneDollar)
+	}
+
+	// Threshold = mean + 3*effectiveStddev
+	threshold := new(big.Int).Set(baseline.HourlyMean)
+	threeStddev := new(big.Int).Mul(effectiveStddev, big.NewInt(3))
+	threshold.Add(threshold, threeStddev)
+
+	// Floor = 50% of tier velocity limit (prevents baselines from being
+	// more restrictive than half the hard limit)
+	tierLimit, ok := velocityLimit[ec.Tier]
+	if !ok {
+		tierLimit = velocityLimit["established"]
+	}
+	floor := new(big.Int).Div(tierLimit, big.NewInt(2))
+
+	// Effective threshold = max(threshold, floor)
+	effectiveThreshold := threshold
+	floorApplied := false
+	if floor.Cmp(threshold) > 0 {
+		effectiveThreshold = floor
+		floorApplied = true
+	}
+
+	if projected.Cmp(effectiveThreshold) > 0 {
+		reason := fmt.Sprintf(
+			"spending rate $%s/hr exceeds learned baseline $%s/hr (mean $%s + 3x stddev $%s); reduce hourly spend or contact your operator",
+			usdc.Format(projected), usdc.Format(effectiveThreshold),
+			usdc.Format(baseline.HourlyMean), usdc.Format(effectiveStddev))
+		if floorApplied {
+			reason = fmt.Sprintf(
+				"spending rate $%s/hr exceeds tier floor $%s/hr (baseline too low, floor protection active); reduce hourly spend or contact your operator",
+				usdc.Format(projected), usdc.Format(floor))
+		}
+		return &Verdict{
+			Action: Deny,
+			Rule:   r.Name(),
+			Reason: reason,
 		}
 	}
 	return nil

@@ -70,6 +70,8 @@ type Server struct {
 	matviewRefresher       *registry.MatviewRefresher
 	partitionMaint         *registry.PartitionMaintainer
 	rateLimiter            *ratelimit.Limiter
+	baselineTimer          *supervisor.BaselineTimer
+	eventWriter            *supervisor.EventWriter
 	db                     *sql.DB // nil if using in-memory
 	router                 *gin.Engine
 	httpSrv                *http.Server
@@ -164,8 +166,17 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		auditLogger := ledger.NewPostgresAuditLogger(db)
 		s.ledger = ledger.NewWithEvents(ledgerStore, eventStore).
 			WithAuditLogger(auditLogger)
-		s.ledgerService = supervisor.New(s.ledger, supervisor.WithLogger(s.logger))
-		s.logger.Info("agent balance tracking enabled")
+		baselineStore := supervisor.NewPostgresBaselineStore(db)
+		s.ledgerService = supervisor.New(s.ledger,
+			supervisor.WithLogger(s.logger),
+			supervisor.WithBaselineStore(baselineStore),
+		)
+		s.eventWriter = supervisor.NewEventWriter(baselineStore, s.logger)
+		if sv, ok := s.ledgerService.(*supervisor.Supervisor); ok {
+			sv.SetEventWriter(s.eventWriter)
+			s.baselineTimer = supervisor.NewBaselineTimer(baselineStore, sv, s.logger)
+		}
+		s.logger.Info("agent balance tracking enabled (with baselines)")
 
 		// Webhooks with Postgres
 		webhookStore := webhooks.NewPostgresStore(db)
@@ -1004,6 +1015,14 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.gatewayTimer.Start(runCtx)
 	}
 
+	// Start baseline learning event writer and timer
+	if s.eventWriter != nil {
+		go s.eventWriter.Start(runCtx)
+	}
+	if s.baselineTimer != nil {
+		go s.baselineTimer.Start(runCtx)
+	}
+
 	// Start reputation snapshot worker
 	if s.reputationWorker != nil {
 		go s.reputationWorker.Start(runCtx)
@@ -1084,6 +1103,16 @@ func (s *Server) Shutdown() error {
 	if s.gatewayTimer != nil {
 		s.gatewayTimer.Stop()
 		s.logger.Info("gateway timer stopped")
+	}
+
+	// Stop baseline learning components
+	if s.eventWriter != nil {
+		s.eventWriter.Stop()
+		s.logger.Info("event writer stopped")
+	}
+	if s.baselineTimer != nil {
+		s.baselineTimer.Stop()
+		s.logger.Info("baseline timer stopped")
 	}
 
 	// Stop reputation worker
