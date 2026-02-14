@@ -31,11 +31,12 @@ func setupTestDB(t *testing.T) (*PostgresStore, *sql.DB, func()) {
 
 	ctx := context.Background()
 
-	// Create tables (mirrors migration 030)
+	// Create tables (mirrors migrations 030 + 032)
 	_, err = db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS gateway_sessions (
 			id              TEXT PRIMARY KEY,
 			agent_addr      TEXT NOT NULL,
+			tenant_id       TEXT,
 			max_total       NUMERIC(20,6) NOT NULL,
 			max_per_request NUMERIC(20,6) NOT NULL,
 			total_spent     NUMERIC(20,6) NOT NULL DEFAULT 0,
@@ -51,6 +52,7 @@ func setupTestDB(t *testing.T) (*PostgresStore, *sql.DB, func()) {
 		CREATE TABLE IF NOT EXISTS gateway_request_logs (
 			id           TEXT PRIMARY KEY,
 			session_id   TEXT NOT NULL REFERENCES gateway_sessions(id),
+			tenant_id    TEXT,
 			service_type TEXT NOT NULL,
 			agent_called TEXT NOT NULL DEFAULT '',
 			amount       NUMERIC(20,6) NOT NULL DEFAULT 0,
