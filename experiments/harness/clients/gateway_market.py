@@ -93,6 +93,19 @@ class GatewayMarket:
             ServiceType.EMBEDDING: 0.10,
         }
 
+    # ── Context manager ─────────────────────────────────────────
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        for buyer_id in list(self._sessions):
+            try:
+                self.teardown_session(buyer_id)
+            except Exception as e:
+                logger.warning("Failed to teardown session for %s: %s", buyer_id, e)
+        return False  # Don't suppress exceptions
+
     # ── HTTP helpers ──────────────────────────────────────────────
 
     def _headers(self, gateway_token: str = "") -> dict:

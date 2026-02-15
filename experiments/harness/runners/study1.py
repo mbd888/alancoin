@@ -374,17 +374,13 @@ async def _run_single_trial(
     for seller, market_seller in sellers:
         orchestrator.register_seller(seller, market_seller.id)
 
-    # Set up gateway sessions for live mode
+    # Run market session (context manager auto-closes gateway sessions)
     if live_mode and isinstance(market, GatewayMarket):
-        market.setup_session(market_buyer.id)
-
-    # Run market session
-    try:
+        with market:
+            market.setup_session(market_buyer.id)
+            session_results = await orchestrator.run_session(num_rounds=5)
+    else:
         session_results = await orchestrator.run_session(num_rounds=5)
-    finally:
-        # Tear down gateway sessions
-        if live_mode and isinstance(market, GatewayMarket):
-            market.teardown_session(market_buyer.id)
 
     duration_ms = (time.perf_counter() - start_time) * 1000
 
