@@ -28,6 +28,7 @@ import (
 	"github.com/mbd888/alancoin/internal/ledger"
 	"github.com/mbd888/alancoin/internal/logging"
 	"github.com/mbd888/alancoin/internal/metrics"
+	"github.com/mbd888/alancoin/internal/policy"
 	"github.com/mbd888/alancoin/internal/ratelimit"
 	"github.com/mbd888/alancoin/internal/realtime"
 	"github.com/mbd888/alancoin/internal/receipts"
@@ -74,6 +75,7 @@ type Server struct {
 	baselineTimer          *supervisor.BaselineTimer
 	eventWriter            *supervisor.EventWriter
 	tenantStore            tenant.Store
+	policyStore            policy.Store  // tenant-scoped spend policies
 	gatewayStore           gateway.Store // for billing aggregation
 	db                     *sql.DB       // nil if using in-memory
 	router                 *gin.Engine
@@ -227,7 +229,6 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		gateway.ReconcileOrphanedHolds(ctx, db, gwLedger, s.logger)
 
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
-		s.gatewayService.WithPolicyEvaluator(&gatewayPolicyAdapter{policyStore})
 		s.gatewayService.WithPlatformAddress(cfg.PlatformAddress)
 
 		// Wire receipt issuer into all payment paths
@@ -248,6 +249,15 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Wire tenant settings into gateway for fee computation
 		s.gatewayService.WithTenantSettings(&gatewayTenantSettingsAdapter{s.tenantStore})
+
+		// Spend policies (PostgreSQL)
+		spendPolicyStore := policy.NewPostgresStore(db)
+		if err := spendPolicyStore.Migrate(ctx); err != nil {
+			s.logger.Warn("failed to migrate spend policy store", "error", err)
+		}
+		s.gatewayService.WithPolicyEvaluator(policy.NewEvaluator(spendPolicyStore))
+		s.policyStore = spendPolicyStore
+		s.logger.Info("spend policies enabled (postgres)")
 
 		// Reputation snapshots (PostgreSQL)
 		s.reputationStore = reputation.NewPostgresSnapshotStore(db)
@@ -309,7 +319,6 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.logger.Info("gateway enabled (in-memory)")
 
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
-		s.gatewayService.WithPolicyEvaluator(&gatewayPolicyAdapter{policyStore})
 		s.gatewayService.WithPlatformAddress(cfg.PlatformAddress)
 
 		// Wire receipt issuer into all payment paths
@@ -326,6 +335,12 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Wire tenant settings into gateway for fee computation
 		s.gatewayService.WithTenantSettings(&gatewayTenantSettingsAdapter{s.tenantStore})
+
+		// Spend policies (in-memory)
+		memPolicyStore := policy.NewMemoryStore()
+		s.gatewayService.WithPolicyEvaluator(policy.NewEvaluator(memPolicyStore))
+		s.policyStore = memPolicyStore
+		s.logger.Info("spend policies enabled (in-memory)")
 
 		// Reputation snapshots (in-memory)
 		s.reputationStore = reputation.NewMemorySnapshotStore()
@@ -638,6 +653,12 @@ func (s *Server) setupRoutes() {
 		protectedTenants := v1.Group("")
 		protectedTenants.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
 		tenantHandler.RegisterProtectedRoutes(protectedTenants)
+
+		// Policy routes: spend policy CRUD under tenant-protected group
+		if s.policyStore != nil {
+			policyHandler := policy.NewHandler(s.policyStore)
+			policyHandler.RegisterRoutes(protectedTenants)
+		}
 	}
 
 	// Ledger routes (agent balances)
@@ -1476,58 +1497,6 @@ func (a *gatewayTenantSettingsAdapter) GetTakeRateBPS(ctx context.Context, tenan
 		return 0, err
 	}
 	return t.Settings.TakeRateBPS, nil
-}
-
-// gatewayPolicyAdapter adapts sessionkeys.PolicyStore to gateway.PolicyEvaluator.
-// Looks up all policies owned by the session's agent address and evaluates
-// time_window, cooldown (mapped from session.UpdatedAt), and tx_count
-// (mapped from session.RequestCount) rules.
-type gatewayPolicyAdapter struct {
-	store sessionkeys.PolicyStore
-}
-
-func (a *gatewayPolicyAdapter) EvaluateProxy(ctx context.Context, session *gateway.Session, serviceType string) (*gateway.PolicyDecision, error) {
-	start := time.Now()
-
-	policies, err := a.store.ListPolicies(ctx, session.AgentAddr)
-	if err != nil {
-		return nil, fmt.Errorf("policy check failed: %w", err) // Fail closed
-	}
-
-	decision := &gateway.PolicyDecision{Evaluated: len(policies), Allowed: true}
-
-	for _, policy := range policies {
-		for _, rule := range policy.Rules {
-			if evalErr := evaluateRuleForGateway(rule, session); evalErr != nil {
-				decision.Allowed = false
-				decision.DeniedBy = policy.Name
-				decision.DeniedRule = rule.Type
-				decision.Reason = evalErr.Error()
-				decision.LatencyUs = time.Since(start).Microseconds()
-				return decision, evalErr
-			}
-		}
-	}
-
-	decision.LatencyUs = time.Since(start).Microseconds()
-	return decision, nil
-}
-
-// evaluateRuleForGateway maps gateway session state onto sessionkeys rule evaluators.
-// Supports time_window, cooldown, and tx_count. Rate_limit is skipped (requires
-// per-session RuleState tracking not yet implemented for gateway).
-func evaluateRuleForGateway(rule sessionkeys.Rule, session *gateway.Session) error {
-	switch rule.Type {
-	case "time_window":
-		return sessionkeys.EvalTimeWindowExported(rule, time.Now())
-	case "cooldown":
-		return sessionkeys.EvalCooldownExported(rule, session.UpdatedAt, time.Now())
-	case "tx_count":
-		return sessionkeys.EvalTxCountExported(rule, session.RequestCount)
-	default:
-		// rate_limit and unknown types: skip for gateway
-		return nil
-	}
 }
 
 // gatewayRegistryAdapter adapts registry.Store to gateway.RegistryProvider

@@ -479,9 +479,7 @@ func (h *Handler) requireTenantOwnership(c *gin.Context, tenantID string) bool {
 	return true
 }
 
-// isAdmin returns true if the request was authenticated via admin secret.
+// isAdmin returns true if the request carries a valid admin secret.
 func isAdmin(c *gin.Context) bool {
-	// The RequireAdmin middleware sets this header check, but doesn't set a context value.
-	// We check for the X-Admin-Secret header presence as a proxy.
-	return c.GetHeader("X-Admin-Secret") != ""
+	return auth.IsAdminRequest(c)
 }
