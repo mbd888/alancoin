@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -803,8 +802,7 @@ func TestHandler_WrongTenant(t *testing.T) {
 
 func TestHandler_AdminBypass(t *testing.T) {
 	// Set ADMIN_SECRET so auth.IsAdminRequest validates correctly.
-	os.Setenv("ADMIN_SECRET", "test-secret")
-	defer os.Unsetenv("ADMIN_SECRET")
+	t.Setenv("ADMIN_SECRET", "test-secret")
 
 	store := NewMemoryStore()
 	r := gin.New()
@@ -825,8 +823,7 @@ func TestHandler_AdminBypass(t *testing.T) {
 }
 
 func TestHandler_AdminBypass_WrongSecret(t *testing.T) {
-	os.Setenv("ADMIN_SECRET", "real-secret")
-	defer os.Unsetenv("ADMIN_SECRET")
+	t.Setenv("ADMIN_SECRET", "real-secret")
 
 	store := NewMemoryStore()
 	r := gin.New()
