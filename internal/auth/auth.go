@@ -122,12 +122,15 @@ func (m *Manager) ValidateKey(ctx context.Context, rawKey string) (*APIKey, erro
 		return nil, ErrInvalidAPIKey
 	}
 
-	// Update last used (fire and forget) — copy to avoid racing with caller
-	go func() {
-		cp := *key
-		cp.LastUsed = time.Now()
-		_ = m.store.Update(context.Background(), &cp)
-	}()
+	// Update last used (fire and forget) — re-read to avoid stomping concurrent mutations (e.g. revoke)
+	go func(keyHash string) {
+		current, err := m.store.GetByHash(context.Background(), keyHash)
+		if err != nil {
+			return
+		}
+		current.LastUsed = time.Now()
+		_ = m.store.Update(context.Background(), current)
+	}(hash)
 
 	return key, nil
 }
@@ -207,6 +210,10 @@ func (s *MemoryStore) GetByAgent(ctx context.Context, addr string) ([]*APIKey, e
 func (s *MemoryStore) Update(ctx context.Context, key *APIKey) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Revocation is monotonic: once revoked, Update cannot un-revoke
+	if existing, ok := s.keys[key.ID]; ok && existing.Revoked {
+		key.Revoked = true
+	}
 	s.keys[key.ID] = key
 	return nil
 }
