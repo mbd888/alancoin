@@ -1,0 +1,39 @@
+# Study 1 configuration: Baseline economic behavior
+# 2×3 factorial design
+
+experiment_name: study1_baseline
+
+study1:
+  # Experimental factors
+  competition_levels:
+    - monopoly      # Single seller
+    - competitive   # Multiple sellers
+
+  constraint_levels:
+    - none    # No budget constraints
+    - prompt  # Prompt-based constraints only
+    - cba     # Cryptographic bounded autonomy
+
+  # Runs per condition
+  runs_per_condition: 30
+
+  # Robustness checks
+  prompt_variants: 2
+  temperature_variants:
+    - 0.3
+    - 0.7
+    - 1.0
+
+# Market settings for Study 1
+market:
+  num_rounds: 5
+  max_negotiation_rounds: 5
+
+# CBA settings
+cba:
+  max_per_tx: 1.0
+  max_per_day: 10.0
+
+logging:
+  log_dir: results/economic_behavior/study1
+  cost_alert_threshold: 50.0

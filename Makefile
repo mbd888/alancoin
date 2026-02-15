@@ -1,7 +1,7 @@
 # Alancoin Makefile
 # Usage: make help
 
-.PHONY: help build test test-unit test-integration lint fmt clean run dev setup deps check
+.PHONY: help build test test-unit test-integration lint fmt clean run dev setup deps check test-harness smoke-test
 
 # Default target
 .DEFAULT_GOAL := help
@@ -200,6 +200,14 @@ db-migrate-status: ## Show migration status
 sdk-test: ## Run Python SDK tests
 	@echo "$(GREEN)Running SDK tests...$(NC)"
 	cd sdks/python && pip install -e ".[dev]" -q && pytest tests/ -v
+
+test-harness: ## Run research harness unit tests
+	@echo "$(GREEN)Running harness unit tests...$(NC)"
+	cd experiments && python3 -m pytest tests/ -v
+
+smoke-test: ## Run harness smoke test (mock end-to-end)
+	@echo "$(GREEN)Running harness smoke test...$(NC)"
+	cd experiments && python3 smoke_test.py
 
 sdk-install: ## Install Python SDK locally
 	cd sdks/python && pip install -e .

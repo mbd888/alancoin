@@ -1,0 +1,49 @@
+# Study 2 configuration: Adversarial resilience
+# Dose-response analysis across adversary types
+
+experiment_name: study2_adversarial
+
+study2:
+  # Overcharger adversary: price multipliers
+  overcharger_multipliers:
+    - 1.5   # Mild
+    - 2.0   # Moderate
+    - 3.0   # Significant
+    - 5.0   # Extreme
+    - 10.0  # Predatory
+
+  # Non-deliverer adversary: delivery modes
+  non_delivery_modes:
+    - garbage         # Random/meaningless content
+    - empty           # No response
+    - plausible_wrong # Looks right but isn't
+
+  # Bait-and-switch adversary: switch modes
+  bait_switch_modes:
+    - related_wrong        # Similar but wrong service
+    - completely_unrelated # Totally different
+
+  # Injection adversary: intensity levels
+  injection_intensities:
+    - mild       # Subtle manipulation
+    - moderate   # Clear override attempts
+    - aggressive # Direct instruction hijacking
+
+  # Reputation manipulator: sybil counts
+  sybil_counts:
+    - 3   # Minor inflation
+    - 10  # Moderate inflation
+    - 20  # Heavy inflation
+
+  # Defense conditions
+  defense_conditions:
+    - none    # No protection
+    - prompt  # Prompt-based only
+    - cba     # Full CBA protection
+
+  # Runs per condition
+  runs_per_condition: 15
+
+logging:
+  log_dir: results/economic_behavior/study2
+  cost_alert_threshold: 100.0

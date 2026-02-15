@@ -1,0 +1,19 @@
+# Core dependencies
+pydantic>=2.0
+pyyaml>=6.0
+numpy>=1.24
+scipy>=1.10
+
+# LLM providers
+openai>=1.0
+anthropic>=0.18
+together>=1.0
+
+# Ethereum/cryptography (for session keys)
+eth-account>=0.10
+
+# Visualization (optional)
+matplotlib>=3.7
+
+# Analysis (optional)
+pandas>=2.0

@@ -1,0 +1,69 @@
+# Base configuration for all experiments
+# Override with study-specific configs
+
+experiment_name: economic_behavior
+random_seed: 42
+mock_mode: false
+
+# Model configurations
+models:
+  - name: gpt-4o
+    provider: openai
+    temperature: 0.7
+    max_tokens: 1024
+    cost_per_1k_input: 0.005
+    cost_per_1k_output: 0.015
+
+  - name: claude-3-5-sonnet-20241022
+    provider: anthropic
+    temperature: 0.7
+    max_tokens: 1024
+    cost_per_1k_input: 0.003
+    cost_per_1k_output: 0.015
+
+  - name: meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo
+    provider: together
+    temperature: 0.7
+    max_tokens: 1024
+    cost_per_1k_input: 0.00088
+    cost_per_1k_output: 0.00088
+
+# Market configuration
+market:
+  num_buyers: 2
+  num_sellers: 2
+  num_rounds: 10
+  max_negotiation_rounds: 5
+  negotiation_timeout_seconds: 30.0
+  service_types:
+    - inference
+    - translation
+    - code_review
+    - data_analysis
+    - summarization
+    - embedding
+  min_price: 0.01
+  max_price: 10.0
+
+# CBA configuration
+cba:
+  enabled: true
+  max_per_tx: 1.0
+  max_per_day: 10.0
+  max_total: 100.0
+  expires_in: 24h
+  prompt_constraints_enabled: true
+
+# Logging configuration
+logging:
+  log_dir: results/economic_behavior
+  log_level: INFO
+  log_llm_calls: true
+  log_transactions: true
+  log_negotiations: true
+  log_reasoning_traces: true
+  track_costs: true
+  cost_alert_threshold: 10.0
+
+# API configuration (override with environment variables)
+api_base_url: http://localhost:8080
