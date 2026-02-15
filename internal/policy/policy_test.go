@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -885,7 +884,7 @@ func TestHandler_UpdateWithNewRules(t *testing.T) {
 	router := setupRouter(store, "ten_abc")
 
 	// Update with new rules
-	body := fmt.Sprintf(`{"rules":[{"type":"service_blocklist","params":{"services":["compute"]}}]}`)
+	body := `{"rules":[{"type":"service_blocklist","params":{"services":["compute"]}}]}`
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("PUT", "/v1/tenants/ten_abc/policies/sp_1", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
