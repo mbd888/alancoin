@@ -478,7 +478,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 	// Resolve candidates
 	candidates, err := s.resolver.Resolve(ctx, req, session.Strategy, session.MaxPerRequest)
 	if err != nil {
-		s.logRequest(ctx, session.ID, req.ServiceType, "", "0", "no_service", 0, err.Error())
+		s.logRequest(ctx, session.ID, session.TenantID, req.ServiceType, "", "0", "no_service", 0, err.Error())
 		unlock()
 		cancelIdem()
 		return nil, err
@@ -489,6 +489,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 	maxPerBig, _ := usdc.Parse(session.MaxPerRequest)
 	agentAddr := session.AgentAddr
 	sessionIDCopy := session.ID
+	tenantIDCopy := session.TenantID
 
 	unlock() // Release lock — candidates resolved, ready to iterate
 
@@ -540,7 +541,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 					"policy", policyDecision.GetDeniedBy(),
 					"rule", policyDecision.GetDeniedRule(),
 					"reason", policyDecision.GetReason())
-				s.logRequestWithPolicy(ctx, sessionIDCopy, req.ServiceType, "", "0", "policy_denied", 0, err.Error(), policyDecision)
+				s.logRequestWithPolicy(ctx, sessionIDCopy, tenantIDCopy, req.ServiceType, "", "0", "policy_denied", 0, err.Error(), policyDecision)
 				gwProxyRequests.WithLabelValues("policy_denied").Inc()
 				gwPolicyDenials.WithLabelValues(policyDecision.GetDeniedRule()).Inc()
 				unlock()
@@ -588,7 +589,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 
 			s.logger.Warn("forward failed, trying next candidate",
 				"session", sessionID, "seller", candidate.AgentAddress, "error", fwdErr)
-			s.logRequest(ctx, sessionIDCopy, req.ServiceType, candidate.AgentAddress,
+			s.logRequest(ctx, sessionIDCopy, tenantIDCopy, req.ServiceType, candidate.AgentAddress,
 				"0", "forward_failed", 0, fwdErr.Error())
 
 			if s.recorder != nil {
@@ -654,7 +655,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 
 			s.logger.Error("CRITICAL: settlement failed after retries — service delivered but seller not paid, returning response to buyer",
 				"session", sessionID, "seller", candidate.AgentAddress, "amount", priceStr, "attempts", 3, "error", settleErr)
-			s.logRequest(ctx, sessionIDCopy, req.ServiceType, candidate.AgentAddress, "0", "settlement_failed", fwdResp.LatencyMs, settleErr.Error())
+			s.logRequest(ctx, sessionIDCopy, tenantIDCopy, req.ServiceType, candidate.AgentAddress, "0", "settlement_failed", fwdResp.LatencyMs, settleErr.Error())
 
 			if s.recorder != nil {
 				_ = s.recorder.RecordTransaction(ctx, ref, agentAddr,
@@ -705,7 +706,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		unlock() // Done with state — release lock
 
 		// Fire-and-forget: logging, reputation, receipts (no lock needed)
-		s.logRequestFull(ctx, sessionIDCopy, req.ServiceType, candidate.AgentAddress, priceStr, feeAmountStr, "success", fwdResp.LatencyMs, "", nil)
+		s.logRequestFull(ctx, sessionIDCopy, tenantIDCopy, req.ServiceType, candidate.AgentAddress, priceStr, feeAmountStr, "success", fwdResp.LatencyMs, "", nil)
 
 		if s.recorder != nil {
 			_ = s.recorder.RecordTransaction(ctx, ref, agentAddr,
@@ -959,20 +960,21 @@ func (s *Service) computeFee(ctx context.Context, tenantID string, priceBig *big
 }
 
 // logRequest creates a request log entry.
-func (s *Service) logRequest(ctx context.Context, sessionID, serviceType, agentCalled, amount, status string, latencyMs int64, errMsg string) {
-	s.logRequestFull(ctx, sessionID, serviceType, agentCalled, amount, "", status, latencyMs, errMsg, nil)
+func (s *Service) logRequest(ctx context.Context, sessionID, tenantID, serviceType, agentCalled, amount, status string, latencyMs int64, errMsg string) {
+	s.logRequestFull(ctx, sessionID, tenantID, serviceType, agentCalled, amount, "", status, latencyMs, errMsg, nil)
 }
 
 // logRequestWithPolicy creates a request log entry with an optional policy decision.
-func (s *Service) logRequestWithPolicy(ctx context.Context, sessionID, serviceType, agentCalled, amount, status string, latencyMs int64, errMsg string, policy *PolicyDecision) {
-	s.logRequestFull(ctx, sessionID, serviceType, agentCalled, amount, "", status, latencyMs, errMsg, policy)
+func (s *Service) logRequestWithPolicy(ctx context.Context, sessionID, tenantID, serviceType, agentCalled, amount, status string, latencyMs int64, errMsg string, policy *PolicyDecision) {
+	s.logRequestFull(ctx, sessionID, tenantID, serviceType, agentCalled, amount, "", status, latencyMs, errMsg, policy)
 }
 
 // logRequestFull creates a request log entry with all fields.
-func (s *Service) logRequestFull(ctx context.Context, sessionID, serviceType, agentCalled, amount, feeAmount, status string, latencyMs int64, errMsg string, policy *PolicyDecision) {
+func (s *Service) logRequestFull(ctx context.Context, sessionID, tenantID, serviceType, agentCalled, amount, feeAmount, status string, latencyMs int64, errMsg string, policy *PolicyDecision) {
 	log := &RequestLog{
 		ID:           idgen.WithPrefix("gwlog_"),
 		SessionID:    sessionID,
+		TenantID:     tenantID,
 		ServiceType:  serviceType,
 		AgentCalled:  agentCalled,
 		Amount:       amount,

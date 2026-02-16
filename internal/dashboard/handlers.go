@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/mbd888/alancoin/internal/auth"
 	"github.com/mbd888/alancoin/internal/gateway"
 	"github.com/mbd888/alancoin/internal/tenant"
 )
@@ -22,8 +23,20 @@ func NewHandler(gwStore gateway.Store, tenantStore tenant.Store) *Handler {
 	return &Handler{gwStore: gwStore, tenantStore: tenantStore}
 }
 
+// checkOwnership verifies the caller owns the tenant or is an admin.
+// Returns false (and sends 403) if the caller is not authorized.
+func checkOwnership(c *gin.Context, tenantID string) bool {
+	if auth.IsAdminRequest(c) {
+		return true
+	}
+	if auth.GetTenantID(c) != tenantID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden", "message": "not your tenant"})
+		return false
+	}
+	return true
+}
+
 // RegisterRoutes sets up dashboard routes under the given group.
-// Routes require tenant ownership (enforced by caller middleware).
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/tenants/:id/dashboard/overview", h.Overview)
 	r.GET("/tenants/:id/dashboard/usage", h.Usage)
@@ -36,6 +49,9 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 func (h *Handler) Overview(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID := c.Param("id")
+	if !checkOwnership(c, tenantID) {
+		return
+	}
 
 	t, err := h.tenantStore.Get(ctx, tenantID)
 	if err != nil {
@@ -89,6 +105,9 @@ func (h *Handler) Overview(c *gin.Context) {
 func (h *Handler) Usage(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID := c.Param("id")
+	if !checkOwnership(c, tenantID) {
+		return
+	}
 
 	interval := c.DefaultQuery("interval", "day")
 	switch interval {
@@ -119,6 +138,9 @@ func (h *Handler) Usage(c *gin.Context) {
 func (h *Handler) TopServices(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID := c.Param("id")
+	if !checkOwnership(c, tenantID) {
+		return
+	}
 
 	limit := parseLimit(c, 10, 100)
 
@@ -138,6 +160,9 @@ func (h *Handler) TopServices(c *gin.Context) {
 func (h *Handler) Denials(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID := c.Param("id")
+	if !checkOwnership(c, tenantID) {
+		return
+	}
 
 	limit := parseLimit(c, 50, 500)
 
@@ -157,6 +182,9 @@ func (h *Handler) Denials(c *gin.Context) {
 func (h *Handler) Sessions(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID := c.Param("id")
+	if !checkOwnership(c, tenantID) {
+		return
+	}
 
 	limit := parseLimit(c, 50, 500)
 	statusFilter := c.Query("status")
