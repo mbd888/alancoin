@@ -98,4 +98,9 @@ func (t *Timer) sweepExpired(ctx context.Context) {
 	if removed := t.service.SweepIdempotencyCache(); removed > 0 {
 		t.logger.Info("swept idempotency cache", "removed", removed)
 	}
+
+	// Sweep stale rate limit entries for closed/expired sessions.
+	if removed := t.service.SweepRateLimiter(); removed > 0 {
+		t.logger.Info("swept rate limiter", "removed", removed)
+	}
 }

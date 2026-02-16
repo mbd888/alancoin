@@ -28,6 +28,7 @@ var (
 	ErrInvalidAmount      = errors.New("gateway: invalid amount")
 	ErrUnauthorized       = errors.New("gateway: not authorized for this session")
 	ErrPolicyDenied       = errors.New("gateway: policy denied request")
+	ErrRateLimited        = errors.New("gateway: rate limit exceeded")
 )
 
 // Status represents session state.
@@ -48,25 +49,43 @@ const (
 
 // Session represents a gateway payment session.
 type Session struct {
-	ID            string    `json:"id"`
-	AgentAddr     string    `json:"agentAddr"`
-	TenantID      string    `json:"tenantId,omitempty"` // Tenant that owns this session (empty = no tenant)
-	MaxTotal      string    `json:"maxTotal"`           // Total budget held
-	MaxPerRequest string    `json:"maxPerRequest"`      // Max per single proxy call
-	TotalSpent    string    `json:"totalSpent"`         // Accumulated spend
-	RequestCount  int       `json:"requestCount"`
-	Strategy      string    `json:"strategy"`                // cheapest, reputation, best_value
-	AllowedTypes  []string  `json:"allowedTypes,omitempty"`  // Empty = all types allowed
-	WarnAtPercent int       `json:"warnAtPercent,omitempty"` // Alert when remaining drops below this % (e.g., 20)
-	Status        Status    `json:"status"`
-	ExpiresAt     time.Time `json:"expiresAt"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	ID                   string          `json:"id"`
+	AgentAddr            string          `json:"agentAddr"`
+	TenantID             string          `json:"tenantId,omitempty"` // Tenant that owns this session (empty = no tenant)
+	MaxTotal             string          `json:"maxTotal"`           // Total budget held
+	MaxPerRequest        string          `json:"maxPerRequest"`      // Max per single proxy call
+	TotalSpent           string          `json:"totalSpent"`         // Accumulated spend
+	RequestCount         int             `json:"requestCount"`
+	Strategy             string          `json:"strategy"`                       // cheapest, reputation, best_value
+	AllowedTypes         []string        `json:"allowedTypes,omitempty"`         // Empty = all types allowed
+	allowedTypesSet      map[string]bool `json:"-"`                              // lazy O(1) lookup; not serialized
+	WarnAtPercent        int             `json:"warnAtPercent,omitempty"`        // Alert when remaining drops below this % (e.g., 20)
+	MaxRequestsPerMinute int             `json:"maxRequestsPerMinute,omitempty"` // 0 = default (100)
+	Status               Status          `json:"status"`
+	ExpiresAt            time.Time       `json:"expiresAt"`
+	CreatedAt            time.Time       `json:"createdAt"`
+	UpdatedAt            time.Time       `json:"updatedAt"`
 }
 
 // IsExpired returns true if the session has passed its expiration time.
 func (s *Session) IsExpired() bool {
 	return !s.ExpiresAt.IsZero() && time.Now().After(s.ExpiresAt)
+}
+
+// IsTypeAllowed returns true if the service type is permitted by this session.
+// An empty AllowedTypes list means all types are allowed.
+// The lookup set is built lazily on first call.
+func (s *Session) IsTypeAllowed(serviceType string) bool {
+	if len(s.AllowedTypes) == 0 {
+		return true
+	}
+	if s.allowedTypesSet == nil {
+		s.allowedTypesSet = make(map[string]bool, len(s.AllowedTypes))
+		for _, t := range s.AllowedTypes {
+			s.allowedTypesSet[t] = true
+		}
+	}
+	return s.allowedTypesSet[serviceType]
 }
 
 // Remaining returns the unspent portion of the session budget as a USDC string.
@@ -126,12 +145,13 @@ type RequestLog struct {
 
 // CreateSessionRequest is the HTTP payload for session creation.
 type CreateSessionRequest struct {
-	MaxTotal      string   `json:"maxTotal" binding:"required"`
-	MaxPerRequest string   `json:"maxPerRequest" binding:"required"`
-	Strategy      string   `json:"strategy"` // default: "cheapest"
-	AllowedTypes  []string `json:"allowedTypes,omitempty"`
-	ExpiresInSec  int      `json:"expiresInSecs,omitempty"` // 0 = 1 hour default
-	WarnAtPercent int      `json:"warnAtPercent,omitempty"` // Alert when remaining drops below this %
+	MaxTotal             string   `json:"maxTotal" binding:"required"`
+	MaxPerRequest        string   `json:"maxPerRequest" binding:"required"`
+	Strategy             string   `json:"strategy"` // default: "cheapest"
+	AllowedTypes         []string `json:"allowedTypes,omitempty"`
+	ExpiresInSec         int      `json:"expiresInSecs,omitempty"`        // 0 = 1 hour default
+	WarnAtPercent        int      `json:"warnAtPercent,omitempty"`        // Alert when remaining drops below this %
+	MaxRequestsPerMinute int      `json:"maxRequestsPerMinute,omitempty"` // 0 = default (100), max 1000
 }
 
 // LedgerService abstracts ledger operations.

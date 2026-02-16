@@ -1883,6 +1883,160 @@ func TestPolicyDecision_NilSafeAccessors(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Rate limiter tests
+// ---------------------------------------------------------------------------
+
+func TestProxy_RateLimited(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.01", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	ctx := context.Background()
+	session, err := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
+		MaxTotal:             "100.00",
+		MaxPerRequest:        "1.00",
+		MaxRequestsPerMinute: 3, // Very low limit for testing
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// First 3 requests should succeed
+	for i := 0; i < 3; i++ {
+		_, err := svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "test"})
+		if err != nil {
+			t.Fatalf("proxy %d should succeed: %v", i, err)
+		}
+	}
+
+	// 4th request should be rate limited
+	_, err = svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "test"})
+	if err == nil {
+		t.Fatal("expected rate limit error on 4th request")
+	}
+	if !strings.Contains(err.Error(), "rate limit") {
+		t.Errorf("expected rate limit error, got: %v", err)
+	}
+
+	// Only 3 settlements should exist
+	if len(ml.settlements) != 3 {
+		t.Errorf("expected 3 settlements, got %d", len(ml.settlements))
+	}
+}
+
+func TestProxy_RateLimitDefaultApplied(t *testing.T) {
+	ml := newMockLedger()
+	svc := newTestServiceWithLogger(ml, &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.01",
+				Endpoint: "http://localhost"},
+		},
+	})
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
+		MaxTotal:      "100.00",
+		MaxPerRequest: "1.00",
+		// No MaxRequestsPerMinute → default 100
+	})
+
+	if session.MaxRequestsPerMinute != defaultMaxRequestsPerMinute {
+		t.Errorf("expected default %d, got %d", defaultMaxRequestsPerMinute, session.MaxRequestsPerMinute)
+	}
+}
+
+func TestProxy_RateLimitCappedAt1000(t *testing.T) {
+	ml := newMockLedger()
+	svc := newTestServiceWithLogger(ml, &mockRegistry{})
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
+		MaxTotal:             "100.00",
+		MaxPerRequest:        "1.00",
+		MaxRequestsPerMinute: 5000, // Above max
+	})
+
+	if session.MaxRequestsPerMinute != 1000 {
+		t.Errorf("expected capped at 1000, got %d", session.MaxRequestsPerMinute)
+	}
+}
+
+func TestProxy_RateLimitCleanedUpOnClose(t *testing.T) {
+	ml := newMockLedger()
+	svc := newTestServiceWithLogger(ml, &mockRegistry{})
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	if svc.rateLimit.size() != 1 {
+		t.Errorf("expected 1 rate limit entry after create, got %d", svc.rateLimit.size())
+	}
+
+	svc.CloseSession(ctx, session.ID, "0xbuyer")
+
+	if svc.rateLimit.size() != 0 {
+		t.Errorf("expected 0 rate limit entries after close, got %d", svc.rateLimit.size())
+	}
+}
+
+func TestRateLimiter_WindowReset(t *testing.T) {
+	rl := newRateLimiter()
+	rl.window = 50 * time.Millisecond // Short window for testing
+
+	rl.setLimit("s1", 2)
+
+	if !rl.allow("s1") {
+		t.Fatal("first request should be allowed")
+	}
+	if !rl.allow("s1") {
+		t.Fatal("second request should be allowed")
+	}
+	if rl.allow("s1") {
+		t.Fatal("third request should be denied (limit=2)")
+	}
+
+	// Wait for window to reset
+	time.Sleep(60 * time.Millisecond)
+
+	if !rl.allow("s1") {
+		t.Fatal("request after window reset should be allowed")
+	}
+}
+
+func TestRateLimiter_Sweep(t *testing.T) {
+	rl := newRateLimiter()
+	rl.window = 25 * time.Millisecond // Short window for testing
+
+	rl.allow("s1")
+	rl.allow("s2")
+
+	if rl.size() != 2 {
+		t.Errorf("expected 2 entries, got %d", rl.size())
+	}
+
+	// Wait for entries to become stale (2 * window = 50ms)
+	time.Sleep(60 * time.Millisecond)
+
+	removed := rl.sweep()
+	if removed != 2 {
+		t.Errorf("expected 2 removed, got %d", removed)
+	}
+	if rl.size() != 0 {
+		t.Errorf("expected 0 entries after sweep, got %d", rl.size())
+	}
+}
+
 func TestIdempotencyCacheSweep(t *testing.T) {
 	cache := newIdempotencyCache(50 * time.Millisecond) // 50ms TTL
 

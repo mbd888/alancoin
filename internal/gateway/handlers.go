@@ -284,6 +284,9 @@ func (h *Handler) Proxy(c *gin.Context) {
 		case errors.Is(err, ErrPolicyDenied):
 			status = http.StatusForbidden
 			code = "policy_denied"
+		case errors.Is(err, ErrRateLimited):
+			status = http.StatusTooManyRequests
+			code = "rate_limited"
 		case errors.Is(err, ErrProxyFailed):
 			status = http.StatusBadGateway
 			code = "proxy_failed"

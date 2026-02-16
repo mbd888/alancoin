@@ -172,6 +172,7 @@ type Service struct {
 	logger          *slog.Logger
 	locks           syncutil.ShardedMutex
 	idemCache       *idempotencyCache
+	rateLimit       *rateLimiter
 
 	// pendingSpend tracks in-flight budget reservations per session.
 	// Key: sessionID, Value: *big.Int (sum of reserved amounts).
@@ -184,6 +185,11 @@ func (s *Service) SweepIdempotencyCache() int {
 	return s.idemCache.sweep()
 }
 
+// SweepRateLimiter removes stale rate limit entries. Called by the Timer.
+func (s *Service) SweepRateLimiter() int {
+	return s.rateLimit.sweep()
+}
+
 // NewService creates a new gateway service.
 func NewService(store Store, resolver *Resolver, forwarder *Forwarder, ledger LedgerService, logger *slog.Logger) *Service {
 	return &Service{
@@ -193,6 +199,7 @@ func NewService(store Store, resolver *Resolver, forwarder *Forwarder, ledger Le
 		ledger:    ledger,
 		logger:    logger,
 		idemCache: newIdempotencyCache(10 * time.Minute),
+		rateLimit: newRateLimiter(),
 	}
 }
 
@@ -298,22 +305,31 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr, tenantID string,
 		warnAt = 0
 	}
 
+	rpmLimit := req.MaxRequestsPerMinute
+	if rpmLimit <= 0 {
+		rpmLimit = defaultMaxRequestsPerMinute
+	}
+	if rpmLimit > 1000 {
+		rpmLimit = 1000
+	}
+
 	now := time.Now()
 	session := &Session{
-		ID:            idgen.WithPrefix("gw_"),
-		AgentAddr:     strings.ToLower(agentAddr),
-		TenantID:      tenantID,
-		MaxTotal:      req.MaxTotal,
-		MaxPerRequest: req.MaxPerRequest,
-		TotalSpent:    "0.000000",
-		RequestCount:  0,
-		Strategy:      strategy,
-		AllowedTypes:  req.AllowedTypes,
-		WarnAtPercent: warnAt,
-		Status:        StatusActive,
-		ExpiresAt:     now.Add(expiresIn),
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:                   idgen.WithPrefix("gw_"),
+		AgentAddr:            strings.ToLower(agentAddr),
+		TenantID:             tenantID,
+		MaxTotal:             req.MaxTotal,
+		MaxPerRequest:        req.MaxPerRequest,
+		TotalSpent:           "0.000000",
+		RequestCount:         0,
+		Strategy:             strategy,
+		AllowedTypes:         req.AllowedTypes,
+		WarnAtPercent:        warnAt,
+		MaxRequestsPerMinute: rpmLimit,
+		Status:               StatusActive,
+		ExpiresAt:            now.Add(expiresIn),
+		CreatedAt:            now,
+		UpdatedAt:            now,
 	}
 
 	// Policy check before holding funds (e.g. time_window enforcement).
@@ -337,6 +353,8 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr, tenantID string,
 			Reference:   session.ID,
 		}
 	}
+
+	s.rateLimit.setLimit(session.ID, rpmLimit)
 
 	if err := s.store.CreateSession(ctx, session); err != nil {
 		if relErr := s.ledger.ReleaseHold(ctx, session.AgentAddr, session.MaxTotal, session.ID); relErr != nil {
@@ -379,6 +397,11 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		return nil, fmt.Errorf("%w: invalid service type %q (must match [a-zA-Z0-9_-]{1,100})", ErrNoServiceAvailable, req.ServiceType)
 	}
 
+	// Rate limit check — before any lock acquisition or DB access.
+	if !s.rateLimit.allow(sessionID) {
+		return nil, ErrRateLimited
+	}
+
 	// Idempotency: if the client provides a key, check cache or reserve for processing.
 	idemReserved := false
 	if req.IdempotencyKey != "" {
@@ -418,20 +441,11 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		return nil, ErrSessionExpired
 	}
 
-	// Check allowed types
-	if len(session.AllowedTypes) > 0 {
-		allowed := false
-		for _, t := range session.AllowedTypes {
-			if t == req.ServiceType {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			unlock()
-			cancelIdem()
-			return nil, fmt.Errorf("%w: service type %q not in allowed types", ErrNoServiceAvailable, req.ServiceType)
-		}
+	// Check allowed types (O(1) map lookup).
+	if !session.IsTypeAllowed(req.ServiceType) {
+		unlock()
+		cancelIdem()
+		return nil, fmt.Errorf("%w: service type %q not in allowed types", ErrNoServiceAvailable, req.ServiceType)
 	}
 
 	// Resolve candidates
@@ -764,6 +778,8 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 		s.pendingSpend.Delete(sessionID)
 	}
 
+	s.rateLimit.remove(sessionID)
+
 	session.Status = StatusClosed
 	session.UpdatedAt = time.Now()
 
@@ -959,6 +975,8 @@ func (s *Service) AutoCloseExpired(ctx context.Context, session *Session) error 
 	if pending.Sign() == 0 {
 		s.pendingSpend.Delete(fresh.ID)
 	}
+
+	s.rateLimit.remove(fresh.ID)
 
 	fresh.Status = StatusExpired
 	fresh.UpdatedAt = time.Now()
