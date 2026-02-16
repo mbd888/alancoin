@@ -284,6 +284,15 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr, tenantID string,
 		}
 	}
 
+	// Check tenant status before proceeding.
+	if tenantID != "" && s.tenantSettings != nil {
+		if status, err := s.tenantSettings.GetTenantStatus(ctx, tenantID); err == nil {
+			if status == "suspended" || status == "cancelled" {
+				return nil, ErrTenantSuspended
+			}
+		}
+	}
+
 	strategy := req.Strategy
 	if strategy == "" {
 		strategy = "cheapest"
@@ -377,6 +386,9 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr, tenantID string,
 		}
 	}
 
+	gwSessionsCreated.Inc()
+	gwActiveSessions.Inc()
+
 	return session, nil
 }
 
@@ -397,8 +409,11 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		return nil, fmt.Errorf("%w: invalid service type %q (must match [a-zA-Z0-9_-]{1,100})", ErrNoServiceAvailable, req.ServiceType)
 	}
 
+	proxyStart := time.Now()
+
 	// Rate limit check — before any lock acquisition or DB access.
 	if !s.rateLimit.allow(sessionID) {
+		gwProxyRequests.WithLabelValues("rate_limited").Inc()
 		return nil, ErrRateLimited
 	}
 
@@ -439,6 +454,18 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		unlock()
 		cancelIdem()
 		return nil, ErrSessionExpired
+	}
+
+	// Check tenant status (suspended tenants cannot proxy).
+	if session.TenantID != "" && s.tenantSettings != nil {
+		if status, err := s.tenantSettings.GetTenantStatus(ctx, session.TenantID); err == nil {
+			if status == "suspended" || status == "cancelled" {
+				gwProxyRequests.WithLabelValues("tenant_suspended").Inc()
+				unlock()
+				cancelIdem()
+				return nil, ErrTenantSuspended
+			}
+		}
 	}
 
 	// Check allowed types (O(1) map lookup).
@@ -496,9 +523,16 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		}
 
 		// Policy check (under lock, before budget reservation).
+		// Project pendingSpend into session so the evaluator sees in-flight
+		// reservations from concurrent requests, preventing spend-limit bypass.
 		var policyDecision *PolicyDecision
 		if s.policyEvaluator != nil {
-			policyDecision, err = s.policyEvaluator.EvaluateProxy(ctx, session, req.ServiceType)
+			projected := *session
+			if pending := s.getPendingSpend(sessionIDCopy); pending.Sign() > 0 {
+				spentBig, _ := usdc.Parse(projected.TotalSpent)
+				projected.TotalSpent = usdc.Format(new(big.Int).Add(spentBig, pending))
+			}
+			policyDecision, err = s.policyEvaluator.EvaluateProxy(ctx, &projected, req.ServiceType)
 			if err != nil {
 				s.logger.Info("policy denied proxy request",
 					"session", sessionID,
@@ -507,6 +541,8 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 					"rule", policyDecision.GetDeniedRule(),
 					"reason", policyDecision.GetReason())
 				s.logRequestWithPolicy(ctx, sessionIDCopy, req.ServiceType, "", "0", "policy_denied", 0, err.Error(), policyDecision)
+				gwProxyRequests.WithLabelValues("policy_denied").Inc()
+				gwPolicyDenials.WithLabelValues(policyDecision.GetDeniedRule()).Inc()
 				unlock()
 				cancelIdem()
 				return nil, fmt.Errorf("%w: %v", ErrPolicyDenied, err)
@@ -711,11 +747,18 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			s.idemCache.complete(sessionID, req.IdempotencyKey, result)
 		}
 
+		gwProxyRequests.WithLabelValues("success").Inc()
+		gwProxyLatency.Observe(time.Since(proxyStart).Seconds())
+		if amt := parseDecimal(priceStr); amt > 0 {
+			gwSettlementAmount.Observe(amt)
+		}
+
 		return result, nil
 	}
 
 	// All candidates failed.
 	cancelIdem()
+	gwProxyRequests.WithLabelValues("all_failed").Inc()
 
 	if lastErr != nil {
 		if me, ok := lastErr.(*MoneyError); ok {
@@ -811,6 +854,9 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 			Reference:   session.ID,
 		}
 	}
+
+	gwSessionsClosed.WithLabelValues("client").Inc()
+	gwActiveSessions.Dec()
 
 	return session, nil
 }
@@ -985,6 +1031,9 @@ func (s *Service) AutoCloseExpired(ctx context.Context, session *Session) error 
 	var updateErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if updateErr = s.store.UpdateSession(ctx, fresh); updateErr == nil {
+			gwExpiredSessionsClosed.Inc()
+			gwSessionsClosed.WithLabelValues("expired").Inc()
+			gwActiveSessions.Dec()
 			return nil
 		}
 		s.logger.Warn("auto-close status update retry", "session", fresh.ID, "attempt", attempt+1, "error", updateErr)

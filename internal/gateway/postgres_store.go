@@ -202,6 +202,85 @@ func (p *PostgresStore) GetBillingSummary(ctx context.Context, tenantID string) 
 	return row, nil
 }
 
+func (p *PostgresStore) GetBillingTimeSeries(ctx context.Context, tenantID, interval string, from, to time.Time) ([]BillingTimePoint, error) {
+	// Pre-built queries keyed by interval — no SQL string concatenation.
+	queries := map[string]string{
+		"hour": `SELECT date_trunc('hour', created_at) AS bucket, COUNT(*), COUNT(*) FILTER (WHERE status = 'success'), COALESCE(SUM(amount) FILTER (WHERE status = 'success'), 0), COALESCE(SUM(fee_amount) FILTER (WHERE status = 'success'), 0) FROM gateway_request_logs WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3 GROUP BY bucket ORDER BY bucket ASC`,
+		"day":  `SELECT date_trunc('day', created_at) AS bucket, COUNT(*), COUNT(*) FILTER (WHERE status = 'success'), COALESCE(SUM(amount) FILTER (WHERE status = 'success'), 0), COALESCE(SUM(fee_amount) FILTER (WHERE status = 'success'), 0) FROM gateway_request_logs WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3 GROUP BY bucket ORDER BY bucket ASC`,
+		"week": `SELECT date_trunc('week', created_at) AS bucket, COUNT(*), COUNT(*) FILTER (WHERE status = 'success'), COALESCE(SUM(amount) FILTER (WHERE status = 'success'), 0), COALESCE(SUM(fee_amount) FILTER (WHERE status = 'success'), 0) FROM gateway_request_logs WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3 GROUP BY bucket ORDER BY bucket ASC`,
+	}
+	query, ok := queries[interval]
+	if !ok {
+		query = queries["day"]
+	}
+
+	rows, err := p.db.QueryContext(ctx, query, tenantID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var result []BillingTimePoint
+	for rows.Next() {
+		var pt BillingTimePoint
+		if err := rows.Scan(&pt.Bucket, &pt.Requests, &pt.SettledRequests, &pt.Volume, &pt.Fees); err != nil {
+			return nil, err
+		}
+		result = append(result, pt)
+	}
+	return result, rows.Err()
+}
+
+func (p *PostgresStore) GetTopServiceTypes(ctx context.Context, tenantID string, limit int) ([]ServiceTypeUsage, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT service_type,
+			COUNT(*) FILTER (WHERE status = 'success'),
+			COALESCE(SUM(amount) FILTER (WHERE status = 'success'), 0)
+		FROM gateway_request_logs
+		WHERE tenant_id = $1 AND service_type != ''
+		GROUP BY service_type
+		ORDER BY 2 DESC
+		LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var result []ServiceTypeUsage
+	for rows.Next() {
+		var u ServiceTypeUsage
+		if err := rows.Scan(&u.ServiceType, &u.Requests, &u.Volume); err != nil {
+			return nil, err
+		}
+		result = append(result, u)
+	}
+	return result, rows.Err()
+}
+
+func (p *PostgresStore) GetPolicyDenials(ctx context.Context, tenantID string, limit int) ([]*RequestLog, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT id, session_id, tenant_id, service_type, agent_called, amount,
+		       fee_amount, status, latency_ms, error, policy_result, created_at
+		FROM gateway_request_logs
+		WHERE tenant_id = $1 AND status = 'policy_denied'
+		ORDER BY created_at DESC
+		LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var result []*RequestLog
+	for rows.Next() {
+		l, err := scanLog(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, l)
+	}
+	return result, rows.Err()
+}
+
 // --- scanners ---
 
 type sessionScanner interface {

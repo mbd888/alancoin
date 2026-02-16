@@ -72,26 +72,45 @@ func (t *Timer) safeSweepExpired(ctx context.Context) {
 }
 
 func (t *Timer) sweepExpired(ctx context.Context) {
-	expired, err := t.store.ListExpired(ctx, time.Now(), 100)
-	if err != nil {
-		t.logger.Warn("failed to list expired gateway sessions", "error", err)
-		return
+	// Process ALL expired sessions by paginating until none remain (BUG-11 fix).
+	const batchSize = 100
+	totalClosed := 0
+
+	for {
+		expired, err := t.store.ListExpired(ctx, time.Now(), batchSize)
+		if err != nil {
+			t.logger.Warn("failed to list expired gateway sessions", "error", err)
+			break
+		}
+		if len(expired) == 0 {
+			break
+		}
+
+		for _, session := range expired {
+			if err := t.service.AutoCloseExpired(ctx, session); err != nil {
+				t.logger.Warn("failed to auto-close expired gateway session",
+					"sessionId", session.ID,
+					"error", err,
+				)
+				continue
+			}
+			totalClosed++
+			t.logger.Info("auto-closed expired gateway session",
+				"sessionId", session.ID,
+				"agent", session.AgentAddr,
+				"spent", session.TotalSpent,
+				"held", session.MaxTotal,
+			)
+		}
+
+		// If we got fewer than batchSize, there are no more expired sessions.
+		if len(expired) < batchSize {
+			break
+		}
 	}
 
-	for _, session := range expired {
-		if err := t.service.AutoCloseExpired(ctx, session); err != nil {
-			t.logger.Warn("failed to auto-close expired gateway session",
-				"sessionId", session.ID,
-				"error", err,
-			)
-			continue
-		}
-		t.logger.Info("auto-closed expired gateway session",
-			"sessionId", session.ID,
-			"agent", session.AgentAddr,
-			"spent", session.TotalSpent,
-			"held", session.MaxTotal,
-		)
+	if totalClosed > 0 {
+		t.logger.Info("gateway sweep complete", "sessionsClosed", totalClosed)
 	}
 
 	// Sweep expired idempotency cache entries to prevent unbounded growth.

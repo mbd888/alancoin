@@ -18,4 +18,25 @@ type Store interface {
 	ListLogs(ctx context.Context, sessionID string, limit int) ([]*RequestLog, error)
 
 	GetBillingSummary(ctx context.Context, tenantID string) (*BillingSummaryRow, error)
+
+	// Analytics queries for dashboard
+	GetBillingTimeSeries(ctx context.Context, tenantID, interval string, from, to time.Time) ([]BillingTimePoint, error)
+	GetTopServiceTypes(ctx context.Context, tenantID string, limit int) ([]ServiceTypeUsage, error)
+	GetPolicyDenials(ctx context.Context, tenantID string, limit int) ([]*RequestLog, error)
+}
+
+// BillingTimePoint represents one bucket in a time-series aggregation.
+type BillingTimePoint struct {
+	Bucket          time.Time `json:"bucket"`
+	Requests        int64     `json:"requests"`
+	SettledRequests int64     `json:"settledRequests"`
+	Volume          string    `json:"volume"`
+	Fees            string    `json:"fees"`
+}
+
+// ServiceTypeUsage tracks volume by service type.
+type ServiceTypeUsage struct {
+	ServiceType string `json:"serviceType"`
+	Requests    int64  `json:"requests"`
+	Volume      string `json:"volume"`
 }

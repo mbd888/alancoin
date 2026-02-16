@@ -1,0 +1,147 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Active Sessions",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "alancoin_gateway_active_sessions", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": { "thresholds": { "steps": [
+          { "color": "green", "value": null },
+          { "color": "yellow", "value": 50 },
+          { "color": "red", "value": 100 }
+        ]}}
+      }
+    },
+    {
+      "title": "Sessions Created (rate/min)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "targets": [
+        { "expr": "rate(alancoin_gateway_sessions_created_total[5m]) * 60", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Proxy Requests (rate/min)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(alancoin_gateway_proxy_requests_total[5m])) * 60", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Policy Denials (rate/min)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(alancoin_gateway_policy_denials_total[5m])) * 60", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": { "thresholds": { "steps": [
+          { "color": "green", "value": null },
+          { "color": "orange", "value": 1 },
+          { "color": "red", "value": 10 }
+        ]}}
+      }
+    },
+    {
+      "title": "Expired Sessions Closed (rate/min)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "targets": [
+        { "expr": "rate(alancoin_gateway_expired_sessions_closed_total[5m]) * 60", "refId": "A" }
+      ]
+    },
+    {
+      "title": "P50 Proxy Latency (ms)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, rate(alancoin_gateway_proxy_latency_seconds_bucket[5m])) * 1000", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "thresholds": { "steps": [
+          { "color": "green", "value": null },
+          { "color": "yellow", "value": 500 },
+          { "color": "red", "value": 2000 }
+        ]}}
+      }
+    },
+    {
+      "title": "Proxy Requests by Status",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "expr": "rate(alancoin_gateway_proxy_requests_total[5m]) * 60", "legendFormat": "{{status}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } } }
+    },
+    {
+      "title": "Proxy Latency Percentiles",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, rate(alancoin_gateway_proxy_latency_seconds_bucket[5m]))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.9, rate(alancoin_gateway_proxy_latency_seconds_bucket[5m]))", "legendFormat": "p90", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, rate(alancoin_gateway_proxy_latency_seconds_bucket[5m]))", "legendFormat": "p99", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "title": "Sessions Closed by Reason",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "rate(alancoin_gateway_sessions_closed_total[5m]) * 60", "legendFormat": "{{reason}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } } }
+    },
+    {
+      "title": "Settlement Amount Distribution",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, rate(alancoin_gateway_settlement_amount_usdc_bucket[5m]))", "legendFormat": "p50 USDC", "refId": "A" },
+        { "expr": "histogram_quantile(0.9, rate(alancoin_gateway_settlement_amount_usdc_bucket[5m]))", "legendFormat": "p90 USDC", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, rate(alancoin_gateway_settlement_amount_usdc_bucket[5m]))", "legendFormat": "p99 USDC", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } }
+    },
+    {
+      "title": "Policy Denials by Rule Type",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "targets": [
+        { "expr": "rate(alancoin_gateway_policy_denials_total[5m]) * 60", "legendFormat": "{{rule_type}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } } }
+    },
+    {
+      "title": "Session Lifecycle",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "targets": [
+        { "expr": "rate(alancoin_gateway_sessions_created_total[5m]) * 60", "legendFormat": "created", "refId": "A" },
+        { "expr": "sum(rate(alancoin_gateway_sessions_closed_total[5m])) * 60", "legendFormat": "closed", "refId": "B" },
+        { "expr": "alancoin_gateway_active_sessions", "legendFormat": "active", "refId": "C" }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["alancoin", "gateway"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Alancoin Gateway",
+  "uid": "alancoin-gateway",
+  "version": 1
+}

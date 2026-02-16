@@ -29,6 +29,7 @@ var (
 	ErrUnauthorized       = errors.New("gateway: not authorized for this session")
 	ErrPolicyDenied       = errors.New("gateway: policy denied request")
 	ErrRateLimited        = errors.New("gateway: rate limit exceeded")
+	ErrTenantSuspended    = errors.New("gateway: tenant is suspended or cancelled")
 )
 
 // Status represents session state.
@@ -162,9 +163,10 @@ type LedgerService interface {
 	ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error
 }
 
-// TenantSettingsProvider looks up a tenant's take rate.
+// TenantSettingsProvider looks up tenant settings for fee computation and status checks.
 type TenantSettingsProvider interface {
 	GetTakeRateBPS(ctx context.Context, tenantID string) (int, error)
+	GetTenantStatus(ctx context.Context, tenantID string) (string, error)
 }
 
 // RegistryProvider abstracts service discovery.

@@ -70,9 +70,35 @@ jobs:
             exit 1
           fi
 
+  sdk-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install SDK and run tests
+        working-directory: sdks/python
+        run: |
+          pip install -e ".[dev]"
+          pytest tests/ -v
+
+  harness-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install harness and run tests
+        working-directory: experiments
+        run: |
+          pip install -e ".[dev]"
+          pytest tests/ -v
+
   build:
     runs-on: ubuntu-latest
-    needs: [lint, test]
+    needs: [lint, test, sdk-test, harness-test]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6

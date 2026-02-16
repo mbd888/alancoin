@@ -23,6 +23,7 @@ import (
 	_ "github.com/lib/pq" // PostgreSQL driver
 	"github.com/mbd888/alancoin/internal/auth"
 	"github.com/mbd888/alancoin/internal/config"
+	"github.com/mbd888/alancoin/internal/dashboard"
 	"github.com/mbd888/alancoin/internal/escrow"
 	"github.com/mbd888/alancoin/internal/gateway"
 	"github.com/mbd888/alancoin/internal/ledger"
@@ -658,6 +659,12 @@ func (s *Server) setupRoutes() {
 		if s.policyStore != nil {
 			policyHandler := policy.NewHandler(s.policyStore)
 			policyHandler.RegisterRoutes(protectedTenants)
+		}
+
+		// Dashboard analytics routes (tenant-scoped)
+		if s.gatewayStore != nil {
+			dashHandler := dashboard.NewHandler(s.gatewayStore, s.tenantStore)
+			dashHandler.RegisterRoutes(protectedTenants)
 		}
 	}
 
@@ -1497,6 +1504,14 @@ func (a *gatewayTenantSettingsAdapter) GetTakeRateBPS(ctx context.Context, tenan
 		return 0, err
 	}
 	return t.Settings.TakeRateBPS, nil
+}
+
+func (a *gatewayTenantSettingsAdapter) GetTenantStatus(ctx context.Context, tenantID string) (string, error) {
+	t, err := a.store.Get(ctx, tenantID)
+	if err != nil {
+		return "", err
+	}
+	return string(t.Status), nil
 }
 
 // gatewayRegistryAdapter adapts registry.Store to gateway.RegistryProvider
