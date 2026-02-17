@@ -37,10 +37,12 @@ func (h *Handler) Create(c *gin.Context) {
 	}
 
 	var req struct {
-		Name     string `json:"name" binding:"required"`
-		Rules    []Rule `json:"rules" binding:"required"`
-		Priority int    `json:"priority"`
-		Enabled  *bool  `json:"enabled"`
+		Name            string     `json:"name" binding:"required"`
+		Rules           []Rule     `json:"rules" binding:"required"`
+		Priority        int        `json:"priority"`
+		Enabled         *bool      `json:"enabled"`
+		EnforcementMode string     `json:"enforcementMode"`
+		ShadowExpiresAt *time.Time `json:"shadowExpiresAt"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "name and rules required"})
@@ -57,16 +59,37 @@ func (h *Handler) Create(c *gin.Context) {
 		enabled = *req.Enabled
 	}
 
+	enforcementMode := "enforce"
+	if req.EnforcementMode != "" {
+		if req.EnforcementMode != "enforce" && req.EnforcementMode != "shadow" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "enforcementMode must be 'enforce' or 'shadow'"})
+			return
+		}
+		enforcementMode = req.EnforcementMode
+	}
+
 	now := time.Now()
+	var shadowExpiresAt time.Time
+	if enforcementMode == "shadow" {
+		maxShadow := now.Add(30 * 24 * time.Hour) // 30 days max
+		if req.ShadowExpiresAt != nil && req.ShadowExpiresAt.Before(maxShadow) {
+			shadowExpiresAt = *req.ShadowExpiresAt
+		} else {
+			shadowExpiresAt = maxShadow
+		}
+	}
+
 	p := &SpendPolicy{
-		ID:        idgen.WithPrefix("sp_"),
-		TenantID:  tenantID,
-		Name:      validation.SanitizeString(req.Name, 200),
-		Rules:     req.Rules,
-		Priority:  req.Priority,
-		Enabled:   enabled,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:              idgen.WithPrefix("sp_"),
+		TenantID:        tenantID,
+		Name:            validation.SanitizeString(req.Name, 200),
+		Rules:           req.Rules,
+		Priority:        req.Priority,
+		Enabled:         enabled,
+		EnforcementMode: enforcementMode,
+		ShadowExpiresAt: shadowExpiresAt,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 
 	if err := h.store.Create(c.Request.Context(), p); err != nil {
@@ -149,10 +172,12 @@ func (h *Handler) Update(c *gin.Context) {
 	}
 
 	var req struct {
-		Name     *string `json:"name"`
-		Rules    []Rule  `json:"rules"`
-		Priority *int    `json:"priority"`
-		Enabled  *bool   `json:"enabled"`
+		Name            *string    `json:"name"`
+		Rules           []Rule     `json:"rules"`
+		Priority        *int       `json:"priority"`
+		Enabled         *bool      `json:"enabled"`
+		EnforcementMode *string    `json:"enforcementMode"`
+		ShadowExpiresAt *time.Time `json:"shadowExpiresAt"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "invalid body"})
@@ -174,6 +199,24 @@ func (h *Handler) Update(c *gin.Context) {
 	}
 	if req.Enabled != nil {
 		existing.Enabled = *req.Enabled
+	}
+	if req.EnforcementMode != nil {
+		if *req.EnforcementMode != "enforce" && *req.EnforcementMode != "shadow" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "enforcementMode must be 'enforce' or 'shadow'"})
+			return
+		}
+		existing.EnforcementMode = *req.EnforcementMode
+		if *req.EnforcementMode == "shadow" {
+			now := time.Now()
+			maxShadow := now.Add(30 * 24 * time.Hour)
+			if req.ShadowExpiresAt != nil && req.ShadowExpiresAt.Before(maxShadow) {
+				existing.ShadowExpiresAt = *req.ShadowExpiresAt
+			} else if existing.ShadowExpiresAt.IsZero() {
+				existing.ShadowExpiresAt = maxShadow
+			}
+		} else {
+			existing.ShadowExpiresAt = time.Time{}
+		}
 	}
 	existing.UpdatedAt = time.Now()
 

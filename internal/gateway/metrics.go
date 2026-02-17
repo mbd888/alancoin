@@ -60,6 +60,13 @@ var (
 		Name:      "expired_sessions_closed_total",
 		Help:      "Total sessions auto-closed by expiry timer.",
 	})
+
+	gwPolicyShadowDenials = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Subsystem: "gateway",
+		Name:      "policy_shadow_denials_total",
+		Help:      "Total shadow-mode policy denials by rule type (logged only, not enforced).",
+	}, []string{"rule_type"})
 )
 
 func init() {
@@ -72,5 +79,6 @@ func init() {
 		gwActiveSessions,
 		gwPolicyDenials,
 		gwExpiredSessionsClosed,
+		gwPolicyShadowDenials,
 	)
 }

@@ -45,6 +45,7 @@ func (h *Handler) RegisterProtectedRoutes(r *gin.RouterGroup) {
 	r.GET("/gateway/sessions/:id", h.GetSession)
 	r.DELETE("/gateway/sessions/:id", h.CloseSession)
 	r.GET("/gateway/sessions/:id/logs", h.ListLogs)
+	r.POST("/gateway/sessions/:id/dry-run", h.DryRun)
 	r.POST("/gateway/call", h.SingleCall)
 }
 
@@ -352,6 +353,55 @@ func (h *Handler) SingleCall(c *gin.Context) {
 			}
 		}
 		c.JSON(status, resp)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"result": result})
+}
+
+// DryRun handles POST /v1/gateway/sessions/:id/dry-run
+// Pre-checks policy, budget, and service availability without moving money.
+func (h *Handler) DryRun(c *gin.Context) {
+	sessionID := c.Param("id")
+
+	// Verify ownership
+	session, err := h.service.GetSession(c.Request.Context(), sessionID)
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Session not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		return
+	}
+
+	callerAddr := strings.ToLower(c.GetString("authAgentAddr"))
+	if callerAddr != session.AgentAddr {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden", "message": "Not your session"})
+		return
+	}
+
+	var req ProxyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "Invalid request body: serviceType is required",
+		})
+		return
+	}
+
+	result, err := h.service.DryRun(c.Request.Context(), sessionID, req)
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := "dry_run_failed"
+		if errors.Is(err, ErrSessionNotFound) {
+			status = http.StatusNotFound
+			code = "not_found"
+		} else if errors.Is(err, ErrNoServiceAvailable) {
+			status = http.StatusNotFound
+			code = "no_service"
+		}
+		c.JSON(status, gin.H{"error": code, "message": err.Error()})
 		return
 	}
 

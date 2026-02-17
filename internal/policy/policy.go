@@ -21,14 +21,16 @@ var (
 
 // SpendPolicy is a named, ordered set of rules enforced on gateway proxy calls.
 type SpendPolicy struct {
-	ID        string    `json:"id"`
-	TenantID  string    `json:"tenantId"`
-	Name      string    `json:"name"`
-	Rules     []Rule    `json:"rules"`
-	Priority  int       `json:"priority"` // lower = evaluated first
-	Enabled   bool      `json:"enabled"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID              string    `json:"id"`
+	TenantID        string    `json:"tenantId"`
+	Name            string    `json:"name"`
+	Rules           []Rule    `json:"rules"`
+	Priority        int       `json:"priority"` // lower = evaluated first
+	Enabled         bool      `json:"enabled"`
+	EnforcementMode string    `json:"enforcementMode"`           // "enforce" (default) or "shadow"
+	ShadowExpiresAt time.Time `json:"shadowExpiresAt,omitempty"` // auto-flip deadline (30-day max)
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
 // Rule is a single constraint within a policy.

@@ -2037,6 +2037,359 @@ func TestRateLimiter_Sweep(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// DryRun tests
+// ---------------------------------------------------------------------------
+
+func TestDryRun_AllGreen(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "translate", Price: "0.50", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	result, err := svc.DryRun(ctx, session.ID, ProxyRequest{ServiceType: "translation"})
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if !result.Allowed {
+		t.Errorf("expected allowed, got denied: %s", result.DenyReason)
+	}
+	if !result.BudgetOK {
+		t.Error("expected budgetOk=true")
+	}
+	if !result.ServiceFound {
+		t.Error("expected serviceFound=true")
+	}
+	if result.BestPrice != "0.50" {
+		t.Errorf("expected bestPrice 0.50, got %s", result.BestPrice)
+	}
+	if result.BestService != "translate" {
+		t.Errorf("expected bestService translate, got %s", result.BestService)
+	}
+	// DryRun must NOT move money
+	if len(ml.settlements) != 0 {
+		t.Errorf("expected 0 settlements (dry run), got %d", len(ml.settlements))
+	}
+	// Session spend unchanged
+	updated, _ := svc.GetSession(ctx, session.ID)
+	if updated.RequestCount != 0 {
+		t.Errorf("expected 0 requests (dry run), got %d", updated.RequestCount)
+	}
+}
+
+func TestDryRun_NoService(t *testing.T) {
+	ml := newMockLedger()
+	reg := &mockRegistry{services: nil}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	result, err := svc.DryRun(ctx, session.ID, ProxyRequest{ServiceType: "translation"})
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if result.Allowed {
+		t.Error("expected denied when no services available")
+	}
+	if result.ServiceFound {
+		t.Error("expected serviceFound=false")
+	}
+}
+
+func TestDryRun_PolicyDenied(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.10", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	policy := &mockPolicyEvaluator{
+		decision: &PolicyDecision{
+			Evaluated:  1,
+			Allowed:    false,
+			DeniedBy:   "rate_policy",
+			DeniedRule: "tx_count",
+			Reason:     "limit exceeded",
+		},
+		err:       fmt.Errorf("limit exceeded"),
+		denyAfter: 1, // allow CreateSession, deny DryRun
+	}
+	svc.WithPolicyEvaluator(policy)
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+
+	result, err := svc.DryRun(ctx, session.ID, ProxyRequest{ServiceType: "test"})
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if result.Allowed {
+		t.Error("expected denied when policy blocks")
+	}
+	if result.PolicyResult == nil {
+		t.Fatal("expected PolicyResult in dry run result")
+	}
+	if result.PolicyResult.DeniedRule != "tx_count" {
+		t.Errorf("expected deniedRule 'tx_count', got %q", result.PolicyResult.DeniedRule)
+	}
+}
+
+func TestDryRun_ClosedSession(t *testing.T) {
+	ml := newMockLedger()
+	svc := newTestServiceWithLogger(ml, &mockRegistry{})
+
+	ctx := context.Background()
+	session, _ := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+	svc.CloseSession(ctx, session.ID, "0xbuyer")
+
+	result, err := svc.DryRun(ctx, session.ID, ProxyRequest{ServiceType: "test"})
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if result.Allowed {
+		t.Error("expected denied for closed session")
+	}
+	if result.DenyReason != "session is not active" {
+		t.Errorf("expected 'session is not active', got %q", result.DenyReason)
+	}
+}
+
+func TestDryRun_ShadowPolicyStillAllows(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.10", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	// Shadow policy: would deny but Shadow=true means it doesn't block.
+	policy := &mockPolicyEvaluator{
+		decision: &PolicyDecision{
+			Evaluated:  1,
+			Allowed:    false,
+			Shadow:     true,
+			DeniedBy:   "shadow_policy",
+			DeniedRule: "tx_count",
+			Reason:     "shadow denial",
+		},
+		// Shadow mode: decision has Allowed=false + Shadow=true, but err is nil.
+		err:       nil,
+		denyAfter: 1, // allow CreateSession (1st call), return shadow on DryRun (2nd call)
+	}
+	svc.WithPolicyEvaluator(policy)
+
+	ctx := context.Background()
+	session, err := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	result, err := svc.DryRun(ctx, session.ID, ProxyRequest{ServiceType: "test"})
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if !result.Allowed {
+		t.Error("expected allowed (shadow policy should not block)")
+	}
+	if result.PolicyResult == nil {
+		t.Fatal("expected PolicyResult to be present")
+	}
+	if !result.PolicyResult.Shadow {
+		t.Error("expected shadow=true in policy result")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// valueScore big.Float fix tests
+// ---------------------------------------------------------------------------
+
+func TestValueScore_SmallPrice(t *testing.T) {
+	score := valueScore(ServiceCandidate{
+		Price:           "0.50",
+		ReputationScore: 80,
+	})
+	if score <= 0 {
+		t.Errorf("expected positive score, got %f", score)
+	}
+	// Reputation 80 / price $0.50 = 160
+	expected := 160.0
+	if score < expected*0.99 || score > expected*1.01 {
+		t.Errorf("expected ~%.1f, got %f", expected, score)
+	}
+}
+
+func TestValueScore_ZeroPrice(t *testing.T) {
+	score := valueScore(ServiceCandidate{
+		Price:           "0.00",
+		ReputationScore: 80,
+	})
+	if score != 0 {
+		t.Errorf("expected 0 for zero price, got %f", score)
+	}
+}
+
+func TestValueScore_InvalidPrice(t *testing.T) {
+	score := valueScore(ServiceCandidate{
+		Price:           "invalid",
+		ReputationScore: 80,
+	})
+	if score != 0 {
+		t.Errorf("expected 0 for invalid price, got %f", score)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Policy evaluation error (nil decision) path test
+// ---------------------------------------------------------------------------
+
+func TestProxy_PolicyEvalFailure_NilDecision(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.10", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	// Policy evaluator returns nil decision + error (store failure).
+	policy := &mockPolicyEvaluator{
+		decision:  nil,
+		err:       fmt.Errorf("database connection refused"),
+		denyAfter: 1, // allow CreateSession, fail on Proxy
+	}
+	svc.WithPolicyEvaluator(policy)
+
+	ctx := context.Background()
+	session, err := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, err = svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "test"})
+	if err == nil {
+		t.Fatal("expected error when policy evaluator returns nil decision + error")
+	}
+
+	// Should not have forwarded (fail closed)
+	if len(ml.settlements) != 0 {
+		t.Errorf("expected 0 settlements (fail closed), got %d", len(ml.settlements))
+	}
+
+	// Check request log for "policy_error" status
+	logs, _ := svc.ListLogs(ctx, session.ID, 10)
+	var found bool
+	for _, log := range logs {
+		if log.Status == "policy_error" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a 'policy_error' log entry for nil-decision store failure")
+	}
+}
+
+func TestProxy_ShadowPolicyDoesNotBlock(t *testing.T) {
+	server := fakeServiceEndpoint(200, map[string]interface{}{"ok": true})
+	defer server.Close()
+
+	ml := newMockLedger()
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xseller", ServiceID: "svc1", ServiceName: "test", Price: "0.10", Endpoint: server.URL},
+		},
+	}
+	svc := newTestServiceWithLogger(ml, reg)
+
+	// Shadow policy: decision.Allowed=false, Shadow=true, err=nil
+	policy := &mockPolicyEvaluator{
+		decision: &PolicyDecision{
+			Evaluated:  1,
+			Allowed:    false,
+			Shadow:     true,
+			DeniedBy:   "shadow_test",
+			DeniedRule: "tx_count",
+			Reason:     "shadow denial",
+		},
+		err:       nil, // nil error + shadow = allow
+		denyAfter: 1,   // allow CreateSession (1st call), shadow deny on Proxy (2nd call)
+	}
+	svc.WithPolicyEvaluator(policy)
+
+	ctx := context.Background()
+	session, err := svc.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
+		MaxTotal:      "10.00",
+		MaxPerRequest: "1.00",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	result, err := svc.Proxy(ctx, session.ID, ProxyRequest{ServiceType: "test"})
+	if err != nil {
+		t.Fatalf("shadow policy should not block proxy: %v", err)
+	}
+	if result.AmountPaid != "0.100000" {
+		t.Errorf("expected 0.100000 paid, got %s", result.AmountPaid)
+	}
+
+	// Should have settled (request went through)
+	if len(ml.settlements) != 1 {
+		t.Errorf("expected 1 settlement (shadow allows), got %d", len(ml.settlements))
+	}
+
+	// Check request logs for shadow_denied entry
+	logs, _ := svc.ListLogs(ctx, session.ID, 10)
+	var shadowFound bool
+	for _, log := range logs {
+		if log.Status == "shadow_denied" {
+			shadowFound = true
+		}
+	}
+	if !shadowFound {
+		t.Error("expected a 'shadow_denied' log entry")
+	}
+}
+
 func TestIdempotencyCacheSweep(t *testing.T) {
 	cache := newIdempotencyCache(50 * time.Millisecond) // 50ms TTL
 

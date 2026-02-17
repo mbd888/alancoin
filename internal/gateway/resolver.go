@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"sort"
 
 	"github.com/mbd888/alancoin/internal/usdc"
@@ -95,10 +96,12 @@ func valueScore(c ServiceCandidate) float64 {
 	if price == nil || price.Sign() == 0 {
 		return 0
 	}
-	// Reputation per unit cost (higher = better deal)
-	priceF := float64(price.Int64()) / 1e6
+	// Use big.Float to avoid Int64() truncation on large values.
+	priceF, _ := new(big.Float).SetInt(price).Float64()
 	if priceF == 0 {
 		return 0
 	}
-	return c.ReputationScore / priceF
+	// Reputation per unit cost (higher = better deal).
+	// price is in USDC base units (6 decimals), so divide by 1e6.
+	return c.ReputationScore / (priceF / 1e6)
 }

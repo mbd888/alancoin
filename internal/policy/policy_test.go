@@ -1135,3 +1135,225 @@ func TestEvaluator_MultiRule_SecondDenies(t *testing.T) {
 		t.Errorf("DeniedRule = %q, want service_allowlist", decision.DeniedRule)
 	}
 }
+
+// ============================================================================
+// Rate limit burst cap tests (Bug 3 fix)
+// ============================================================================
+
+func TestEvaluator_RateLimit_NoBurstAfterIdle(t *testing.T) {
+	store := NewMemoryStore()
+	params, _ := json.Marshal(RateLimitParams{MaxRequests: 10, WindowSeconds: 60})
+	pol := &SpendPolicy{
+		ID:        "sp_1",
+		TenantID:  "ten_abc",
+		Name:      "rate limit",
+		Rules:     []Rule{{Type: "rate_limit", Params: params}},
+		Enabled:   true,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	_ = store.Create(context.Background(), pol)
+	eval := NewEvaluator(store)
+
+	// Session is 100 windows old (100 minutes). Under the old code, allowed = 10 * 100 = 1000.
+	// Under the fix, allowed = 10 * 2 = 20 (capped at 2 windows).
+	session := makeSession("ten_abc", 20, "0.000000", time.Now().Add(-100*time.Minute))
+	_, err := eval.EvaluateProxy(context.Background(), session, "translation")
+	if err == nil {
+		t.Error("20 requests should be denied after idle (max 20 with 2-window cap)")
+	}
+
+	// 19 requests should still be allowed
+	session = makeSession("ten_abc", 19, "0.000000", time.Now().Add(-100*time.Minute))
+	decision, err := eval.EvaluateProxy(context.Background(), session, "translation")
+	if err != nil {
+		t.Fatalf("19 requests should be allowed with 2-window cap: %v", err)
+	}
+	if !decision.Allowed {
+		t.Error("19/20 should be allowed")
+	}
+}
+
+// ============================================================================
+// Shadow mode tests
+// ============================================================================
+
+func TestEvaluator_ShadowMode_LogsButDoesNotBlock(t *testing.T) {
+	store := NewMemoryStore()
+	params, _ := json.Marshal(MaxRequestsParams{MaxCount: 1})
+	pol := &SpendPolicy{
+		ID:              "sp_shadow",
+		TenantID:        "ten_abc",
+		Name:            "shadow policy",
+		Rules:           []Rule{{Type: "max_requests", Params: params}},
+		Enabled:         true,
+		EnforcementMode: "shadow",
+		ShadowExpiresAt: time.Now().Add(24 * time.Hour),
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+	_ = store.Create(context.Background(), pol)
+	eval := NewEvaluator(store)
+
+	// 5 requests exceeds max_requests=1, but shadow mode should NOT block.
+	session := makeSession("ten_abc", 5, "10.000000", time.Now())
+	decision, err := eval.EvaluateProxy(context.Background(), session, "translation")
+	if err != nil {
+		t.Fatalf("shadow mode should not return error: %v", err)
+	}
+	// Decision should be a shadow denial (Allowed=false, Shadow=true).
+	if decision.Allowed {
+		t.Error("decision.Allowed should be false (shadow denial)")
+	}
+	if !decision.Shadow {
+		t.Error("decision.Shadow should be true")
+	}
+	if decision.DeniedBy != "shadow policy" {
+		t.Errorf("DeniedBy = %q, want 'shadow policy'", decision.DeniedBy)
+	}
+	if decision.DeniedRule != "max_requests" {
+		t.Errorf("DeniedRule = %q, want 'max_requests'", decision.DeniedRule)
+	}
+}
+
+func TestEvaluator_ShadowMode_ExpiredFallsBackToEnforce(t *testing.T) {
+	store := NewMemoryStore()
+	params, _ := json.Marshal(MaxRequestsParams{MaxCount: 1})
+	pol := &SpendPolicy{
+		ID:              "sp_expired_shadow",
+		TenantID:        "ten_abc",
+		Name:            "expired shadow",
+		Rules:           []Rule{{Type: "max_requests", Params: params}},
+		Enabled:         true,
+		EnforcementMode: "shadow",
+		ShadowExpiresAt: time.Now().Add(-1 * time.Hour), // expired
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+	_ = store.Create(context.Background(), pol)
+	eval := NewEvaluator(store)
+
+	// Shadow expired → should enforce and deny.
+	session := makeSession("ten_abc", 5, "10.000000", time.Now())
+	_, err := eval.EvaluateProxy(context.Background(), session, "translation")
+	if err == nil {
+		t.Error("expired shadow mode should enforce and deny")
+	}
+}
+
+func TestEvaluator_EnforceMode_StillBlocks(t *testing.T) {
+	store := NewMemoryStore()
+	params, _ := json.Marshal(MaxRequestsParams{MaxCount: 1})
+	pol := &SpendPolicy{
+		ID:              "sp_enforce",
+		TenantID:        "ten_abc",
+		Name:            "enforce policy",
+		Rules:           []Rule{{Type: "max_requests", Params: params}},
+		Enabled:         true,
+		EnforcementMode: "enforce",
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+	_ = store.Create(context.Background(), pol)
+	eval := NewEvaluator(store)
+
+	session := makeSession("ten_abc", 5, "10.000000", time.Now())
+	_, err := eval.EvaluateProxy(context.Background(), session, "translation")
+	if err == nil {
+		t.Error("enforce mode should block")
+	}
+}
+
+// ============================================================================
+// Shadow mode handler tests
+// ============================================================================
+
+func TestHandler_CreateShadowPolicy(t *testing.T) {
+	store := NewMemoryStore()
+	router := setupRouter(store, "ten_abc")
+
+	body := `{
+		"name": "shadow test",
+		"rules": [{"type":"max_requests","params":{"maxCount":5}}],
+		"enforcementMode": "shadow"
+	}`
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/tenants/ten_abc/policies", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("Create shadow: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Policy SpendPolicy `json:"policy"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Policy.EnforcementMode != "shadow" {
+		t.Errorf("EnforcementMode = %q, want 'shadow'", resp.Policy.EnforcementMode)
+	}
+	if resp.Policy.ShadowExpiresAt.IsZero() {
+		t.Error("ShadowExpiresAt should be auto-set")
+	}
+}
+
+func TestHandler_CreateInvalidEnforcementMode(t *testing.T) {
+	store := NewMemoryStore()
+	router := setupRouter(store, "ten_abc")
+
+	body := `{
+		"name": "bad mode",
+		"rules": [{"type":"max_requests","params":{"maxCount":5}}],
+		"enforcementMode": "yolo"
+	}`
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/tenants/ten_abc/policies", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid enforcementMode, got %d", w.Code)
+	}
+}
+
+func TestHandler_UpdateToShadowMode(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now()
+	_ = store.Create(ctx, &SpendPolicy{
+		ID:              "sp_1",
+		TenantID:        "ten_abc",
+		Name:            "test",
+		Rules:           []Rule{{Type: "max_requests", Params: json.RawMessage(`{"maxCount":10}`)}},
+		Enabled:         true,
+		EnforcementMode: "enforce",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	})
+
+	router := setupRouter(store, "ten_abc")
+
+	body := `{"enforcementMode":"shadow"}`
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/tenants/ten_abc/policies/sp_1", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Update to shadow: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Policy SpendPolicy `json:"policy"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Policy.EnforcementMode != "shadow" {
+		t.Errorf("EnforcementMode = %q, want 'shadow'", resp.Policy.EnforcementMode)
+	}
+	if resp.Policy.ShadowExpiresAt.IsZero() {
+		t.Error("ShadowExpiresAt should be auto-set when switching to shadow")
+	}
+}

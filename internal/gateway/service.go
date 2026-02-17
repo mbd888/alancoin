@@ -536,21 +536,43 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			}
 			policyDecision, err = s.policyEvaluator.EvaluateProxy(ctx, &projected, req.ServiceType)
 			if err != nil {
-				s.logger.Info("policy denied proxy request",
+				if policyDecision != nil {
+					// Genuine policy denial — decision carries rule details.
+					s.logger.Info("policy denied proxy request",
+						"session", sessionID,
+						"agent", session.AgentAddr,
+						"policy", policyDecision.GetDeniedBy(),
+						"rule", policyDecision.GetDeniedRule(),
+						"reason", policyDecision.GetReason())
+					s.logRequestWithPolicy(ctx, sessionIDCopy, tenantIDCopy, req.ServiceType, "", "0", "policy_denied", 0, err.Error(), policyDecision)
+					gwProxyRequests.WithLabelValues("policy_denied").Inc()
+					gwPolicyDenials.WithLabelValues(policyDecision.GetDeniedRule()).Inc()
+				} else {
+					// Store/evaluator failure — fail closed but label correctly.
+					s.logger.Error("policy evaluation failed",
+						"session", sessionID, "error", err)
+					s.logRequest(ctx, sessionIDCopy, tenantIDCopy, req.ServiceType, "", "0", "policy_error", 0, err.Error())
+					gwProxyRequests.WithLabelValues("policy_error").Inc()
+					gwPolicyDenials.WithLabelValues("evaluation_error").Inc()
+				}
+				unlock()
+				cancelIdem()
+				return nil, fmt.Errorf("%w: %v", ErrPolicyDenied, err)
+			}
+			// Shadow mode: policy would deny but enforcement is shadow-only.
+			// Log the shadow denial and let the request proceed.
+			if policyDecision != nil && !policyDecision.Allowed && policyDecision.Shadow {
+				s.logger.Info("policy shadow denied proxy request",
 					"session", sessionID,
 					"agent", session.AgentAddr,
 					"policy", policyDecision.GetDeniedBy(),
 					"rule", policyDecision.GetDeniedRule(),
 					"reason", policyDecision.GetReason())
-				s.logRequestWithPolicy(ctx, sessionIDCopy, tenantIDCopy, req.ServiceType, "", "0", "policy_denied", 0, err.Error(), policyDecision)
-				gwProxyRequests.WithLabelValues("policy_denied").Inc()
-				gwPolicyDenials.WithLabelValues(policyDecision.GetDeniedRule()).Inc()
-				unlock()
-				cancelIdem()
-				return nil, fmt.Errorf("%w: %v", ErrPolicyDenied, err)
+				s.logRequestWithPolicy(ctx, sessionIDCopy, tenantIDCopy, req.ServiceType, "", "0", "shadow_denied", 0, policyDecision.GetReason(), policyDecision)
+				gwPolicyShadowDenials.WithLabelValues(policyDecision.GetDeniedRule()).Inc()
+				// Don't block — continue to budget check and proxy.
 			}
 		}
-		_ = policyDecision // used in logging below
 
 		// Budget check: account for both settled spend AND in-flight reservations.
 		spentBig, _ := usdc.Parse(session.TotalSpent)
@@ -785,6 +807,88 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		return nil, fmt.Errorf("%w: %v", ErrProxyFailed, lastErr)
 	}
 	return nil, ErrProxyFailed
+}
+
+// DryRun checks whether a proxy request would succeed without moving money
+// or incrementing counters.
+func (s *Service) DryRun(ctx context.Context, sessionID string, req ProxyRequest) (*DryRunResult, error) {
+	if !validServiceType.MatchString(req.ServiceType) {
+		return nil, fmt.Errorf("%w: invalid service type %q", ErrNoServiceAvailable, req.ServiceType)
+	}
+
+	session, err := s.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &DryRunResult{}
+
+	// Check session status.
+	if session.Status != StatusActive {
+		result.DenyReason = "session is not active"
+		return result, nil
+	}
+	if session.IsExpired() {
+		result.DenyReason = "session has expired"
+		return result, nil
+	}
+
+	// Policy check.
+	if s.policyEvaluator != nil {
+		projected := *session
+		decision, pErr := s.policyEvaluator.EvaluateProxy(ctx, &projected, req.ServiceType)
+		if pErr != nil {
+			if decision != nil {
+				result.PolicyResult = decision
+				result.DenyReason = decision.Reason
+			} else {
+				result.DenyReason = "policy evaluation failed: " + pErr.Error()
+			}
+			return result, nil
+		}
+		result.PolicyResult = decision
+		if decision != nil && !decision.Allowed && !decision.Shadow {
+			result.DenyReason = decision.Reason
+			return result, nil
+		}
+	}
+	result.Allowed = true
+
+	// Budget check.
+	holdBig, _ := usdc.Parse(session.MaxTotal)
+	spentBig, _ := usdc.Parse(session.TotalSpent)
+	remaining := new(big.Int).Sub(holdBig, spentBig)
+	if remaining.Sign() < 0 {
+		remaining.SetInt64(0)
+	}
+	result.Remaining = usdc.Format(remaining)
+	result.BudgetOK = remaining.Sign() > 0
+
+	// Resolver check.
+	candidates, rErr := s.resolver.Resolve(ctx, req, session.Strategy, session.MaxPerRequest)
+	if rErr != nil {
+		result.ServiceFound = false
+		if result.BudgetOK {
+			result.Allowed = false
+			result.DenyReason = "no service available"
+		}
+		return result, nil
+	}
+
+	result.ServiceFound = true
+	if len(candidates) > 0 {
+		result.BestPrice = candidates[0].Price
+		result.BestService = candidates[0].ServiceName
+		// Check if budget covers best price.
+		bestBig, ok := usdc.Parse(candidates[0].Price)
+		if ok && bestBig.Cmp(remaining) > 0 {
+			result.BudgetOK = false
+			result.Allowed = false
+			result.DenyReason = "budget insufficient for cheapest service"
+		}
+	}
+
+	return result, nil
 }
 
 // CloseSession settles a session, releasing unspent funds.

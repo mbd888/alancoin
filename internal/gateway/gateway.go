@@ -222,6 +222,18 @@ type SingleCallResult struct {
 	LatencyMs   int64                  `json:"latencyMs"`
 }
 
+// DryRunResult is the response from a dry-run policy/budget/service check.
+type DryRunResult struct {
+	Allowed      bool            `json:"allowed"`
+	PolicyResult *PolicyDecision `json:"policyResult,omitempty"`
+	BudgetOK     bool            `json:"budgetOk"`
+	Remaining    string          `json:"remaining"`
+	ServiceFound bool            `json:"serviceFound"`
+	BestPrice    string          `json:"bestPrice,omitempty"`
+	BestService  string          `json:"bestService,omitempty"`
+	DenyReason   string          `json:"denyReason,omitempty"`
+}
+
 // BillingSummaryRow holds raw aggregation values from the request logs.
 type BillingSummaryRow struct {
 	TotalRequests   int64

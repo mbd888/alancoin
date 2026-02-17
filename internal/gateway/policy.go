@@ -16,6 +16,7 @@ type PolicyDecision struct {
 	DeniedBy   string `json:"deniedBy,omitempty"`   // policy name that denied, if any
 	DeniedRule string `json:"deniedRule,omitempty"` // rule type that denied
 	Reason     string `json:"reason,omitempty"`
+	Shadow     bool   `json:"shadow,omitempty"` // true = logged only, not enforced
 	LatencyUs  int64  `json:"latencyUs"`
 }
 

@@ -65,6 +65,13 @@ func (e *Evaluator) EvaluateProxy(ctx context.Context, session *gateway.Session,
 					Reason:     err.Error(),
 					LatencyUs:  time.Since(start).Microseconds(),
 				}
+				// Shadow mode: if policy is in shadow mode and not expired,
+				// return the denial decision with Shadow=true and nil error
+				// so the caller logs it but doesn't block the request.
+				if pol.EnforcementMode == "shadow" && (pol.ShadowExpiresAt.IsZero() || time.Now().Before(pol.ShadowExpiresAt)) {
+					decision.Shadow = true
+					return decision, nil
+				}
 				return decision, fmt.Errorf("denied by policy %q rule %s: %w", pol.Name, rule.Type, err)
 			}
 		}
@@ -149,19 +156,21 @@ func evalRateLimit(rule Rule, session *gateway.Session) error {
 	elapsed := time.Since(session.CreatedAt)
 	window := time.Duration(p.WindowSeconds) * time.Second
 
-	// Proportional cap: allow maxRequests per window, scaled by session age.
-	// windows = max(1, ceil(elapsed / window))
-	// allowed = maxRequests * windows
-	// This prevents unbounded bursting while being fair to long sessions.
+	// Fixed window with carry-over: allow up to 2x burst (current + previous window)
+	// but never more, regardless of session age. This prevents unlimited accumulation
+	// where a long-idle session could burst massively.
 	windows := int(elapsed / window)
 	if windows < 1 {
 		windows = 1
 	}
+	if windows > 2 {
+		windows = 2 // Cap: at most 2x burst, prevents unlimited accumulation
+	}
 	allowed := p.MaxRequests * windows
 
 	if session.RequestCount >= allowed {
-		return fmt.Errorf("rate limit exceeded: %d requests in %v (max %d per %v, %d allowed over %d windows)",
-			session.RequestCount, elapsed.Truncate(time.Second), p.MaxRequests, window, allowed, windows)
+		return fmt.Errorf("rate limit exceeded: %d requests (max %d per %v, %d allowed over %d windows)",
+			session.RequestCount, p.MaxRequests, window, allowed, windows)
 	}
 
 	return nil
