@@ -23,7 +23,7 @@ type Config struct {
 	// Blockchain settings
 	RPCURL        string
 	ChainID       int64
-	PrivateKey    string // Hex-encoded, no 0x prefix
+	PrivateKey    string `json:"-"` // Hex-encoded, no 0x prefix — excluded from serialization
 	WalletAddress string
 	USDCContract  string
 	PaymasterURL  string // Circle Paymaster (future)

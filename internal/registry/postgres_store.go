@@ -162,10 +162,12 @@ func (p *PostgresStore) ListAgents(ctx context.Context, filter AgentFilter) ([]*
 	query += " ORDER BY created_at DESC"
 
 	if filter.Limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+		args = append(args, filter.Limit)
+		query += fmt.Sprintf(" LIMIT $%d", len(args))
 	}
 	if filter.Offset > 0 {
-		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
+		args = append(args, filter.Offset)
+		query += fmt.Sprintf(" OFFSET $%d", len(args))
 	}
 
 	rows, err := p.db.QueryContext(ctx, query, args...)
@@ -336,10 +338,12 @@ func (p *PostgresStore) discoverFromMatview(ctx context.Context, filter ServiceF
 	query += " ORDER BY CAST(price AS DECIMAL) ASC"
 
 	if filter.Limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+		args = append(args, filter.Limit)
+		query += fmt.Sprintf(" LIMIT $%d", len(args))
 	}
 	if filter.Offset > 0 {
-		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
+		args = append(args, filter.Offset)
+		query += fmt.Sprintf(" OFFSET $%d", len(args))
 	}
 
 	rows, err := p.db.QueryContext(ctx, query, args...)
@@ -388,10 +392,12 @@ func (p *PostgresStore) discoverFromTables(ctx context.Context, filter ServiceFi
 	query += " ORDER BY CAST(s.price AS DECIMAL) ASC"
 
 	if filter.Limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+		args = append(args, filter.Limit)
+		query += fmt.Sprintf(" LIMIT $%d", len(args))
 	}
 	if filter.Offset > 0 {
-		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
+		args = append(args, filter.Offset)
+		query += fmt.Sprintf(" OFFSET $%d", len(args))
 	}
 
 	rows, err := p.db.QueryContext(ctx, query, args...)

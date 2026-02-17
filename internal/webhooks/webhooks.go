@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -210,7 +211,13 @@ func (d *Dispatcher) send(ctx context.Context, sub *Subscription, event *Event) 
 			}
 		}
 
-		req, err := http.NewRequestWithContext(ctx, "POST", sub.URL, bytes.NewReader(payload))
+		parsedURL, err := url.Parse(sub.URL)
+		if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+			lastErr = "invalid webhook URL"
+			continue
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "POST", parsedURL.String(), bytes.NewReader(payload))
 		if err != nil {
 			lastErr = "failed to create request"
 			continue
@@ -226,7 +233,7 @@ func (d *Dispatcher) send(ctx context.Context, sub *Subscription, event *Event) 
 			req.Header.Set("X-Alancoin-Signature", signature)
 		}
 
-		resp, err := d.client.Do(req)
+		resp, err := d.client.Do(req) //nolint:gosec // URL validated above
 		if err != nil {
 			lastErr = fmt.Sprintf("request failed: %v", err)
 			continue

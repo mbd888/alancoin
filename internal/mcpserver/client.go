@@ -14,9 +14,9 @@ import (
 
 // Config holds the configuration for connecting to the Alancoin platform.
 type Config struct {
-	APIURL       string // Base URL, e.g. "http://localhost:8080"
-	APIKey       string // API key, e.g. "sk_..."
-	AgentAddress string // Agent's address, e.g. "0x..."
+	APIURL       string `json:"apiURL"`       // Base URL, e.g. "http://localhost:8080"
+	APIKey       string `json:"-"`            // API key — excluded from serialization
+	AgentAddress string `json:"agentAddress"` // Agent's address, e.g. "0x..."
 }
 
 // AlancoinClient is a pure HTTP client for the Alancoin platform API.
@@ -70,7 +70,7 @@ func (c *AlancoinClient) doRequest(ctx context.Context, method, path string, que
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req) //nolint:gosec // URL constructed from trusted cfg.APIURL + path
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -164,12 +164,17 @@ func (c *AlancoinClient) DisputeEscrow(ctx context.Context, escrowID, reason str
 
 // CallEndpoint makes a direct HTTP POST to a service endpoint with payment headers.
 func (c *AlancoinClient) CallEndpoint(ctx context.Context, endpoint string, params map[string]any, escrowID, amount string) (json.RawMessage, error) {
+	parsedURL, err := url.Parse(endpoint)
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		return nil, fmt.Errorf("invalid service endpoint URL: %s", endpoint)
+	}
+
 	data, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("marshal params: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, parsedURL.String(), bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -179,7 +184,7 @@ func (c *AlancoinClient) CallEndpoint(ctx context.Context, endpoint string, para
 	req.Header.Set("X-Payment-From", c.cfg.AgentAddress)
 	req.Header.Set("X-Escrow-ID", escrowID)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req) //nolint:gosec // URL validated above
 	if err != nil {
 		return nil, fmt.Errorf("service call failed: %w", err)
 	}

@@ -48,6 +48,6 @@ func main() {
 	args := os.Args[2:]
 
 	if err := goose.RunContext(context.Background(), command, db, migrationsDir, args...); err != nil {
-		log.Fatalf("Migration %s failed: %v", command, err)
+		log.Fatalf("Migration %q failed: %v", command, err)
 	}
 }

@@ -96,16 +96,16 @@ func (h *Handlers) HandleCallService(ctx context.Context, req mcp.CallToolReques
 	_, confirmErr := h.client.ConfirmEscrow(ctx, escrowID)
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Service: %s (%s)\n", svc.Name, svc.Address))
-	sb.WriteString(fmt.Sprintf("Cost: %s USDC\n", svc.Price))
+	fmt.Fprintf(&sb, "Service: %s (%s)\n", svc.Name, svc.Address)
+	fmt.Fprintf(&sb, "Cost: %s USDC\n", svc.Price)
 
 	if confirmErr != nil {
-		sb.WriteString(fmt.Sprintf("Payment: Escrow created but auto-confirm failed (ID: %s)\n", escrowID))
+		fmt.Fprintf(&sb, "Payment: Escrow created but auto-confirm failed (ID: %s)\n", escrowID)
 	} else {
 		sb.WriteString("Payment: Confirmed\n")
 	}
 
-	sb.WriteString(fmt.Sprintf("\nResult:\n%s", formatJSON(result)))
+	fmt.Fprintf(&sb, "\nResult:\n%s", formatJSON(result))
 
 	return mcp.NewToolResultText(sb.String()), nil
 }
