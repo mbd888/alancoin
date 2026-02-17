@@ -104,6 +104,28 @@ func (m *MemoryStore) ListSessionsByTenant(_ context.Context, tenantID string, l
 	return result, nil
 }
 
+func (m *MemoryStore) ListByStatus(_ context.Context, status Status, limit int) ([]*Session, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []*Session
+	for _, s := range m.sessions {
+		if s.Status == status {
+			cp := *s
+			result = append(result, &cp)
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].UpdatedAt.After(result[j].UpdatedAt)
+	})
+
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
 func (m *MemoryStore) ListExpired(_ context.Context, before time.Time, limit int) ([]*Session, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

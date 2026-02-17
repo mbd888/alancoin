@@ -216,6 +216,41 @@ func (s *PostgresBaselineStore) LogDenial(ctx context.Context, rec *DenialRecord
 	).Scan(&rec.ID)
 }
 
+func (s *PostgresBaselineStore) ListDenials(ctx context.Context, since time.Time, limit int) ([]*DenialRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, agent_addr, rule_name, reason, amount, op_type, tier, counterparty,
+		       hourly_total, baseline_mean, baseline_stddev, override_allowed, created_at
+		FROM agent_denial_log
+		WHERE created_at >= $1
+		ORDER BY created_at DESC
+		LIMIT $2
+	`, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []*DenialRecord
+	for rows.Next() {
+		rec := &DenialRecord{}
+		var amountStr, hourlyStr, meanStr, stddevStr string
+		if err := rows.Scan(
+			&rec.ID, &rec.AgentAddr, &rec.RuleName, &rec.Reason,
+			&amountStr, &rec.OpType, &rec.Tier, &rec.Counterparty,
+			&hourlyStr, &meanStr, &stddevStr,
+			&rec.OverrideAllowed, &rec.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		rec.Amount, _ = usdc.Parse(amountStr)
+		rec.HourlyTotal, _ = usdc.Parse(hourlyStr)
+		rec.BaselineMean, _ = usdc.Parse(meanStr)
+		rec.BaselineStddev, _ = usdc.Parse(stddevStr)
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
 func (s *PostgresBaselineStore) PruneOldEvents(ctx context.Context, before time.Time) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `
 		DELETE FROM agent_spend_events WHERE created_at < $1

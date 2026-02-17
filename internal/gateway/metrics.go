@@ -67,6 +67,13 @@ var (
 		Name:      "policy_shadow_denials_total",
 		Help:      "Total shadow-mode policy denials by rule type (logged only, not enforced).",
 	}, []string{"rule_type"})
+
+	gwSettlementRetries = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Subsystem: "gateway",
+		Name:      "settlement_retries_total",
+		Help:      "Total settlement retry attempts (each retry after initial failure).",
+	})
 )
 
 func init() {
@@ -80,5 +87,6 @@ func init() {
 		gwPolicyDenials,
 		gwExpiredSessionsClosed,
 		gwPolicyShadowDenials,
+		gwSettlementRetries,
 	)
 }

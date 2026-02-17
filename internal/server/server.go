@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,11 +22,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq" // PostgreSQL driver
+	"github.com/mbd888/alancoin/internal/admin"
 	"github.com/mbd888/alancoin/internal/auth"
+	"github.com/mbd888/alancoin/internal/circuitbreaker"
 	"github.com/mbd888/alancoin/internal/config"
 	"github.com/mbd888/alancoin/internal/dashboard"
 	"github.com/mbd888/alancoin/internal/escrow"
 	"github.com/mbd888/alancoin/internal/gateway"
+	"github.com/mbd888/alancoin/internal/health"
 	"github.com/mbd888/alancoin/internal/ledger"
 	"github.com/mbd888/alancoin/internal/logging"
 	"github.com/mbd888/alancoin/internal/metrics"
@@ -33,6 +37,7 @@ import (
 	"github.com/mbd888/alancoin/internal/ratelimit"
 	"github.com/mbd888/alancoin/internal/realtime"
 	"github.com/mbd888/alancoin/internal/receipts"
+	"github.com/mbd888/alancoin/internal/reconciliation"
 	"github.com/mbd888/alancoin/internal/registry"
 	"github.com/mbd888/alancoin/internal/reputation"
 	"github.com/mbd888/alancoin/internal/security"
@@ -41,6 +46,7 @@ import (
 	"github.com/mbd888/alancoin/internal/supervisor"
 	"github.com/mbd888/alancoin/internal/tenant"
 	"github.com/mbd888/alancoin/internal/traces"
+	"github.com/mbd888/alancoin/internal/usdc"
 	"github.com/mbd888/alancoin/internal/validation"
 	"github.com/mbd888/alancoin/internal/webhooks"
 )
@@ -76,9 +82,12 @@ type Server struct {
 	baselineTimer          *supervisor.BaselineTimer
 	eventWriter            *supervisor.EventWriter
 	tenantStore            tenant.Store
-	policyStore            policy.Store  // tenant-scoped spend policies
-	gatewayStore           gateway.Store // for billing aggregation
-	db                     *sql.DB       // nil if using in-memory
+	policyStore            policy.Store           // tenant-scoped spend policies
+	gatewayStore           gateway.Store          // for billing aggregation
+	denialExporter         admin.DenialExporter   // denial log exporter for admin API
+	reconcileRunner        *reconciliation.Runner // cross-subsystem reconciliation
+	reconcileTimer         *reconciliation.Timer  // periodic reconciliation
+	db                     *sql.DB                // nil if using in-memory
 	router                 *gin.Engine
 	httpSrv                *http.Server
 	logger                 *slog.Logger
@@ -86,8 +95,11 @@ type Server struct {
 	tracerShutdown         func(context.Context) error
 
 	// Health state
-	ready   atomic.Bool
-	healthy atomic.Bool
+	ready          atomic.Bool
+	healthy        atomic.Bool
+	isDraining     atomic.Bool
+	inFlight       atomic.Int64
+	healthRegistry *health.Registry
 }
 
 // Option configures the server
@@ -177,6 +189,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			supervisor.WithLogger(s.logger),
 			supervisor.WithBaselineStore(baselineStore),
 		)
+		s.denialExporter = &adminDenialExportAdapter{store: baselineStore}
 		s.eventWriter = supervisor.NewEventWriter(baselineStore, s.logger)
 		if sv, ok := s.ledgerService.(*supervisor.Supervisor); ok {
 			sv.SetEventWriter(s.eventWriter)
@@ -222,12 +235,20 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		gwForwarder := gateway.NewForwarder(0)
 		gwLedger := &gatewayLedgerAdapter{s.ledgerService}
 		s.gatewayStore = gwStore
-		s.gatewayService = gateway.NewService(gwStore, gwResolver, gwForwarder, gwLedger, s.logger)
+		gwCB := circuitbreaker.New(5, 30*time.Second)
+		s.gatewayService = gateway.NewService(gwStore, gwResolver, gwForwarder, gwLedger, s.logger).
+			WithCircuitBreaker(gwCB)
 		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore, s.logger)
 		s.logger.Info("gateway enabled (postgres)")
 
 		// Release any ledger holds orphaned by a previous crash.
 		gateway.ReconcileOrphanedHolds(ctx, db, gwLedger, s.logger)
+
+		// Wire webhook emitter into all payment subsystems.
+		webhookEmitter := webhooks.NewEmitter(s.webhooks, s.logger)
+		s.gatewayService.WithWebhookEmitter(webhookEmitter)
+		s.escrowService.WithWebhookEmitter(webhookEmitter)
+		s.streamService.WithWebhookEmitter(webhookEmitter)
 
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
 		s.gatewayService.WithPlatformAddress(cfg.PlatformAddress)
@@ -263,6 +284,15 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		// Reputation snapshots (PostgreSQL)
 		s.reputationStore = reputation.NewPostgresSnapshotStore(db)
 		s.logger.Info("reputation snapshots enabled (postgres)")
+
+		// Cross-subsystem reconciliation (PostgreSQL only)
+		s.reconcileRunner = reconciliation.NewRunner(s.logger).
+			WithLedger(&reconcileLedgerAdapter{eventStore: eventStore, ledgerStore: ledgerStore}).
+			WithEscrow(&reconcileEscrowAdapter{store: escrowStore}).
+			WithStream(&reconcileStreamAdapter{store: streamStore}).
+			WithHold(&reconcileHoldAdapter{db: db})
+		s.reconcileTimer = reconciliation.NewTimer(s.reconcileRunner, s.logger)
+		s.logger.Info("reconciliation enabled (postgres)")
 
 	} else {
 		s.registry = registry.NewMemoryStore()
@@ -315,12 +345,20 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		gwResolver2 := gateway.NewResolver(&gatewayRegistryAdapter{s.registry})
 		gwForwarder2 := gateway.NewForwarder(0)
 		s.gatewayStore = gwStore2
-		s.gatewayService = gateway.NewService(gwStore2, gwResolver2, gwForwarder2, &gatewayLedgerAdapter{s.ledgerService}, s.logger)
+		gwCB2 := circuitbreaker.New(5, 30*time.Second)
+		s.gatewayService = gateway.NewService(gwStore2, gwResolver2, gwForwarder2, &gatewayLedgerAdapter{s.ledgerService}, s.logger).
+			WithCircuitBreaker(gwCB2)
 		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore2, s.logger)
 		s.logger.Info("gateway enabled (in-memory)")
 
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
 		s.gatewayService.WithPlatformAddress(cfg.PlatformAddress)
+
+		// Wire webhook emitter into all payment subsystems (in-memory mode).
+		webhookEmitter2 := webhooks.NewEmitter(s.webhooks, s.logger)
+		s.gatewayService.WithWebhookEmitter(webhookEmitter2)
+		s.escrowService.WithWebhookEmitter(webhookEmitter2)
+		s.streamService.WithWebhookEmitter(webhookEmitter2)
 
 		// Wire receipt issuer into all payment paths
 		if s.receiptService != nil {
@@ -347,6 +385,27 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.reputationStore = reputation.NewMemorySnapshotStore()
 		s.logger.Info("reputation snapshots enabled (in-memory)")
 
+	}
+
+	// Register subsystem health checkers.
+	s.healthRegistry = health.NewRegistry()
+	if s.db != nil {
+		db := s.db
+		s.healthRegistry.Register("database", func(ctx context.Context) health.Status {
+			if err := db.PingContext(ctx); err != nil {
+				return health.Status{Name: "database", Healthy: false, Detail: err.Error()}
+			}
+			return health.Status{Name: "database", Healthy: true}
+		})
+	}
+	if s.gatewayService != nil && s.gatewayService.CircuitBreaker() != nil {
+		cb := s.gatewayService.CircuitBreaker()
+		s.healthRegistry.Register("circuit_breaker", func(_ context.Context) health.Status {
+			// Report healthy as long as the CB exists. Individual endpoint states
+			// are available via the State() method; aggregate health is always OK.
+			_ = cb
+			return health.Status{Name: "circuit_breaker", Healthy: true, Detail: "active"}
+		})
 	}
 
 	s.logger.Info("API authentication enabled")
@@ -386,6 +445,27 @@ func maskDSN(dsn string) string {
 // -----------------------------------------------------------------------------
 
 func (s *Server) setupMiddleware() {
+	// Drain middleware: once draining, reject new requests with 503.
+	// Health and metrics endpoints are exempt so load balancers can observe the drain.
+	s.router.Use(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if path == "/health" || path == "/health/live" || path == "/health/ready" || path == "/metrics" {
+			c.Next()
+			return
+		}
+		if s.isDraining.Load() {
+			c.Header("Retry-After", "5")
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+				"error":   "draining",
+				"message": "Server is shutting down. Retry with another instance.",
+			})
+			return
+		}
+		s.inFlight.Add(1)
+		defer s.inFlight.Add(-1)
+		c.Next()
+	})
+
 	// Recovery with logging
 	s.router.Use(gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
 		logging.L(c.Request.Context()).Error("panic recovered",
@@ -698,6 +778,29 @@ func (s *Server) setupRoutes() {
 
 	}
 
+	// Admin operations routes (resolve stuck financial states)
+	{
+		adminHandler := admin.NewHandler()
+		if s.gatewayService != nil {
+			adminHandler.WithGatewayService(&adminGatewayAdapter{svc: s.gatewayService})
+		}
+		if s.escrowService != nil {
+			adminHandler.WithEscrowService(&adminEscrowAdapter{svc: s.escrowService})
+		}
+		if s.streamService != nil {
+			adminHandler.WithStreamService(&adminStreamAdapter{svc: s.streamService})
+		}
+		if s.denialExporter != nil {
+			adminHandler.WithDenialExporter(s.denialExporter)
+		}
+		if s.reconcileRunner != nil {
+			adminHandler.WithReconciler(&adminReconcileAdapter{runner: s.reconcileRunner})
+		}
+		adminOps := v1.Group("")
+		adminOps.Use(auth.Middleware(s.authMgr), auth.RequireAdmin())
+		adminHandler.RegisterRoutes(adminOps)
+	}
+
 	// Reputation routes (the network moat - agents build reputation over time)
 	// reputationProvider is already created above for discovery enrichment
 	//
@@ -934,6 +1037,10 @@ func (s *Server) livenessHandler(c *gin.Context) {
 }
 
 func (s *Server) readinessHandler(c *gin.Context) {
+	if s.isDraining.Load() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "draining"})
+		return
+	}
 	if !s.ready.Load() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready"})
 		return
@@ -958,13 +1065,29 @@ func (s *Server) readinessHandler(c *gin.Context) {
 	checks["escrow_timer"] = timerStatus(s.escrowTimer)
 	checks["stream_timer"] = timerStatus(s.streamTimer)
 	checks["gateway_timer"] = timerStatus(s.gatewayTimer)
+	checks["reconcile_timer"] = timerStatus(s.reconcileTimer)
+
+	// Subsystem health checks.
+	var subsystems []health.Status
+	if s.healthRegistry != nil {
+		subHealthy, statuses := s.healthRegistry.CheckAll(c.Request.Context())
+		subsystems = statuses
+		if !subHealthy {
+			allOK = false
+		}
+	}
+
 	status := "ready"
 	httpStatus := http.StatusOK
 	if !allOK {
 		status = "degraded"
 		httpStatus = http.StatusServiceUnavailable
 	}
-	c.JSON(httpStatus, gin.H{"status": status, "checks": checks})
+	resp := gin.H{"status": status, "checks": checks}
+	if len(subsystems) > 0 {
+		resp["subsystems"] = subsystems
+	}
+	c.JSON(httpStatus, resp)
 }
 
 type runnable interface{ Running() bool }
@@ -1094,6 +1217,11 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.gatewayTimer.Start(runCtx)
 	}
 
+	// Start reconciliation timer
+	if s.reconcileTimer != nil {
+		go s.reconcileTimer.Start(runCtx)
+	}
+
 	// Start baseline learning event writer and timer
 	if s.eventWriter != nil {
 		go s.eventWriter.Start(runCtx)
@@ -1145,18 +1273,41 @@ func (s *Server) Run(ctx context.Context) error {
 	return s.Shutdown()
 }
 
-// Shutdown gracefully stops the server
+// Shutdown gracefully stops the server using a 3-phase drain:
+//  1. Set draining — new requests get 503, /health/ready reports "draining"
+//  2. Wait for in-flight requests to complete (up to 15s)
+//  3. Cancel background goroutines and shut down HTTP server
 func (s *Server) Shutdown() error {
+	// Phase 1: Signal drain — load balancers see /health/ready → 503 "draining",
+	// new non-health requests get 503 + Retry-After.
+	s.isDraining.Store(true)
 	s.ready.Store(false)
-	s.logger.Info("starting graceful shutdown")
+	s.logger.Info("starting graceful shutdown (phase 1: draining)")
 
-	// Cancel the context for all background goroutines (hub, timers, watcher)
+	// Phase 2: Wait for in-flight requests to finish.
+	deadline := time.After(15 * time.Second)
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+drainLoop:
+	for {
+		if s.inFlight.Load() == 0 {
+			s.logger.Info("all in-flight requests drained")
+			break
+		}
+		select {
+		case <-deadline:
+			s.logger.Warn("drain deadline exceeded, proceeding with shutdown",
+				"in_flight", s.inFlight.Load())
+			break drainLoop
+		case <-ticker.C:
+		}
+	}
+
+	// Phase 3: Cancel background goroutines and shut down HTTP server.
+	s.logger.Info("starting graceful shutdown (phase 3: stopping subsystems)")
 	if s.cancelRunCtx != nil {
 		s.cancelRunCtx()
 	}
-
-	// Give load balancers time to stop sending traffic
-	time.Sleep(5 * time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1182,6 +1333,12 @@ func (s *Server) Shutdown() error {
 	if s.gatewayTimer != nil {
 		s.gatewayTimer.Stop()
 		s.logger.Info("gateway timer stopped")
+	}
+
+	// Stop reconciliation timer
+	if s.reconcileTimer != nil {
+		s.reconcileTimer.Stop()
+		s.logger.Info("reconciliation timer stopped")
 	}
 
 	// Stop baseline learning components
@@ -1600,4 +1757,199 @@ func (a *receiptIssuerAdapter) IssueReceipt(ctx context.Context, path, reference
 		Status:    status,
 		Metadata:  metadata,
 	})
+}
+
+// --- Admin adapters ---
+
+// adminGatewayAdapter adapts gateway.Service to admin.GatewayService
+type adminGatewayAdapter struct {
+	svc *gateway.Service
+}
+
+func (a *adminGatewayAdapter) GetSession(ctx context.Context, id string) (admin.GatewaySession, error) {
+	s, err := a.svc.GetSession(ctx, id)
+	if err != nil {
+		return admin.GatewaySession{}, err
+	}
+	return admin.GatewaySession{
+		ID:        s.ID,
+		AgentAddr: s.AgentAddr,
+		MaxTotal:  s.MaxTotal,
+		Status:    string(s.Status),
+	}, nil
+}
+
+func (a *adminGatewayAdapter) CloseSession(ctx context.Context, sessionID, callerAddr string) error {
+	_, err := a.svc.CloseSession(ctx, sessionID, callerAddr)
+	return err
+}
+
+func (a *adminGatewayAdapter) ListStuckSessions(ctx context.Context, limit int) ([]admin.StuckSession, error) {
+	sessions, err := a.svc.ListByStatus(ctx, gateway.StatusSettlementFailed, limit)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]admin.StuckSession, len(sessions))
+	for i, s := range sessions {
+		result[i] = admin.StuckSession{
+			ID:         s.ID,
+			AgentAddr:  s.AgentAddr,
+			TenantID:   s.TenantID,
+			MaxTotal:   s.MaxTotal,
+			TotalSpent: s.TotalSpent,
+			Status:     string(s.Status),
+			ExpiresAt:  s.ExpiresAt,
+			UpdatedAt:  s.UpdatedAt,
+		}
+	}
+	return result, nil
+}
+
+// adminEscrowAdapter adapts escrow.Service to admin.EscrowService
+type adminEscrowAdapter struct {
+	svc *escrow.Service
+}
+
+func (a *adminEscrowAdapter) ForceCloseExpired(ctx context.Context) (int, error) {
+	return a.svc.ForceCloseExpired(ctx)
+}
+
+// adminStreamAdapter adapts streams.Service to admin.StreamService
+type adminStreamAdapter struct {
+	svc *streams.Service
+}
+
+func (a *adminStreamAdapter) ForceCloseStale(ctx context.Context) (int, error) {
+	return a.svc.ForceCloseStale(ctx)
+}
+
+// adminDenialExportAdapter adapts supervisor.BaselineStore to admin.DenialExporter
+type adminDenialExportAdapter struct {
+	store supervisor.BaselineStore
+}
+
+func (a *adminDenialExportAdapter) ListDenials(ctx context.Context, since time.Time, limit int) ([]admin.DenialExportRecord, error) {
+	denials, err := a.store.ListDenials(ctx, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]admin.DenialExportRecord, len(denials))
+	for i, d := range denials {
+		result[i] = admin.DenialExportRecord{
+			ID:              d.ID,
+			AgentAddr:       d.AgentAddr,
+			RuleName:        d.RuleName,
+			Reason:          d.Reason,
+			Amount:          formatBigInt(d.Amount),
+			OpType:          d.OpType,
+			Tier:            d.Tier,
+			Counterparty:    d.Counterparty,
+			HourlyTotal:     formatBigInt(d.HourlyTotal),
+			BaselineMean:    formatBigInt(d.BaselineMean),
+			BaselineStddev:  formatBigInt(d.BaselineStddev),
+			OverrideAllowed: d.OverrideAllowed,
+			CreatedAt:       d.CreatedAt,
+		}
+	}
+	return result, nil
+}
+
+func formatBigInt(b *big.Int) string {
+	if b == nil {
+		return "0.000000"
+	}
+	return usdc.Format(b)
+}
+
+// --- Reconciliation adapters ---
+
+// reconcileLedgerAdapter adapts ledger event store to reconciliation.LedgerChecker
+type reconcileLedgerAdapter struct {
+	eventStore  ledger.EventStore
+	ledgerStore ledger.Store
+}
+
+func (a *reconcileLedgerAdapter) CheckAll(ctx context.Context) (int, error) {
+	results, err := ledger.ReconcileAll(ctx, a.eventStore, a.ledgerStore)
+	if err != nil {
+		return 0, err
+	}
+	mismatches := 0
+	for _, r := range results {
+		if !r.Match {
+			mismatches++
+		}
+	}
+	return mismatches, nil
+}
+
+// reconcileEscrowAdapter adapts escrow.Store to reconciliation.EscrowChecker
+type reconcileEscrowAdapter struct {
+	store escrow.Store
+}
+
+func (a *reconcileEscrowAdapter) CountExpired(ctx context.Context) (int, error) {
+	expired, err := a.store.ListExpired(ctx, time.Now(), 1000)
+	if err != nil {
+		return 0, err
+	}
+	return len(expired), nil
+}
+
+// reconcileStreamAdapter adapts streams.Store to reconciliation.StreamChecker
+type reconcileStreamAdapter struct {
+	store streams.Store
+}
+
+func (a *reconcileStreamAdapter) CountStale(ctx context.Context) (int, error) {
+	stale, err := a.store.ListStale(ctx, time.Now(), 1000)
+	if err != nil {
+		return 0, err
+	}
+	return len(stale), nil
+}
+
+// reconcileHoldAdapter checks for orphaned ledger holds via SQL.
+type reconcileHoldAdapter struct {
+	db *sql.DB
+}
+
+func (a *reconcileHoldAdapter) CountOrphaned(ctx context.Context) (int, error) {
+	var count int
+	err := a.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM ledger_entries le
+		LEFT JOIN gateway_sessions gs ON gs.id = le.reference
+		WHERE le.type = 'hold'
+		  AND le.reference LIKE 'gw_%'
+		  AND gs.id IS NULL
+		  AND NOT EXISTS (
+		      SELECT 1 FROM ledger_entries le2
+		      WHERE le2.agent_address = le.agent_address
+		        AND le2.reference = le.reference
+		        AND le2.type IN ('settle_hold_out', 'release_hold')
+		  )
+	`).Scan(&count)
+	return count, err
+}
+
+// adminReconcileAdapter adapts reconciliation.Runner to admin.ReconciliationRunner
+type adminReconcileAdapter struct {
+	runner *reconciliation.Runner
+}
+
+func (a *adminReconcileAdapter) RunAll(ctx context.Context) (*admin.ReconciliationReport, error) {
+	report, err := a.runner.RunAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &admin.ReconciliationReport{
+		LedgerMismatches: report.LedgerMismatches,
+		StuckEscrows:     report.StuckEscrows,
+		StaleStreams:     report.StaleStreams,
+		OrphanedHolds:    report.OrphanedHolds,
+		Healthy:          report.Healthy,
+		Duration:         report.Duration,
+		Timestamp:        report.Timestamp,
+	}, nil
 }

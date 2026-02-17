@@ -9,18 +9,26 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/retry"
 	"github.com/mbd888/alancoin/internal/syncutil"
 	"github.com/mbd888/alancoin/internal/usdc"
 )
 
+// WebhookEmitter emits lifecycle events to webhook subscribers.
+type WebhookEmitter interface {
+	EmitStreamOpened(sellerAddr, streamID, buyerAddr, holdAmount string)
+	EmitStreamClosed(buyerAddr, streamID, sellerAddr, spentAmount, status string)
+}
+
 // Service implements streaming micropayment business logic.
 type Service struct {
-	store         Store
-	ledger        LedgerService
-	recorder      TransactionRecorder
-	revenue       RevenueAccumulator
-	receiptIssuer ReceiptIssuer
-	locks         syncutil.ShardedMutex
+	store          Store
+	ledger         LedgerService
+	recorder       TransactionRecorder
+	revenue        RevenueAccumulator
+	receiptIssuer  ReceiptIssuer
+	webhookEmitter WebhookEmitter
+	locks          syncutil.ShardedMutex
 }
 
 // NewService creates a new streaming micropayment service.
@@ -46,6 +54,12 @@ func (s *Service) WithRevenueAccumulator(r RevenueAccumulator) *Service {
 // WithReceiptIssuer adds a receipt issuer for cryptographic payment proofs.
 func (s *Service) WithReceiptIssuer(r ReceiptIssuer) *Service {
 	s.receiptIssuer = r
+	return s
+}
+
+// WithWebhookEmitter adds a webhook emitter for lifecycle event notifications.
+func (s *Service) WithWebhookEmitter(e WebhookEmitter) *Service {
+	s.webhookEmitter = e
 	return s
 }
 
@@ -96,6 +110,10 @@ func (s *Service) Open(ctx context.Context, req OpenRequest) (*Stream, error) {
 		// Best-effort release if store fails
 		_ = s.ledger.ReleaseHold(ctx, stream.BuyerAddr, stream.HoldAmount, stream.ID)
 		return nil, fmt.Errorf("failed to create stream record: %w", err)
+	}
+
+	if s.webhookEmitter != nil {
+		go s.webhookEmitter.EmitStreamOpened(stream.SellerAddr, stream.ID, stream.BuyerAddr, stream.HoldAmount)
 	}
 
 	return stream, nil
@@ -253,22 +271,15 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 
 	// CRITICAL: Funds already moved. Retry the status update because if this fails
 	// and the stream stays "open", the auto-close timer could settle again (double payment).
-	// Note: caller holds s.locks.Lock(stream.ID). We unlock during sleep to avoid
-	// blocking other streams on the same shard, then re-lock before retry.
-	var updateErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if updateErr = s.store.Update(ctx, stream); updateErr == nil {
-			break
+	// Note: caller holds s.locks.Lock(stream.ID) via defer. We hold the lock across
+	// retries to prevent double-settlement races. Sleep duration is short (50-100ms).
+	updateErr := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
+		if err := s.store.Update(ctx, stream); err != nil {
+			log.Printf("WARN: stream %s status update failed: %v", stream.ID, err)
+			return err
 		}
-		log.Printf("WARN: stream %s status update attempt %d failed: %v", stream.ID, attempt+1, updateErr)
-		// Note: we do NOT unlock here because settle() does not own the lock —
-		// the caller (Close/AutoClose) holds it via defer. The sleep duration is
-		// short (50-100ms) and correctness requires holding the lock across the
-		// settle+status-update to prevent double-settlement races.
-		if attempt < 2 {
-			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
-		}
-	}
+		return nil
+	})
 	if updateErr != nil {
 		// All retries exhausted. Mark as settlement_failed so auto-close won't re-settle.
 		stream.Status = StatusSettlementFailed
@@ -280,6 +291,10 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 				stream.ID, status)
 		}
 		return nil, fmt.Errorf("failed to update stream after settlement (requires manual resolution): %w", updateErr)
+	}
+
+	if s.webhookEmitter != nil {
+		go s.webhookEmitter.EmitStreamClosed(stream.BuyerAddr, stream.ID, stream.SellerAddr, stream.SpentAmount, string(stream.Status))
 	}
 
 	// Record transaction for reputation
@@ -307,6 +322,26 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 	}
 
 	return stream, nil
+}
+
+// ForceCloseStale auto-closes all stale streams. Returns the number closed.
+func (s *Service) ForceCloseStale(ctx context.Context) (int, error) {
+	stale, err := s.store.ListStale(ctx, time.Now(), 100)
+	if err != nil {
+		return 0, err
+	}
+
+	closed := 0
+	for _, stream := range stale {
+		if stream.IsTerminal() {
+			continue
+		}
+		if err := s.AutoClose(ctx, stream); err != nil {
+			continue
+		}
+		closed++
+	}
+	return closed, nil
 }
 
 // Get returns a stream by ID.

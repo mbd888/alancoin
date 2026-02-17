@@ -10,7 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/circuitbreaker"
 	"github.com/mbd888/alancoin/internal/idgen"
+	"github.com/mbd888/alancoin/internal/retry"
 	"github.com/mbd888/alancoin/internal/syncutil"
 	"github.com/mbd888/alancoin/internal/usdc"
 )
@@ -168,6 +170,8 @@ type Service struct {
 	receiptIssuer   ReceiptIssuer
 	policyEvaluator PolicyEvaluator
 	tenantSettings  TenantSettingsProvider
+	webhookEmitter  WebhookEmitter
+	circuitBreaker  *circuitbreaker.Breaker
 	platformAddr    string // ledger address collecting platform fees
 	logger          *slog.Logger
 	locks           syncutil.ShardedMutex
@@ -231,6 +235,23 @@ func (s *Service) WithTenantSettings(ts TenantSettingsProvider) *Service {
 func (s *Service) WithPlatformAddress(addr string) *Service {
 	s.platformAddr = strings.ToLower(addr)
 	return s
+}
+
+// WithWebhookEmitter adds a webhook emitter for lifecycle event notifications.
+func (s *Service) WithWebhookEmitter(e WebhookEmitter) *Service {
+	s.webhookEmitter = e
+	return s
+}
+
+// WithCircuitBreaker adds per-endpoint circuit breaking to the forwarder.
+func (s *Service) WithCircuitBreaker(cb *circuitbreaker.Breaker) *Service {
+	s.circuitBreaker = cb
+	return s
+}
+
+// CircuitBreaker returns the circuit breaker (or nil). Used for health reporting.
+func (s *Service) CircuitBreaker() *circuitbreaker.Breaker {
+	return s.circuitBreaker
 }
 
 // getPendingSpend returns a copy of the current pending spend for a session.
@@ -390,6 +411,10 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr, tenantID string,
 	gwSessionsCreated.Inc()
 	gwActiveSessions.Inc()
 
+	if s.webhookEmitter != nil {
+		go s.webhookEmitter.EmitSessionCreated(session.AgentAddr, session.ID, session.MaxTotal)
+	}
+
 	return session, nil
 }
 
@@ -499,6 +524,11 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 	retries := 0
 
 	for _, candidate := range candidates {
+		// Skip endpoints with tripped circuit breakers.
+		if s.circuitBreaker != nil && !s.circuitBreaker.Allow(candidate.Endpoint) {
+			continue
+		}
+
 		priceBig, ok := usdc.Parse(candidate.Price)
 		if !ok || priceBig.Sign() <= 0 {
 			continue
@@ -606,6 +636,9 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 
 		if fwdErr != nil {
 			// Forward failed — unreserve budget, no payment.
+			if s.circuitBreaker != nil {
+				s.circuitBreaker.RecordFailure(candidate.Endpoint)
+			}
 			unlock = s.locks.Lock(sessionID)
 			s.removePendingSpend(sessionIDCopy, priceBig)
 			unlock()
@@ -623,6 +656,11 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			lastErr = fwdErr
 			retries++
 			continue
+		}
+
+		// Record successful forward for circuit breaker.
+		if s.circuitBreaker != nil {
+			s.circuitBreaker.RecordSuccess(candidate.Endpoint)
 		}
 
 		// --- Phase 2c: Lock, settle payment, update session ---
@@ -656,22 +694,20 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 
 		// Settle payment with retry (handles transient DB errors).
 		// Unlock during sleep to avoid blocking other sessions on the same shard.
-		var settleErr error
-		for attempt := 0; attempt < 3; attempt++ {
-			if feeAmountStr != "0.000000" && s.platformAddr != "" {
-				settleErr = s.ledger.SettleHoldWithFee(ctx, agentAddr, candidate.AgentAddress, sellerAmountStr, s.platformAddr, feeAmountStr, ref)
-			} else {
-				settleErr = s.ledger.SettleHold(ctx, agentAddr, candidate.AgentAddress, candidate.Price, ref)
-			}
-			if settleErr == nil {
-				break
-			}
-			if attempt < 2 {
-				unlock()
-				time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
-				unlock = s.locks.Lock(sessionID)
-			}
-		}
+		settleAttempt := 0
+		settleErr := retry.DoWithUnlock(ctx, 3, 50*time.Millisecond,
+			func() { unlock() },
+			func() { unlock = s.locks.Lock(sessionID) },
+			func() error {
+				settleAttempt++
+				if settleAttempt > 1 {
+					gwSettlementRetries.Inc()
+				}
+				if feeAmountStr != "0.000000" && s.platformAddr != "" {
+					return s.ledger.SettleHoldWithFee(ctx, agentAddr, candidate.AgentAddress, sellerAmountStr, s.platformAddr, feeAmountStr, ref)
+				}
+				return s.ledger.SettleHold(ctx, agentAddr, candidate.AgentAddress, candidate.Price, ref)
+			})
 		if settleErr != nil {
 			// Service was delivered but payment to seller failed.
 			// Return the response to the buyer — they already got value.
@@ -686,6 +722,10 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			if s.recorder != nil {
 				_ = s.recorder.RecordTransaction(ctx, ref, agentAddr,
 					candidate.AgentAddress, candidate.Price, candidate.ServiceID, "settlement_failed")
+			}
+
+			if s.webhookEmitter != nil {
+				go s.webhookEmitter.EmitSettlementFailed(agentAddr, sessionIDCopy, candidate.AgentAddress, priceStr)
 			}
 
 			// Return success to buyer (they got the service) with settlement warning.
@@ -718,19 +758,10 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 
 		// Update session with retry (money already moved, must persist).
 		// Unlock during sleep to avoid blocking other sessions on the same shard.
-		var updateErr error
-		for attempt := 0; attempt < 3; attempt++ {
-			if updateErr = s.store.UpdateSession(ctx, session); updateErr == nil {
-				break
-			}
-			if attempt < 2 {
-				unlock()
-				time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
-				unlock = s.locks.Lock(sessionID)
-				// Re-read is unnecessary here: we own the authoritative state
-				// (session was already updated in memory above).
-			}
-		}
+		updateErr := retry.DoWithUnlock(ctx, 3, 50*time.Millisecond,
+			func() { unlock() },
+			func() { unlock = s.locks.Lock(sessionID) },
+			func() error { return s.store.UpdateSession(ctx, session) })
 		if updateErr != nil {
 			s.logger.Error("CRITICAL: settlement succeeded but session update failed after retries",
 				"session", sessionID, "seller", candidate.AgentAddress, "amount", priceStr, "error", updateErr)
@@ -749,6 +780,10 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		if s.receiptIssuer != nil {
 			_ = s.receiptIssuer.IssueReceipt(ctx, "gateway", ref, agentAddr,
 				candidate.AgentAddress, candidate.Price, candidate.ServiceID, "confirmed", "")
+		}
+
+		if s.webhookEmitter != nil {
+			go s.webhookEmitter.EmitProxySuccess(agentAddr, sessionIDCopy, candidate.AgentAddress, priceStr)
 		}
 
 		// Compute budget state for the response.
@@ -945,18 +980,16 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 	// CRITICAL: Funds already moved. Retry the status update because if this fails
 	// and the session stays "active", the auto-close timer could release holds that no longer exist.
 	// Unlock during sleep to avoid blocking other sessions on the same shard.
-	var updateErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if updateErr = s.store.UpdateSession(ctx, session); updateErr == nil {
-			break
-		}
-		s.logger.Warn("gateway session status update retry", "session", sessionID, "attempt", attempt+1, "error", updateErr)
-		if attempt < 2 {
-			unlock()
-			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
-			unlock = s.locks.Lock(sessionID)
-		}
-	}
+	updateErr := retry.DoWithUnlock(ctx, 3, 50*time.Millisecond,
+		func() { unlock() },
+		func() { unlock = s.locks.Lock(sessionID) },
+		func() error {
+			if err := s.store.UpdateSession(ctx, session); err != nil {
+				s.logger.Warn("gateway session status update retry", "session", sessionID, "error", err)
+				return err
+			}
+			return nil
+		})
 	if updateErr != nil {
 		// All retries exhausted. Mark as settlement_failed so auto-close won't re-process.
 		session.Status = StatusSettlementFailed
@@ -978,6 +1011,10 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 
 	gwSessionsClosed.WithLabelValues("client").Inc()
 	gwActiveSessions.Dec()
+
+	if s.webhookEmitter != nil {
+		go s.webhookEmitter.EmitSessionClosed(session.AgentAddr, session.ID, session.TotalSpent, string(session.Status))
+	}
 
 	return session, nil
 }
@@ -1003,15 +1040,10 @@ func (s *Service) SingleCall(ctx context.Context, agentAddr, tenantID string, re
 
 	// Always close the session to release any unspent hold.
 	// Retry because a stuck hold locks buyer funds until the 5-min expiry timer.
-	var closeErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if _, closeErr = s.CloseSession(ctx, session.ID, agentAddr); closeErr == nil {
-			break
-		}
-		if attempt < 2 {
-			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
-		}
-	}
+	closeErr := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
+		_, err := s.CloseSession(ctx, session.ID, agentAddr)
+		return err
+	})
 	if closeErr != nil {
 		s.logger.Error("CRITICAL: failed to close ephemeral gateway session after retries — hold locked until expiry",
 			"session", session.ID, "amount", req.MaxPrice, "error", closeErr)
@@ -1041,6 +1073,14 @@ func (s *Service) ListSessions(ctx context.Context, agentAddr string, limit int)
 		limit = 50
 	}
 	return s.store.ListSessions(ctx, strings.ToLower(agentAddr), limit)
+}
+
+// ListByStatus returns sessions in a given status.
+func (s *Service) ListByStatus(ctx context.Context, status Status, limit int) ([]*Session, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	return s.store.ListByStatus(ctx, status, limit)
 }
 
 // ListLogs returns request logs for a session.
@@ -1151,20 +1191,24 @@ func (s *Service) AutoCloseExpired(ctx context.Context, session *Session) error 
 
 	// Funds already released. Retry status update to prevent re-processing.
 	// Unlock during sleep to avoid blocking other sessions on the same shard.
-	var updateErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if updateErr = s.store.UpdateSession(ctx, fresh); updateErr == nil {
-			gwExpiredSessionsClosed.Inc()
-			gwSessionsClosed.WithLabelValues("expired").Inc()
-			gwActiveSessions.Dec()
+	updateErr := retry.DoWithUnlock(ctx, 3, 50*time.Millisecond,
+		func() { unlock() },
+		func() { unlock = s.locks.Lock(session.ID) },
+		func() error {
+			if err := s.store.UpdateSession(ctx, fresh); err != nil {
+				s.logger.Warn("auto-close status update retry", "session", fresh.ID, "error", err)
+				return err
+			}
 			return nil
+		})
+	if updateErr == nil {
+		gwExpiredSessionsClosed.Inc()
+		gwSessionsClosed.WithLabelValues("expired").Inc()
+		gwActiveSessions.Dec()
+		if s.webhookEmitter != nil {
+			go s.webhookEmitter.EmitSessionClosed(fresh.AgentAddr, fresh.ID, fresh.TotalSpent, string(fresh.Status))
 		}
-		s.logger.Warn("auto-close status update retry", "session", fresh.ID, "attempt", attempt+1, "error", updateErr)
-		if attempt < 2 {
-			unlock()
-			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
-			unlock = s.locks.Lock(session.ID)
-		}
+		return nil
 	}
 	// Mark as settlement_failed so next auto-close cycle skips it.
 	fresh.Status = StatusSettlementFailed

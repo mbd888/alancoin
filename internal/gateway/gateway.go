@@ -192,6 +192,14 @@ type ReceiptIssuer interface {
 	IssueReceipt(ctx context.Context, path, reference, from, to, amount, serviceID, status, metadata string) error
 }
 
+// WebhookEmitter emits lifecycle events to webhook subscribers.
+type WebhookEmitter interface {
+	EmitSessionCreated(agentAddr, sessionID, maxTotal string)
+	EmitSessionClosed(agentAddr, sessionID, totalSpent, status string)
+	EmitProxySuccess(agentAddr, sessionID, serviceUsed, amountPaid string)
+	EmitSettlementFailed(agentAddr, sessionID, sellerAddr, amount string)
+}
+
 // MoneyError wraps an error with funds-state context so callers know
 // whether their money is safe and what to do next.
 type MoneyError struct {

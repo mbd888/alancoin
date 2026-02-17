@@ -36,6 +36,24 @@ const (
 	// Session key budget/expiration alerts
 	EventSessionKeyBudgetWarning EventType = "session_key.budget_warning"
 	EventSessionKeyExpiring      EventType = "session_key.expiring"
+
+	// Gateway lifecycle events
+	EventGatewaySessionCreated   EventType = "gateway.session.created"
+	EventGatewaySessionClosed    EventType = "gateway.session.closed"
+	EventGatewayProxySuccess     EventType = "gateway.proxy.success"
+	EventGatewaySettlementFailed EventType = "gateway.settlement.failed"
+
+	// Escrow lifecycle events
+	EventEscrowCreated   EventType = "escrow.created"
+	EventEscrowDelivered EventType = "escrow.delivered"
+	EventEscrowReleased  EventType = "escrow.released"
+	EventEscrowRefunded  EventType = "escrow.refunded"
+	EventEscrowDisputed  EventType = "escrow.disputed"
+
+	// Stream lifecycle events
+	EventStreamOpened  EventType = "stream.opened"
+	EventStreamClosed  EventType = "stream.closed"
+	EventStreamSettled EventType = "stream.settled"
 )
 
 // Event represents a webhook event

@@ -14,6 +14,8 @@ type Store interface {
 	ListSessionsByTenant(ctx context.Context, tenantID string, limit int) ([]*Session, error)
 	ListExpired(ctx context.Context, before time.Time, limit int) ([]*Session, error)
 
+	ListByStatus(ctx context.Context, status Status, limit int) ([]*Session, error)
+
 	CreateLog(ctx context.Context, log *RequestLog) error
 	ListLogs(ctx context.Context, sessionID string, limit int) ([]*RequestLog, error)
 

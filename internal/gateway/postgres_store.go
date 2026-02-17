@@ -120,6 +120,23 @@ func (p *PostgresStore) ListSessionsByTenant(ctx context.Context, tenantID strin
 	return scanSessions(rows)
 }
 
+func (p *PostgresStore) ListByStatus(ctx context.Context, status Status, limit int) ([]*Session, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT id, agent_addr, tenant_id, max_total, max_per_request, total_spent,
+		       request_count, strategy, allowed_types, warn_at_percent,
+		       status, expires_at, created_at, updated_at
+		FROM gateway_sessions
+		WHERE status = $1
+		ORDER BY updated_at DESC
+		LIMIT $2`, string(status), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	return scanSessions(rows)
+}
+
 func (p *PostgresStore) ListExpired(ctx context.Context, before time.Time, limit int) ([]*Session, error) {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT id, agent_addr, tenant_id, max_total, max_per_request, total_spent,

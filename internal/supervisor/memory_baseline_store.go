@@ -126,6 +126,23 @@ func (s *MemoryBaselineStore) PruneOldEvents(_ context.Context, before time.Time
 	return pruned, nil
 }
 
+func (s *MemoryBaselineStore) ListDenials(_ context.Context, since time.Time, limit int) ([]*DenialRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var out []*DenialRecord
+	for i := len(s.denials) - 1; i >= 0; i-- {
+		rec := s.denials[i]
+		if !rec.CreatedAt.Before(since) {
+			out = append(out, rec)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 func (s *MemoryBaselineStore) LogDenial(_ context.Context, rec *DenialRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

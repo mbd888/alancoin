@@ -149,6 +149,15 @@ type ReceiptIssuer interface {
 	IssueReceipt(ctx context.Context, path, reference, from, to, amount, serviceID, status, metadata string) error
 }
 
+// WebhookEmitter emits lifecycle events to webhook subscribers.
+type WebhookEmitter interface {
+	EmitEscrowCreated(buyerAddr, escrowID, sellerAddr, amount string)
+	EmitEscrowDelivered(buyerAddr, escrowID, sellerAddr string)
+	EmitEscrowReleased(sellerAddr, escrowID, buyerAddr, amount string)
+	EmitEscrowRefunded(buyerAddr, escrowID, amount string)
+	EmitEscrowDisputed(sellerAddr, escrowID, buyerAddr, reason string)
+}
+
 // CreateRequest contains the parameters for creating an escrow.
 type CreateRequest struct {
 	BuyerAddr    string `json:"buyerAddr" binding:"required"`
@@ -185,14 +194,15 @@ type ResolveRequest struct {
 
 // Service implements escrow business logic.
 type Service struct {
-	store         Store
-	ledger        LedgerService
-	recorder      TransactionRecorder
-	revenue       RevenueAccumulator
-	reputation    ReputationImpactor
-	receiptIssuer ReceiptIssuer
-	logger        *slog.Logger
-	locks         sync.Map // per-escrow ID locks to prevent race conditions
+	store          Store
+	ledger         LedgerService
+	recorder       TransactionRecorder
+	revenue        RevenueAccumulator
+	reputation     ReputationImpactor
+	receiptIssuer  ReceiptIssuer
+	webhookEmitter WebhookEmitter
+	logger         *slog.Logger
+	locks          sync.Map // per-escrow ID locks to prevent race conditions
 }
 
 // escrowLock returns a mutex for the given escrow ID.
@@ -243,6 +253,12 @@ func (s *Service) WithReputationImpactor(r ReputationImpactor) *Service {
 // WithReceiptIssuer adds a receipt issuer for cryptographic payment proofs.
 func (s *Service) WithReceiptIssuer(r ReceiptIssuer) *Service {
 	s.receiptIssuer = r
+	return s
+}
+
+// WithWebhookEmitter adds a webhook emitter for lifecycle event notifications.
+func (s *Service) WithWebhookEmitter(e WebhookEmitter) *Service {
+	s.webhookEmitter = e
 	return s
 }
 
@@ -347,6 +363,11 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Escrow, error
 	}
 
 	metrics.EscrowCreatedTotal.Inc()
+
+	if s.webhookEmitter != nil {
+		go s.webhookEmitter.EmitEscrowCreated(escrow.BuyerAddr, escrow.ID, escrow.SellerAddr, escrow.Amount)
+	}
+
 	return escrow, nil
 }
 
@@ -382,6 +403,10 @@ func (s *Service) MarkDelivered(ctx context.Context, id, callerAddr string) (*Es
 
 	if err := s.store.Update(ctx, escrow); err != nil {
 		return nil, err
+	}
+
+	if s.webhookEmitter != nil {
+		go s.webhookEmitter.EmitEscrowDelivered(escrow.BuyerAddr, escrow.ID, escrow.SellerAddr)
 	}
 
 	return escrow, nil
@@ -480,6 +505,10 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 	metrics.EscrowConfirmedTotal.Inc()
 	metrics.EscrowDuration.Observe(time.Since(escrow.CreatedAt).Seconds())
 
+	if s.webhookEmitter != nil {
+		go s.webhookEmitter.EmitEscrowReleased(escrow.SellerAddr, escrow.ID, escrow.BuyerAddr, escrow.Amount)
+	}
+
 	s.cleanupLock(id)
 	return escrow, nil
 }
@@ -549,6 +578,11 @@ func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*
 	}
 
 	metrics.EscrowDisputedTotal.Inc()
+
+	if s.webhookEmitter != nil {
+		go s.webhookEmitter.EmitEscrowDisputed(escrow.SellerAddr, escrow.ID, escrow.BuyerAddr, reason)
+	}
+
 	return escrow, nil
 }
 
@@ -643,6 +677,10 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 
 	metrics.EscrowAutoReleasedTotal.Inc()
 	metrics.EscrowDuration.Observe(time.Since(escrow.CreatedAt).Seconds())
+
+	if s.webhookEmitter != nil {
+		go s.webhookEmitter.EmitEscrowReleased(escrow.SellerAddr, escrow.ID, escrow.BuyerAddr, escrow.Amount)
+	}
 
 	s.cleanupLock(escrow.ID)
 	return nil
@@ -841,6 +879,30 @@ func (s *Service) ResolveArbitration(ctx context.Context, id, callerAddr string,
 // Get returns an escrow by ID.
 func (s *Service) Get(ctx context.Context, id string) (*Escrow, error) {
 	return s.store.Get(ctx, id)
+}
+
+// ForceCloseExpired auto-releases all expired escrows. Returns the number closed.
+func (s *Service) ForceCloseExpired(ctx context.Context) (int, error) {
+	expired, err := s.store.ListExpired(ctx, time.Now(), 100)
+	if err != nil {
+		return 0, err
+	}
+
+	closed := 0
+	for _, esc := range expired {
+		if esc.IsTerminal() {
+			continue
+		}
+		if esc.Status == StatusDisputed || esc.Status == StatusArbitrating {
+			continue
+		}
+		if err := s.AutoRelease(ctx, esc); err != nil {
+			s.logger.Warn("force-close: failed to auto-release escrow", "escrowId", esc.ID, "error", err)
+			continue
+		}
+		closed++
+	}
+	return closed, nil
 }
 
 // ListByAgent returns escrows involving an agent (as buyer or seller).

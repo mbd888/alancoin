@@ -56,6 +56,7 @@ type BaselineStore interface {
 
 	// Denials
 	LogDenial(ctx context.Context, rec *DenialRecord) error
+	ListDenials(ctx context.Context, since time.Time, limit int) ([]*DenialRecord, error)
 
 	// Maintenance
 	PruneOldEvents(ctx context.Context, before time.Time) (int64, error)

@@ -65,13 +65,27 @@ func (h *Handler) CreateWebhook(c *gin.Context) {
 
 	// Validate events against known types
 	validEvents := map[EventType]bool{
-		EventPaymentReceived:   true,
-		EventPaymentSent:       true,
-		EventSessionKeyUsed:    true,
-		EventSessionKeyCreated: true,
-		EventSessionKeyRevoked: true,
-		EventBalanceDeposit:    true,
-		EventBalanceWithdraw:   true,
+		EventPaymentReceived:         true,
+		EventPaymentSent:             true,
+		EventSessionKeyUsed:          true,
+		EventSessionKeyCreated:       true,
+		EventSessionKeyRevoked:       true,
+		EventBalanceDeposit:          true,
+		EventBalanceWithdraw:         true,
+		EventSessionKeyBudgetWarning: true,
+		EventSessionKeyExpiring:      true,
+		EventGatewaySessionCreated:   true,
+		EventGatewaySessionClosed:    true,
+		EventGatewayProxySuccess:     true,
+		EventGatewaySettlementFailed: true,
+		EventEscrowCreated:           true,
+		EventEscrowDelivered:         true,
+		EventEscrowReleased:          true,
+		EventEscrowRefunded:          true,
+		EventEscrowDisputed:          true,
+		EventStreamOpened:            true,
+		EventStreamClosed:            true,
+		EventStreamSettled:           true,
 	}
 	events := make([]EventType, 0, len(req.Events))
 	for _, e := range req.Events {
