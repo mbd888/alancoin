@@ -256,13 +256,13 @@ func formatServiceList(raw json.RawMessage) (string, error) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Found %d service(s):\n\n", len(services)))
+	fmt.Fprintf(&sb, "Found %d service(s):\n\n", len(services))
 	for i, s := range services {
-		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, s.Name))
-		sb.WriteString(fmt.Sprintf("   Type: %s | Price: %s USDC\n", s.Type, s.Price))
-		sb.WriteString(fmt.Sprintf("   Provider: %s\n", s.Address))
+		fmt.Fprintf(&sb, "%d. %s\n", i+1, s.Name)
+		fmt.Fprintf(&sb, "   Type: %s | Price: %s USDC\n", s.Type, s.Price)
+		fmt.Fprintf(&sb, "   Provider: %s\n", s.Address)
 		if s.Tier != "" {
-			sb.WriteString(fmt.Sprintf("   Reputation: %.1f (%s) | Success: %.0f%%\n", s.Reputation, s.Tier, s.SuccessRate*100))
+			fmt.Fprintf(&sb, "   Reputation: %.1f (%s) | Success: %.0f%%\n", s.Reputation, s.Tier, s.SuccessRate*100)
 		}
 		if i < len(services)-1 {
 			sb.WriteString("\n")
@@ -379,12 +379,12 @@ func formatBalance(raw json.RawMessage) (string, error) {
 
 	var sb strings.Builder
 	sb.WriteString("USDC Balance:\n")
-	sb.WriteString(fmt.Sprintf("  Available: %s USDC\n", getString(bal, "available")))
+	fmt.Fprintf(&sb, "  Available: %s USDC\n", getString(bal, "available"))
 	if v := getString(bal, "pending"); v != "" && v != "0" && v != "0.000000" {
-		sb.WriteString(fmt.Sprintf("  Pending:   %s USDC\n", v))
+		fmt.Fprintf(&sb, "  Pending:   %s USDC\n", v)
 	}
 	if v := getString(bal, "escrowed"); v != "" && v != "0" && v != "0.000000" {
-		sb.WriteString(fmt.Sprintf("  Escrowed:  %s USDC\n", v))
+		fmt.Fprintf(&sb, "  Escrowed:  %s USDC\n", v)
 	}
 
 	return sb.String(), nil
@@ -399,19 +399,19 @@ func formatReputation(raw json.RawMessage) (string, error) {
 	var sb strings.Builder
 	sb.WriteString("Agent Reputation:\n")
 	if v := getString(m, "address", "agentAddress"); v != "" {
-		sb.WriteString(fmt.Sprintf("  Address: %s\n", v))
+		fmt.Fprintf(&sb, "  Address: %s\n", v)
 	}
 	if v, ok := getFloat(m, "score", "reputationScore"); ok {
-		sb.WriteString(fmt.Sprintf("  Score: %.1f\n", v))
+		fmt.Fprintf(&sb, "  Score: %.1f\n", v)
 	}
 	if v := getString(m, "tier", "reputationTier"); v != "" {
-		sb.WriteString(fmt.Sprintf("  Tier: %s\n", v))
+		fmt.Fprintf(&sb, "  Tier: %s\n", v)
 	}
 	if v, ok := getFloat(m, "successRate", "success_rate"); ok {
-		sb.WriteString(fmt.Sprintf("  Success Rate: %.0f%%\n", v*100))
+		fmt.Fprintf(&sb, "  Success Rate: %.0f%%\n", v*100)
 	}
 	if v, ok := getFloat(m, "txCount", "transactionCount"); ok {
-		sb.WriteString(fmt.Sprintf("  Transactions: %.0f\n", v))
+		fmt.Fprintf(&sb, "  Transactions: %.0f\n", v)
 	}
 
 	return sb.String(), nil
@@ -434,14 +434,14 @@ func formatAgentList(raw json.RawMessage) (string, error) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Found %d agent(s):\n\n", len(resp.Agents)))
+	fmt.Fprintf(&sb, "Found %d agent(s):\n\n", len(resp.Agents))
 	for i, a := range resp.Agents {
 		name := getString(a, "name")
 		addr := getString(a, "address")
 		desc := getString(a, "description")
-		sb.WriteString(fmt.Sprintf("%d. %s (%s)\n", i+1, name, addr))
+		fmt.Fprintf(&sb, "%d. %s (%s)\n", i+1, name, addr)
 		if desc != "" {
-			sb.WriteString(fmt.Sprintf("   %s\n", desc))
+			fmt.Fprintf(&sb, "   %s\n", desc)
 		}
 	}
 	return sb.String(), nil

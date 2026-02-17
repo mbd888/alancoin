@@ -163,11 +163,11 @@ func (p *PostgresStore) ListAgents(ctx context.Context, filter AgentFilter) ([]*
 
 	if filter.Limit > 0 {
 		args = append(args, filter.Limit)
-		query += fmt.Sprintf(" LIMIT $%d", len(args))
+		query += fmt.Sprintf(" LIMIT $%d", len(args)) //nolint:gosec // placeholder index, not user input
 	}
 	if filter.Offset > 0 {
 		args = append(args, filter.Offset)
-		query += fmt.Sprintf(" OFFSET $%d", len(args))
+		query += fmt.Sprintf(" OFFSET $%d", len(args)) //nolint:gosec // placeholder index, not user input
 	}
 
 	rows, err := p.db.QueryContext(ctx, query, args...)
@@ -339,11 +339,11 @@ func (p *PostgresStore) discoverFromMatview(ctx context.Context, filter ServiceF
 
 	if filter.Limit > 0 {
 		args = append(args, filter.Limit)
-		query += fmt.Sprintf(" LIMIT $%d", len(args))
+		query += fmt.Sprintf(" LIMIT $%d", len(args)) //nolint:gosec // placeholder index, not user input
 	}
 	if filter.Offset > 0 {
 		args = append(args, filter.Offset)
-		query += fmt.Sprintf(" OFFSET $%d", len(args))
+		query += fmt.Sprintf(" OFFSET $%d", len(args)) //nolint:gosec // placeholder index, not user input
 	}
 
 	rows, err := p.db.QueryContext(ctx, query, args...)
@@ -393,11 +393,11 @@ func (p *PostgresStore) discoverFromTables(ctx context.Context, filter ServiceFi
 
 	if filter.Limit > 0 {
 		args = append(args, filter.Limit)
-		query += fmt.Sprintf(" LIMIT $%d", len(args))
+		query += fmt.Sprintf(" LIMIT $%d", len(args)) //nolint:gosec // placeholder index, not user input
 	}
 	if filter.Offset > 0 {
 		args = append(args, filter.Offset)
-		query += fmt.Sprintf(" OFFSET $%d", len(args))
+		query += fmt.Sprintf(" OFFSET $%d", len(args)) //nolint:gosec // placeholder index, not user input
 	}
 
 	rows, err := p.db.QueryContext(ctx, query, args...)

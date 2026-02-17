@@ -79,7 +79,7 @@ func (f *Forwarder) Forward(ctx context.Context, req ForwardRequest) (*ForwardRe
 	httpReq.Header.Set("X-Payment-Ref", req.Reference)
 
 	start := time.Now()
-	resp, err := f.client.Do(httpReq)
+	resp, err := f.client.Do(httpReq) //nolint:gosec // URL validated by security.ValidateEndpointURL above
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		return nil, fmt.Errorf("http request failed: %w", err)
