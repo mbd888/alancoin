@@ -100,7 +100,7 @@ func (p *PostgresSnapshotStore) Query(ctx context.Context, q HistoryQuery) ([]*S
 	if limit <= 0 {
 		limit = 100
 	}
-	query += " LIMIT $" + strconv.Itoa(argIdx)
+	query += " LIMIT $" + strconv.Itoa(argIdx) //nolint:gosec // placeholder index, not user input
 	args = append(args, limit)
 
 	rows, err := p.db.QueryContext(ctx, query, args...)
