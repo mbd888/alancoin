@@ -73,18 +73,26 @@ func (s *Session) IsExpired() bool {
 	return !s.ExpiresAt.IsZero() && time.Now().After(s.ExpiresAt)
 }
 
+// BuildAllowedTypesSet initializes the O(1) lookup set from the AllowedTypes slice.
+// Must be called after creating or loading a session (not concurrently).
+func (s *Session) BuildAllowedTypesSet() {
+	if len(s.AllowedTypes) == 0 {
+		s.allowedTypesSet = nil
+		return
+	}
+	s.allowedTypesSet = make(map[string]bool, len(s.AllowedTypes))
+	for _, t := range s.AllowedTypes {
+		s.allowedTypesSet[t] = true
+	}
+}
+
 // IsTypeAllowed returns true if the service type is permitted by this session.
 // An empty AllowedTypes list means all types are allowed.
-// The lookup set is built lazily on first call.
+// The set must be pre-built via BuildAllowedTypesSet — this method is safe for
+// concurrent reads (no lazy init, no writes).
 func (s *Session) IsTypeAllowed(serviceType string) bool {
 	if len(s.AllowedTypes) == 0 {
 		return true
-	}
-	if s.allowedTypesSet == nil {
-		s.allowedTypesSet = make(map[string]bool, len(s.AllowedTypes))
-		for _, t := range s.AllowedTypes {
-			s.allowedTypesSet[t] = true
-		}
 	}
 	return s.allowedTypesSet[serviceType]
 }

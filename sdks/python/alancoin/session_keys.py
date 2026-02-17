@@ -210,6 +210,12 @@ class SessionKeyManager:
         self._nonce = 0
         self._nonce_lock = threading.Lock()
     
+    def __repr__(self) -> str:
+        return (
+            f"SessionKeyManager(key_id={self.key_id!r}, "
+            f"public_key={self.public_key!r})"
+        )
+
     def set_key_id(self, key_id: str):
         """Set the session key ID after registration."""
         self.key_id = key_id

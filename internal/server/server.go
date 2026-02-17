@@ -551,8 +551,9 @@ func (s *Server) setupRoutes() {
 	protected := v1.Group("")
 	protected.Use(auth.Middleware(s.authMgr))
 	{
-		// Transaction recording requires auth to prevent reputation manipulation
-		protected.POST("/transactions", registryHandler.RecordTransaction)
+		// Transaction recording requires hard auth to prevent reputation manipulation.
+		// Soft middleware (Middleware) populates context; RequireAuth rejects unauthenticated callers.
+		protected.POST("/transactions", auth.RequireAuth(s.authMgr), registryHandler.RecordTransaction)
 
 		// Agent mutations (must own the agent)
 		protected.DELETE("/agents/:address", auth.RequireOwnership(s.authMgr, "address"), registryHandler.DeleteAgent)
@@ -612,10 +613,15 @@ func (s *Server) setupRoutes() {
 	// Using a session key to transact doesn't require API key (the session key IS the auth)
 	v1.POST("/agents/:address/sessions/:keyId/transact", sessionHandler.Transact)
 
-	// Delegation routes (A2A) — authenticated by session key signature, no API key needed
+	// Delegation creation (A2A) — authenticated by session key ECDSA signature, no API key needed
 	v1.POST("/sessions/:keyId/delegate", sessionHandler.CreateDelegation)
-	v1.GET("/sessions/:keyId/tree", sessionHandler.GetDelegationTree)
-	v1.GET("/sessions/:keyId/delegation-log", sessionHandler.GetDelegationLog)
+
+	// Delegation read endpoints — require API key auth because they expose budget/spending data.
+	// Moved from public v1 group to prevent unauthenticated enumeration of financial PII.
+	protectedDelegation := v1.Group("")
+	protectedDelegation.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+	protectedDelegation.GET("/sessions/:keyId/tree", sessionHandler.GetDelegationTree)
+	protectedDelegation.GET("/sessions/:keyId/delegation-log", sessionHandler.GetDelegationLog)
 
 	// =========================================================================
 	// Gateway — transparent payment proxy (the primary path for AI agents)

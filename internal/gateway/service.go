@@ -340,6 +340,7 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr, tenantID string,
 		CreatedAt:            now,
 		UpdatedAt:            now,
 	}
+	session.BuildAllowedTypesSet()
 
 	// Policy check before holding funds (e.g. time_window enforcement).
 	if s.policyEvaluator != nil {
@@ -632,6 +633,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		sellerAmountStr, feeAmountStr := s.computeFee(ctx, session.TenantID, priceBig)
 
 		// Settle payment with retry (handles transient DB errors).
+		// Unlock during sleep to avoid blocking other sessions on the same shard.
 		var settleErr error
 		for attempt := 0; attempt < 3; attempt++ {
 			if feeAmountStr != "0.000000" && s.platformAddr != "" {
@@ -643,7 +645,9 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 				break
 			}
 			if attempt < 2 {
+				unlock()
 				time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+				unlock = s.locks.Lock(sessionID)
 			}
 		}
 		if settleErr != nil {
@@ -691,12 +695,19 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		s.removePendingSpend(sessionIDCopy, priceBig)
 
 		// Update session with retry (money already moved, must persist).
+		// Unlock during sleep to avoid blocking other sessions on the same shard.
 		var updateErr error
 		for attempt := 0; attempt < 3; attempt++ {
 			if updateErr = s.store.UpdateSession(ctx, session); updateErr == nil {
 				break
 			}
-			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+			if attempt < 2 {
+				unlock()
+				time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+				unlock = s.locks.Lock(sessionID)
+				// Re-read is unnecessary here: we own the authoritative state
+				// (session was already updated in memory above).
+			}
 		}
 		if updateErr != nil {
 			s.logger.Error("CRITICAL: settlement succeeded but session update failed after retries",
@@ -829,13 +840,18 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 
 	// CRITICAL: Funds already moved. Retry the status update because if this fails
 	// and the session stays "active", the auto-close timer could release holds that no longer exist.
+	// Unlock during sleep to avoid blocking other sessions on the same shard.
 	var updateErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if updateErr = s.store.UpdateSession(ctx, session); updateErr == nil {
 			break
 		}
 		s.logger.Warn("gateway session status update retry", "session", sessionID, "attempt", attempt+1, "error", updateErr)
-		time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+		if attempt < 2 {
+			unlock()
+			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+			unlock = s.locks.Lock(sessionID)
+		}
 	}
 	if updateErr != nil {
 		// All retries exhausted. Mark as settlement_failed so auto-close won't re-process.
@@ -1030,6 +1046,7 @@ func (s *Service) AutoCloseExpired(ctx context.Context, session *Session) error 
 	fresh.UpdatedAt = time.Now()
 
 	// Funds already released. Retry status update to prevent re-processing.
+	// Unlock during sleep to avoid blocking other sessions on the same shard.
 	var updateErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if updateErr = s.store.UpdateSession(ctx, fresh); updateErr == nil {
@@ -1039,7 +1056,11 @@ func (s *Service) AutoCloseExpired(ctx context.Context, session *Session) error 
 			return nil
 		}
 		s.logger.Warn("auto-close status update retry", "session", fresh.ID, "attempt", attempt+1, "error", updateErr)
-		time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+		if attempt < 2 {
+			unlock()
+			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+			unlock = s.locks.Lock(session.ID)
+		}
 	}
 	// Mark as settlement_failed so next auto-close cycle skips it.
 	fresh.Status = StatusSettlementFailed

@@ -100,14 +100,14 @@ func fakeServiceEndpoint(statusCode int, response map[string]interface{}) *httpt
 func newTestService(ledger *mockLedger, registry *mockRegistry) *Service {
 	store := NewMemoryStore()
 	resolver := NewResolver(registry)
-	forwarder := NewForwarder(5 * time.Second)
+	forwarder := NewForwarder(5 * time.Second).WithAllowLocalEndpoints()
 	return NewService(store, resolver, forwarder, ledger, nil)
 }
 
 func newTestServiceWithLogger(ledger *mockLedger, registry *mockRegistry) *Service {
 	store := NewMemoryStore()
 	resolver := NewResolver(registry)
-	forwarder := NewForwarder(5 * time.Second)
+	forwarder := NewForwarder(5 * time.Second).WithAllowLocalEndpoints()
 	// Use a no-op logger for tests that need one (proxy logs warnings)
 	return NewService(store, resolver, forwarder, ledger, testLogger())
 }
@@ -955,7 +955,7 @@ func TestTimerSweepsExpiredSessions(t *testing.T) {
 	ml := newMockLedger()
 	store := NewMemoryStore()
 	resolver := NewResolver(&mockRegistry{})
-	forwarder := NewForwarder(5 * time.Second)
+	forwarder := NewForwarder(5 * time.Second).WithAllowLocalEndpoints()
 	svc := NewService(store, resolver, forwarder, ml, testLogger())
 
 	ctx := context.Background()
@@ -1270,7 +1270,7 @@ func TestProxy_SettlementRetry(t *testing.T) {
 	// Rebuild service with custom ledger
 	store := NewMemoryStore()
 	resolver := NewResolver(reg)
-	forwarder := NewForwarder(5 * time.Second)
+	forwarder := NewForwarder(5 * time.Second).WithAllowLocalEndpoints()
 	svc2 := NewService(store, resolver, forwarder, customLedger, testLogger())
 
 	session2, _ := svc2.CreateSession(ctx, "0xbuyer", "", CreateSessionRequest{
@@ -1346,7 +1346,7 @@ func TestProxy_SettlementFailure_ReturnsResponse(t *testing.T) {
 
 	store := NewMemoryStore()
 	resolver := NewResolver(reg)
-	forwarder := NewForwarder(5 * time.Second)
+	forwarder := NewForwarder(5 * time.Second).WithAllowLocalEndpoints()
 	svc := NewService(store, resolver, forwarder, customLedger, testLogger())
 
 	ctx := context.Background()

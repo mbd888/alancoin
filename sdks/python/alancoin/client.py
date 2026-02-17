@@ -62,6 +62,7 @@ class Alancoin:
         self,
         base_url: str = "http://localhost:8080",
         api_key: Optional[str] = None,
+        address: Optional[str] = None,
         timeout: int = 30,
     ):
         """
@@ -70,18 +71,40 @@ class Alancoin:
         Args:
             base_url: Alancoin API URL
             api_key: API key for authentication (optional for now)
+            address: Agent's wallet address (required for BudgetSession/StreamingSession)
             timeout: Request timeout in seconds
         """
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self.address: Optional[str] = address
         self.timeout = timeout
         self._session = requests.Session()
-        
+
+        if (
+            not base_url.startswith("https://")
+            and "localhost" not in base_url
+            and "127.0.0.1" not in base_url
+        ):
+            import warnings
+            warnings.warn(
+                f"Connecting over HTTP to '{base_url}'. "
+                "Use https:// in production to protect API keys and payment data.",
+                SecurityWarning,
+                stacklevel=2,
+            )
+
         if api_key:
             self._session.headers["Authorization"] = f"Bearer {api_key}"
-        
+
         self._session.headers["Content-Type"] = "application/json"
-        self._session.headers["User-Agent"] = "alancoin-python/0.1.0"
+        self._session.headers["User-Agent"] = "alancoin-python/0.2.0"
+
+    def __repr__(self) -> str:
+        return (
+            f"Alancoin(base_url={self.base_url!r}, "
+            f"authenticated={bool(self.api_key)}, "
+            f"address={self.address!r})"
+        )
 
     # -------------------------------------------------------------------------
     # Platform Info
@@ -171,11 +194,13 @@ class Alancoin:
             "usage": response.get("usage"),
         }
         
-        # Auto-configure this client with the new API key
+        # Auto-configure this client with the new API key and address
         if result["apiKey"] and not self.api_key:
             self.api_key = result["apiKey"]
             self._session.headers["Authorization"] = f"Bearer {result['apiKey']}"
-        
+        if not self.address:
+            self.address = address
+
         return result
 
     def get_agent(self, address: str) -> Agent:

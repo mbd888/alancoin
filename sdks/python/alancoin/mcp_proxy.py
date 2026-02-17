@@ -84,6 +84,10 @@ class DemoBackend(PaymentBackend):
 
     async def confirm_escrow(self, escrow_id: str) -> EscrowResult:
         escrow = self._get(escrow_id)
+        if escrow["status"] == "confirmed":
+            return EscrowResult(escrow_id=escrow_id, status="confirmed", amount=str(escrow["amount"]))
+        if escrow["status"] != "created":
+            raise ValueError(f"Cannot confirm escrow {escrow_id} in status '{escrow['status']}'")
         escrow["status"] = "confirmed"
         seller = escrow["seller"]
         self.balances.setdefault(seller, Decimal(0))
@@ -94,6 +98,10 @@ class DemoBackend(PaymentBackend):
 
     async def dispute_escrow(self, escrow_id: str, reason: str) -> EscrowResult:
         escrow = self._get(escrow_id)
+        if escrow["status"] == "disputed":
+            return EscrowResult(escrow_id=escrow_id, status="disputed", amount=str(escrow["amount"]))
+        if escrow["status"] != "created":
+            raise ValueError(f"Cannot dispute escrow {escrow_id} in status '{escrow['status']}'")
         escrow["status"] = "disputed"
         buyer = escrow["buyer"]
         self.balances[buyer] += escrow["amount"]
@@ -141,7 +149,7 @@ class AlancoinBackend(PaymentBackend):
         )
 
     async def get_balance(self, address: str) -> str:
-        result = await asyncio.to_thread(self._client.get_balance, address)
+        result = await asyncio.to_thread(self._client.get_platform_balance, address)
         return result.get("balance", {}).get("available", "?")
 
 
@@ -194,7 +202,13 @@ class MCPPaymentProxy:
         self.server = Server("alancoin-mcp-proxy")
 
     def _parse_command(self) -> StdioServerParameters:
-        parts = self.upstream_command.split()
+        import shlex
+        try:
+            parts = shlex.split(self.upstream_command)
+        except ValueError as e:
+            raise ValueError(f"Invalid upstream command syntax: {e}") from e
+        if not parts:
+            raise ValueError("upstream_command is empty")
         return StdioServerParameters(command=parts[0], args=parts[1:])
 
     def _enrich_tool(self, tool: types.Tool) -> types.Tool:

@@ -241,21 +241,29 @@ class BudgetSession:
         Raises:
             AlancoinError: If session inactive, budget exceeded, or payment fails.
         """
-        if not self._active:
-            raise AlancoinError("Session is not active", code="session_inactive")
-
         amount_dec = _parse_decimal(amount, "payment amount")
-        if self._budget.max_per_tx and amount_dec > _parse_decimal(self._budget.max_per_tx, "max_per_tx"):
-            raise AlancoinError(
-                f"Payment of ${amount} exceeds per-transaction limit of ${self._budget.max_per_tx}",
-                code="per_tx_limit_exceeded",
-            )
-        if self._total_spent + amount_dec > _parse_decimal(self._budget.max_total, "max_total"):
-            raise AlancoinError(
-                f"Payment of ${amount} would exceed session budget "
-                f"(spent: ${self._total_spent}, limit: ${self._budget.max_total})",
-                code="budget_exceeded",
-            )
+
+        # Acquire lock for the entire check-reserve-transact-confirm sequence
+        # to prevent concurrent threads from both passing the budget check.
+        with self._lock:
+            if not self._active:
+                raise AlancoinError("Session is not active", code="session_inactive")
+
+            if self._budget.max_per_tx and amount_dec > _parse_decimal(self._budget.max_per_tx, "max_per_tx"):
+                raise AlancoinError(
+                    f"Payment of ${amount} exceeds per-transaction limit of ${self._budget.max_per_tx}",
+                    code="per_tx_limit_exceeded",
+                )
+            if self._total_spent + amount_dec > _parse_decimal(self._budget.max_total, "max_total"):
+                raise AlancoinError(
+                    f"Payment of ${amount} would exceed session budget "
+                    f"(spent: ${self._total_spent}, limit: ${self._budget.max_total})",
+                    code="budget_exceeded",
+                )
+
+            # Optimistically reserve the budget before the network call
+            self._total_spent += amount_dec
+            self._tx_count += 1
 
         try:
             result = self._skm.transact(
@@ -266,8 +274,15 @@ class BudgetSession:
                 service_id=service_id,
             )
         except AlancoinError:
-            raise  # Already has details from server
+            # Roll back the reservation on failure
+            with self._lock:
+                self._total_spent -= amount_dec
+                self._tx_count -= 1
+            raise
         except Exception as e:
+            with self._lock:
+                self._total_spent -= amount_dec
+                self._tx_count -= 1
             raise AlancoinError(
                 f"Transaction failed: {e}",
                 code="transact_failed",
@@ -278,8 +293,6 @@ class BudgetSession:
                 },
             ) from e
 
-        self._total_spent += amount_dec
-        self._tx_count += 1
         return result
 
     # -- Service calls --------------------------------------------------------
@@ -383,8 +396,10 @@ class BudgetSession:
             response_data = self._call_endpoint(service, tx_result, params)
 
             # Auto-confirm escrow on successful endpoint call.
-            # Require non-null output to prevent paying for garbage responses.
-            if escrow and escrow_id and "error" not in response_data and response_data.get("output") is not None:
+            # Require a non-empty output to prevent paying for garbage responses.
+            output = response_data.get("output")
+            has_meaningful_output = output is not None and output != "" and output != []
+            if escrow and escrow_id and "error" not in response_data and has_meaningful_output:
                 try:
                     self._client.confirm_escrow(escrow_id)
                 except Exception as e:
@@ -733,7 +748,9 @@ class BudgetSession:
             body = dict(params)
             body["_delegation_key_id"] = child_key_id
             body["_delegation_budget"] = delegation_budget
-            body["_delegation_private_key"] = child_skm.private_key
+            # NOTE: Never send the private key over the wire. The child key
+            # is already registered server-side; the receiving service should
+            # use the key ID to prove authorization via the platform API.
             body["_delegation_depth"] = child_key.get("depth", 1)
             try:
                 resp = requests.post(

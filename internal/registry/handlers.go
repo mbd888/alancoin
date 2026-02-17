@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/mbd888/alancoin/internal/logging"
+	"github.com/mbd888/alancoin/internal/security"
 	"github.com/mbd888/alancoin/internal/validation"
 )
 
@@ -139,15 +140,22 @@ func (h *Handler) RecordTransaction(c *gin.Context) {
 		return
 	}
 
-	// Verify the authenticated caller is the sender (prevents forged transactions)
-	if callerAddr, ok := c.Get("authAgentAddr"); ok {
-		if addr, isStr := callerAddr.(string); isStr && !strings.EqualFold(addr, req.From) {
-			c.JSON(http.StatusForbidden, gin.H{
-				"error":   "forbidden",
-				"message": "Cannot record transactions for another agent's address",
-			})
-			return
-		}
+	// Verify the authenticated caller is the sender (prevents forged transactions).
+	// This check is unconditional — if auth context is missing, reject the request.
+	callerAddr, ok := c.Get("authAgentAddr")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":   "unauthorized",
+			"message": "Authentication required to record transactions",
+		})
+		return
+	}
+	if addr, isStr := callerAddr.(string); isStr && !strings.EqualFold(addr, req.From) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "Cannot record transactions for another agent's address",
+		})
+		return
 	}
 
 	status := "confirmed" // Default to confirmed in demo/in-memory mode
@@ -374,6 +382,17 @@ func (h *Handler) AddService(c *gin.Context) {
 		return
 	}
 
+	// Validate endpoint URL to prevent SSRF (blocks private/loopback/link-local IPs)
+	if req.Endpoint != "" {
+		if err := security.ValidateEndpointURL(req.Endpoint); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "invalid_endpoint",
+				"message": fmt.Sprintf("Endpoint URL rejected: %v", err),
+			})
+			return
+		}
+	}
+
 	service := &Service{
 		Type:        req.Type,
 		Name:        req.Name,
@@ -428,6 +447,17 @@ func (h *Handler) UpdateService(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":   "validation_failed",
 				"message": vErr.Field + ": " + vErr.Message,
+			})
+			return
+		}
+	}
+
+	// Validate endpoint URL to prevent SSRF (blocks private/loopback/link-local IPs)
+	if service.Endpoint != "" {
+		if err := security.ValidateEndpointURL(service.Endpoint); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "invalid_endpoint",
+				"message": fmt.Sprintf("Endpoint URL rejected: %v", err),
 			})
 			return
 		}

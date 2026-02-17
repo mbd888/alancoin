@@ -44,6 +44,7 @@ func (m *MemoryStore) GetSession(_ context.Context, id string) (*Session, error)
 		cp.AllowedTypes = make([]string, len(session.AllowedTypes))
 		copy(cp.AllowedTypes, session.AllowedTypes)
 	}
+	cp.BuildAllowedTypesSet()
 	return &cp, nil
 }
 

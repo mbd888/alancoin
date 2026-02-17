@@ -312,6 +312,7 @@ func scanSession(sc sessionScanner) (*Session, error) {
 	if len(s.AllowedTypes) == 0 {
 		s.AllowedTypes = nil
 	}
+	s.BuildAllowedTypesSet()
 	return s, nil
 }
 

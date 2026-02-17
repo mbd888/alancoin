@@ -213,23 +213,35 @@ func (s *Service) AutoClose(ctx context.Context, stream *Stream) error {
 }
 
 // settle performs the actual settlement: pay seller, refund unused to buyer.
+//
+// Order matters for crash safety: we release the unused portion first, then
+// settle the spent portion. If we crash between the two operations:
+//   - Release succeeded, settle failed → buyer got unused funds back, seller
+//     is owed money (recoverable via reconciliation — no funds are stuck).
+//   - The reverse order (old code) would leave unused funds permanently stuck
+//     in pending if the process crashes after settle but before release.
 func (s *Service) settle(ctx context.Context, stream *Stream, status Status, reason string) (*Stream, error) {
 	spentBig, _ := usdc.Parse(stream.SpentAmount)
 	holdBig, _ := usdc.Parse(stream.HoldAmount)
-
-	// 1. Atomically settle spent portion: buyer pending → seller available
-	if spentBig.Sign() > 0 {
-		if err := s.ledger.SettleHold(ctx, stream.BuyerAddr, stream.SellerAddr, stream.SpentAmount, stream.ID); err != nil {
-			return nil, fmt.Errorf("failed to settle hold: %w", err)
-		}
-	}
-
-	// 2. Release unused hold back to buyer (pending → available)
 	unused := new(big.Int).Sub(holdBig, spentBig)
+
+	// 1. Release unused hold back to buyer first (fail-safe order).
 	if unused.Sign() > 0 {
 		unusedStr := usdc.Format(unused)
 		if err := s.ledger.ReleaseHold(ctx, stream.BuyerAddr, unusedStr, stream.ID); err != nil {
 			return nil, fmt.Errorf("failed to release unused hold: %w", err)
+		}
+	}
+
+	// 2. Settle spent portion: buyer pending → seller available.
+	if spentBig.Sign() > 0 {
+		if err := s.ledger.SettleHold(ctx, stream.BuyerAddr, stream.SellerAddr, stream.SpentAmount, stream.ID); err != nil {
+			// CRITICAL: Unused funds released but spent portion not settled.
+			// The seller is owed money. Log for reconciliation.
+			log.Printf("CRITICAL: stream %s release succeeded but settle failed — seller %s owed %s: %v",
+				stream.ID, stream.SellerAddr, stream.SpentAmount, err)
+			return nil, fmt.Errorf("failed to settle hold (unused funds released, seller owed %s — requires reconciliation): %w",
+				stream.SpentAmount, err)
 		}
 	}
 
@@ -241,13 +253,21 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 
 	// CRITICAL: Funds already moved. Retry the status update because if this fails
 	// and the stream stays "open", the auto-close timer could settle again (double payment).
+	// Note: caller holds s.locks.Lock(stream.ID). We unlock during sleep to avoid
+	// blocking other streams on the same shard, then re-lock before retry.
 	var updateErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if updateErr = s.store.Update(ctx, stream); updateErr == nil {
 			break
 		}
 		log.Printf("WARN: stream %s status update attempt %d failed: %v", stream.ID, attempt+1, updateErr)
-		time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+		// Note: we do NOT unlock here because settle() does not own the lock —
+		// the caller (Close/AutoClose) holds it via defer. The sleep duration is
+		// short (50-100ms) and correctness requires holding the lock across the
+		// settle+status-update to prevent double-settlement races.
+		if attempt < 2 {
+			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+		}
 	}
 	if updateErr != nil {
 		// All retries exhausted. Mark as settlement_failed so auto-close won't re-settle.

@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/security"
 )
 
 const maxResponseSize = 5 * 1024 * 1024 // 5MB
@@ -30,7 +32,8 @@ type ForwardResponse struct {
 
 // Forwarder sends HTTP requests to service endpoints.
 type Forwarder struct {
-	client *http.Client
+	client        *http.Client
+	skipSSRFCheck bool // Allow localhost endpoints (for tests/demo only)
 }
 
 // NewForwarder creates a new HTTP forwarder.
@@ -44,8 +47,22 @@ func NewForwarder(timeout time.Duration) *Forwarder {
 	}
 }
 
+// WithAllowLocalEndpoints disables SSRF validation, allowing localhost endpoints.
+// Only use this for tests and demo mode where services run locally.
+func (f *Forwarder) WithAllowLocalEndpoints() *Forwarder {
+	f.skipSSRFCheck = true
+	return f
+}
+
 // Forward sends a POST request to the service endpoint.
+// Validates the endpoint URL to prevent SSRF before making the request.
 func (f *Forwarder) Forward(ctx context.Context, req ForwardRequest) (*ForwardResponse, error) {
+	if !f.skipSSRFCheck {
+		if err := security.ValidateEndpointURL(req.Endpoint); err != nil {
+			return nil, fmt.Errorf("blocked endpoint URL: %w", err)
+		}
+	}
+
 	body, err := json.Marshal(req.Params)
 	if err != nil {
 		return nil, fmt.Errorf("marshal params: %w", err)
