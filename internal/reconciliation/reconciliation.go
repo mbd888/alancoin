@@ -4,6 +4,7 @@ package reconciliation
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -45,6 +46,9 @@ type Runner struct {
 	stream StreamChecker
 	hold   HoldChecker
 	logger *slog.Logger
+
+	lastMu     sync.RWMutex
+	lastReport *Report
 }
 
 // NewRunner creates a new reconciliation runner.
@@ -142,5 +146,16 @@ func (r *Runner) RunAll(ctx context.Context) (*Report, error) {
 		"duration", report.Duration,
 	)
 
+	r.lastMu.Lock()
+	r.lastReport = report
+	r.lastMu.Unlock()
+
 	return report, nil
+}
+
+// LastReport returns the most recent reconciliation result, or nil if no run has completed yet.
+func (r *Runner) LastReport() *Report {
+	r.lastMu.RLock()
+	defer r.lastMu.RUnlock()
+	return r.lastReport
 }

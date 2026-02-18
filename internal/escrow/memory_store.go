@@ -58,7 +58,7 @@ func (m *MemoryStore) Update(ctx context.Context, escrow *Escrow) error {
 	return nil
 }
 
-func (m *MemoryStore) ListByAgent(ctx context.Context, agentAddr string, limit int) ([]*Escrow, error) {
+func (m *MemoryStore) ListByAgent(ctx context.Context, agentAddr string, limit int, _ ...ListOption) ([]*Escrow, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

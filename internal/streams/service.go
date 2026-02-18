@@ -11,7 +11,10 @@ import (
 
 	"github.com/mbd888/alancoin/internal/retry"
 	"github.com/mbd888/alancoin/internal/syncutil"
+	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // WebhookEmitter emits lifecycle events to webhook subscribers.
@@ -64,7 +67,20 @@ func (s *Service) WithWebhookEmitter(e WebhookEmitter) *Service {
 }
 
 // Open creates a new payment stream and holds funds from the buyer.
-func (s *Service) Open(ctx context.Context, req OpenRequest) (*Stream, error) {
+func (s *Service) Open(ctx context.Context, req OpenRequest) (_ *Stream, retErr error) {
+	ctx, span := traces.StartSpan(ctx, "streams.Open",
+		attribute.String("buyer", req.BuyerAddr),
+		attribute.String("seller", req.SellerAddr),
+		attribute.String("hold_amount", req.HoldAmount),
+	)
+	defer func() {
+		if retErr != nil {
+			span.RecordError(retErr)
+			span.SetStatus(codes.Error, retErr.Error())
+		}
+		span.End()
+	}()
+
 	if strings.EqualFold(req.BuyerAddr, req.SellerAddr) {
 		return nil, errors.New("buyer and seller cannot be the same address")
 	}
@@ -120,7 +136,18 @@ func (s *Service) Open(ctx context.Context, req OpenRequest) (*Stream, error) {
 }
 
 // RecordTick records a micropayment tick on an open stream.
-func (s *Service) RecordTick(ctx context.Context, streamID string, req TickRequest) (*Tick, *Stream, error) {
+func (s *Service) RecordTick(ctx context.Context, streamID string, req TickRequest) (_ *Tick, _ *Stream, retErr error) {
+	ctx, span := traces.StartSpan(ctx, "streams.RecordTick",
+		attribute.String("stream_id", streamID),
+	)
+	defer func() {
+		if retErr != nil {
+			span.RecordError(retErr)
+			span.SetStatus(codes.Error, retErr.Error())
+		}
+		span.End()
+	}()
+
 	unlock := s.locks.Lock(streamID)
 	defer unlock()
 
@@ -189,7 +216,19 @@ func (s *Service) RecordTick(ctx context.Context, streamID string, req TickReque
 }
 
 // Close settles a stream: pays seller for spent amount, refunds unused hold to buyer.
-func (s *Service) Close(ctx context.Context, streamID, callerAddr, reason string) (*Stream, error) {
+func (s *Service) Close(ctx context.Context, streamID, callerAddr, reason string) (_ *Stream, retErr error) {
+	ctx, span := traces.StartSpan(ctx, "streams.Close",
+		attribute.String("stream_id", streamID),
+		attribute.String("caller", callerAddr),
+	)
+	defer func() {
+		if retErr != nil {
+			span.RecordError(retErr)
+			span.SetStatus(codes.Error, retErr.Error())
+		}
+		span.End()
+	}()
+
 	unlock := s.locks.Lock(streamID)
 	defer unlock()
 

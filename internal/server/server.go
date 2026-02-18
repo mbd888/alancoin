@@ -22,6 +22,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq" // PostgreSQL driver
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/mbd888/alancoin/internal/admin"
 	"github.com/mbd888/alancoin/internal/auth"
 	"github.com/mbd888/alancoin/internal/circuitbreaker"
@@ -401,10 +405,24 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 	if s.gatewayService != nil && s.gatewayService.CircuitBreaker() != nil {
 		cb := s.gatewayService.CircuitBreaker()
 		s.healthRegistry.Register("circuit_breaker", func(_ context.Context) health.Status {
-			// Report healthy as long as the CB exists. Individual endpoint states
-			// are available via the State() method; aggregate health is always OK.
-			_ = cb
-			return health.Status{Name: "circuit_breaker", Healthy: true, Detail: "active"}
+			total, open, halfOpen := cb.Snapshot()
+			detail := fmt.Sprintf("tracked=%d open=%d half_open=%d", total, open, halfOpen)
+			// Degrade when more than half of tracked endpoints are open.
+			healthy := total == 0 || open <= total/2
+			return health.Status{Name: "circuit_breaker", Healthy: healthy, Detail: detail}
+		})
+	}
+
+	if s.reconcileRunner != nil {
+		runner := s.reconcileRunner
+		s.healthRegistry.Register("reconciliation", func(_ context.Context) health.Status {
+			report := runner.LastReport()
+			if report == nil {
+				return health.Status{Name: "reconciliation", Healthy: true, Detail: "no run yet"}
+			}
+			detail := fmt.Sprintf("mismatches=%d stuck_escrows=%d stale_streams=%d orphaned_holds=%d",
+				report.LedgerMismatches, report.StuckEscrows, report.StaleStreams, report.OrphanedHolds)
+			return health.Status{Name: "reconciliation", Healthy: report.Healthy, Detail: detail}
 		})
 	}
 
@@ -512,6 +530,7 @@ func (s *Server) setupMiddleware() {
 }
 
 func (s *Server) requestIDMiddleware() gin.HandlerFunc {
+	tracer := otel.Tracer("github.com/mbd888/alancoin/server")
 	return func(c *gin.Context) {
 		// Check for existing request ID (from load balancer, etc.)
 		requestID := c.GetHeader("X-Request-ID")
@@ -519,15 +538,32 @@ func (s *Server) requestIDMiddleware() gin.HandlerFunc {
 			requestID = generateRequestID()
 		}
 
-		// Add to context
-		ctx := logging.WithRequestID(c.Request.Context(), requestID)
-		ctx = logging.WithLogger(ctx, s.logger)
+		// Start a server-level span so downstream spans inherit the trace.
+		ctx := c.Request.Context()
+		ctx, span := tracer.Start(ctx, c.Request.Method+" "+c.FullPath(),
+			trace.WithAttributes(attribute.String("request_id", requestID)),
+		)
+		defer span.End()
+
+		// Add request ID and trace context to logger.
+		ctx = logging.WithRequestID(ctx, requestID)
+		logger := s.logger
+		if sc := span.SpanContext(); sc.HasTraceID() {
+			logger = logger.With("trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String())
+		}
+		ctx = logging.WithLogger(ctx, logger)
 		c.Request = c.Request.WithContext(ctx)
 
 		// Set response header
 		c.Header("X-Request-ID", requestID)
 
 		c.Next()
+
+		// Record HTTP status on span
+		status := c.Writer.Status()
+		if status >= 400 {
+			span.SetAttributes(attribute.Int("http.status_code", status))
+		}
 	}
 }
 

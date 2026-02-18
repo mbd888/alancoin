@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mbd888/alancoin/internal/idgen"
+	"github.com/mbd888/alancoin/internal/metrics"
 	"github.com/mbd888/alancoin/internal/usdc"
 )
 
@@ -215,6 +216,7 @@ func (m *Manager) Create(ctx context.Context, ownerAddr string, req *SessionKeyR
 		return nil, fmt.Errorf("failed to create session key: %w", err)
 	}
 
+	metrics.ActiveSessionKeys.Inc()
 	return key, nil
 }
 
@@ -245,6 +247,7 @@ func (m *Manager) Revoke(ctx context.Context, id string) error {
 	if err := m.store.Update(ctx, key); err != nil {
 		return err
 	}
+	metrics.ActiveSessionKeys.Dec()
 
 	// Audit: log revocation
 	rootKeyID := key.RootKeyID

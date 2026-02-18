@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/mbd888/alancoin/internal/metrics"
+	"github.com/mbd888/alancoin/internal/pagination"
+	"github.com/mbd888/alancoin/internal/retry"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
 	"go.opentelemetry.io/otel/attribute"
@@ -111,12 +113,37 @@ func (e *Escrow) IsTerminal() bool {
 	return false
 }
 
+// ListOption configures optional parameters for list queries.
+type ListOption func(*listOpts)
+
+type listOpts struct {
+	cursor *pagination.Cursor
+}
+
+func applyListOpts(opts []ListOption) listOpts {
+	var o listOpts
+	for _, fn := range opts {
+		fn(&o)
+	}
+	return o
+}
+
+// WithCursor filters results to items after the given cursor position.
+func WithCursor(cursor string) ListOption {
+	return func(o *listOpts) {
+		c, err := pagination.Decode(cursor)
+		if err == nil {
+			o.cursor = c
+		}
+	}
+}
+
 // Store persists escrow data.
 type Store interface {
 	Create(ctx context.Context, escrow *Escrow) error
 	Get(ctx context.Context, id string) (*Escrow, error)
 	Update(ctx context.Context, escrow *Escrow) error
-	ListByAgent(ctx context.Context, agentAddr string, limit int) ([]*Escrow, error)
+	ListByAgent(ctx context.Context, agentAddr string, limit int, opts ...ListOption) ([]*Escrow, error)
 	ListExpired(ctx context.Context, before time.Time, limit int) ([]*Escrow, error)
 	ListByStatus(ctx context.Context, status Status, limit int) ([]*Escrow, error)
 }
@@ -342,7 +369,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Escrow, error
 	if err := s.store.Create(ctx, escrow); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to create escrow record")
-		if refundErr := s.ledger.RefundEscrow(ctx, escrow.BuyerAddr, escrow.Amount, escrow.ID); refundErr != nil {
+		refundErr := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
+			return s.ledger.RefundEscrow(ctx, escrow.BuyerAddr, escrow.Amount, escrow.ID)
+		})
+		if refundErr != nil {
 			s.logger.Error("RefundEscrow failed after store error: funds stuck in escrow",
 				"escrow_id", escrow.ID, "amount", escrow.Amount, "error", refundErr)
 			return nil, &MoneyError{
@@ -363,6 +393,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Escrow, error
 	}
 
 	metrics.EscrowCreatedTotal.Inc()
+	metrics.EscrowsTotal.WithLabelValues("created").Inc()
 
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitEscrowCreated(escrow.BuyerAddr, escrow.ID, escrow.SellerAddr, escrow.Amount)
@@ -449,7 +480,9 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 	}
 
 	// Release funds to seller
-	if err := s.ledger.ReleaseEscrow(ctx, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ID); err != nil {
+	if err := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
+		return s.ledger.ReleaseEscrow(ctx, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ID)
+	}); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to release escrow funds")
 		return nil, &MoneyError{
@@ -466,23 +499,22 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 	escrow.ResolvedAt = &now
 	escrow.UpdatedAt = now
 
-	if err := s.store.Update(ctx, escrow); err != nil {
-		// Retry once — funds already moved, we must persist the state change
-		if retryErr := s.store.Update(ctx, escrow); retryErr != nil {
-			// CRITICAL: Funds were released to seller but escrow record is stale.
-			// Cannot safely reverse ReleaseEscrow (no inverse operation).
-			// Log for manual resolution rather than applying wrong compensation.
-			s.logger.Error("CRITICAL: escrow funds released but status update failed",
-				"escrow_id", escrow.ID, "seller", escrow.SellerAddr, "amount", escrow.Amount, "error", retryErr)
-			span.RecordError(retryErr)
-			span.SetStatus(codes.Error, "failed to update escrow after fund release")
-			return nil, &MoneyError{
-				Err:         fmt.Errorf("failed to update escrow after fund release (requires manual resolution): %w", retryErr),
-				FundsStatus: "released_to_seller",
-				Recovery:    "Funds were successfully released to the seller but the escrow record could not be updated. No action needed regarding your funds.",
-				Amount:      escrow.Amount,
-				Reference:   escrow.ID,
-			}
+	if err := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
+		return s.store.Update(ctx, escrow)
+	}); err != nil {
+		// CRITICAL: Funds were released to seller but escrow record is stale.
+		// Cannot safely reverse ReleaseEscrow (no inverse operation).
+		// Log for manual resolution rather than applying wrong compensation.
+		s.logger.Error("CRITICAL: escrow funds released but status update failed",
+			"escrow_id", escrow.ID, "seller", escrow.SellerAddr, "amount", escrow.Amount, "error", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to update escrow after fund release")
+		return nil, &MoneyError{
+			Err:         fmt.Errorf("failed to update escrow after fund release (requires manual resolution): %w", err),
+			FundsStatus: "released_to_seller",
+			Recovery:    "Funds were successfully released to the seller but the escrow record could not be updated. No action needed regarding your funds.",
+			Amount:      escrow.Amount,
+			Reference:   escrow.ID,
 		}
 	}
 
@@ -503,6 +535,7 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 	}
 
 	metrics.EscrowConfirmedTotal.Inc()
+	metrics.EscrowsTotal.WithLabelValues("confirmed").Inc()
 	metrics.EscrowDuration.Observe(time.Since(escrow.CreatedAt).Seconds())
 
 	if s.webhookEmitter != nil {
@@ -578,6 +611,7 @@ func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*
 	}
 
 	metrics.EscrowDisputedTotal.Inc()
+	metrics.EscrowsTotal.WithLabelValues("disputed").Inc()
 
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitEscrowDisputed(escrow.SellerAddr, escrow.ID, escrow.BuyerAddr, reason)
@@ -620,7 +654,9 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 	}
 
 	// Release funds to seller
-	if err := s.ledger.ReleaseEscrow(ctx, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ID); err != nil {
+	if err := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
+		return s.ledger.ReleaseEscrow(ctx, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ID)
+	}); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to auto-release escrow")
 		return &MoneyError{
@@ -638,24 +674,20 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 	escrow.ResolvedAt = &now
 	escrow.UpdatedAt = now
 
-	if err := s.store.Update(ctx, escrow); err != nil {
-		// Retry once — funds already moved, we must persist the state change
-		if retryErr := s.store.Update(ctx, escrow); retryErr != nil {
-			// CRITICAL: Funds were auto-released to seller but escrow record is stale.
-			// Cannot safely reverse ReleaseEscrow (no inverse operation).
-			// Log for manual resolution rather than applying wrong compensation.
-			s.logger.Error("CRITICAL: escrow auto-released but status update failed",
-				"escrow_id", escrow.ID, "seller", escrow.SellerAddr, "amount", escrow.Amount, "error", retryErr)
-			span.RecordError(retryErr)
-			span.SetStatus(codes.Error, "failed to update escrow after auto-release")
-			// BUG FIX: was wrapping `err` instead of `retryErr`
-			return &MoneyError{
-				Err:         fmt.Errorf("failed to update escrow after auto-release (requires manual resolution): %w", retryErr),
-				FundsStatus: "released_to_seller",
-				Recovery:    "Funds were successfully auto-released to the seller but the escrow record could not be updated. No action needed regarding funds.",
-				Amount:      escrow.Amount,
-				Reference:   escrow.ID,
-			}
+	if err := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
+		return s.store.Update(ctx, escrow)
+	}); err != nil {
+		// CRITICAL: Funds were auto-released to seller but escrow record is stale.
+		s.logger.Error("CRITICAL: escrow auto-released but status update failed",
+			"escrow_id", escrow.ID, "seller", escrow.SellerAddr, "amount", escrow.Amount, "error", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to update escrow after auto-release")
+		return &MoneyError{
+			Err:         fmt.Errorf("failed to update escrow after auto-release (requires manual resolution): %w", err),
+			FundsStatus: "released_to_seller",
+			Recovery:    "Funds were successfully auto-released to the seller but the escrow record could not be updated. No action needed regarding funds.",
+			Amount:      escrow.Amount,
+			Reference:   escrow.ID,
 		}
 	}
 
@@ -676,6 +708,7 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 	}
 
 	metrics.EscrowAutoReleasedTotal.Inc()
+	metrics.EscrowsTotal.WithLabelValues("auto_released").Inc()
 	metrics.EscrowDuration.Observe(time.Since(escrow.CreatedAt).Seconds())
 
 	if s.webhookEmitter != nil {
@@ -781,7 +814,9 @@ func (s *Service) ResolveArbitration(ctx context.Context, id, callerAddr string,
 	switch req.Resolution {
 	case "release":
 		// Full release to seller
-		if err := s.ledger.ReleaseEscrow(ctx, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ID); err != nil {
+		if err := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
+			return s.ledger.ReleaseEscrow(ctx, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ID)
+		}); err != nil {
 			span.RecordError(err)
 			return nil, fmt.Errorf("failed to release escrow: %w", err)
 		}
@@ -796,7 +831,9 @@ func (s *Service) ResolveArbitration(ctx context.Context, id, callerAddr string,
 
 	case "refund":
 		// Full refund to buyer
-		if err := s.ledger.RefundEscrow(ctx, escrow.BuyerAddr, escrow.Amount, escrow.ID); err != nil {
+		if err := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
+			return s.ledger.RefundEscrow(ctx, escrow.BuyerAddr, escrow.Amount, escrow.ID)
+		}); err != nil {
 			span.RecordError(err)
 			return nil, fmt.Errorf("failed to refund escrow: %w", err)
 		}
@@ -827,7 +864,9 @@ func (s *Service) ResolveArbitration(ctx context.Context, id, callerAddr string,
 		refundStr := usdc.Format(refundBig)
 
 		// Atomically settle: release to seller + refund to buyer in one transaction
-		if err := s.ledger.PartialEscrowSettle(ctx, escrow.BuyerAddr, escrow.SellerAddr, releaseStr, refundStr, escrow.ID+":partial"); err != nil {
+		if err := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
+			return s.ledger.PartialEscrowSettle(ctx, escrow.BuyerAddr, escrow.SellerAddr, releaseStr, refundStr, escrow.ID+":partial")
+		}); err != nil {
 			span.RecordError(err)
 			return nil, fmt.Errorf("failed to settle partial escrow: %w", err)
 		}
@@ -854,7 +893,9 @@ func (s *Service) ResolveArbitration(ctx context.Context, id, callerAddr string,
 		escrow.Resolution += ": " + req.Reason
 	}
 
-	if err := s.store.Update(ctx, escrow); err != nil {
+	if err := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
+		return s.store.Update(ctx, escrow)
+	}); err != nil {
 		s.logger.Error("CRITICAL: arbitration resolved but state update failed",
 			"escrow_id", escrow.ID, "resolution", req.Resolution)
 		span.RecordError(err)
@@ -906,11 +947,11 @@ func (s *Service) ForceCloseExpired(ctx context.Context) (int, error) {
 }
 
 // ListByAgent returns escrows involving an agent (as buyer or seller).
-func (s *Service) ListByAgent(ctx context.Context, agentAddr string, limit int) ([]*Escrow, error) {
+func (s *Service) ListByAgent(ctx context.Context, agentAddr string, limit int, opts ...ListOption) ([]*Escrow, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	return s.store.ListByAgent(ctx, strings.ToLower(agentAddr), limit)
+	return s.store.ListByAgent(ctx, strings.ToLower(agentAddr), limit, opts...)
 }
 
 func generateEscrowID() string {

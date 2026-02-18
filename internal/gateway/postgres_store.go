@@ -24,16 +24,16 @@ func (p *PostgresStore) CreateSession(ctx context.Context, session *Session) err
 		INSERT INTO gateway_sessions (
 			id, agent_addr, tenant_id, max_total, max_per_request, total_spent,
 			request_count, strategy, allowed_types, warn_at_percent,
-			status, expires_at, created_at, updated_at
+			max_requests_per_minute, status, expires_at, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4::NUMERIC(20,6), $5::NUMERIC(20,6), $6::NUMERIC(20,6),
 			$7, $8, $9, $10,
-			$11, $12, $13, $14
+			$11, $12, $13, $14, $15
 		)`,
 		session.ID, session.AgentAddr, nullString(session.TenantID),
 		session.MaxTotal, session.MaxPerRequest, session.TotalSpent,
 		session.RequestCount, session.Strategy, pq.Array(session.AllowedTypes), session.WarnAtPercent,
-		string(session.Status), session.ExpiresAt, session.CreatedAt, session.UpdatedAt,
+		session.MaxRequestsPerMinute, string(session.Status), session.ExpiresAt, session.CreatedAt, session.UpdatedAt,
 	)
 	return err
 }
@@ -42,7 +42,7 @@ func (p *PostgresStore) GetSession(ctx context.Context, id string) (*Session, er
 	s, err := scanSession(p.db.QueryRowContext(ctx, `
 		SELECT id, agent_addr, tenant_id, max_total, max_per_request, total_spent,
 		       request_count, strategy, allowed_types, warn_at_percent,
-		       status, expires_at, created_at, updated_at
+		       max_requests_per_minute, status, expires_at, created_at, updated_at
 		FROM gateway_sessions WHERE id = $1`, id))
 	if err == sql.ErrNoRows {
 		return nil, ErrSessionNotFound
@@ -86,14 +86,32 @@ func (p *PostgresStore) UpdateSession(ctx context.Context, session *Session) err
 	return nil
 }
 
-func (p *PostgresStore) ListSessions(ctx context.Context, agentAddr string, limit int) ([]*Session, error) {
+func (p *PostgresStore) ListSessions(ctx context.Context, agentAddr string, limit int, opts ...ListOption) ([]*Session, error) {
+	o := applyListOpts(opts)
+	if o.cursor != nil {
+		rows, err := p.db.QueryContext(ctx, `
+			SELECT id, agent_addr, tenant_id, max_total, max_per_request, total_spent,
+			       request_count, strategy, allowed_types, warn_at_percent,
+			       max_requests_per_minute, status, expires_at, created_at, updated_at
+			FROM gateway_sessions
+			WHERE agent_addr = $1
+			  AND (created_at, id) < ($3, $4)
+			ORDER BY created_at DESC, id DESC
+			LIMIT $2`, agentAddr, limit, o.cursor.CreatedAt, o.cursor.ID)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rows.Close() }()
+		return scanSessions(rows)
+	}
+
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT id, agent_addr, tenant_id, max_total, max_per_request, total_spent,
 		       request_count, strategy, allowed_types, warn_at_percent,
-		       status, expires_at, created_at, updated_at
+		       max_requests_per_minute, status, expires_at, created_at, updated_at
 		FROM gateway_sessions
 		WHERE agent_addr = $1
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC, id DESC
 		LIMIT $2`, agentAddr, limit)
 	if err != nil {
 		return nil, err
@@ -103,14 +121,32 @@ func (p *PostgresStore) ListSessions(ctx context.Context, agentAddr string, limi
 	return scanSessions(rows)
 }
 
-func (p *PostgresStore) ListSessionsByTenant(ctx context.Context, tenantID string, limit int) ([]*Session, error) {
+func (p *PostgresStore) ListSessionsByTenant(ctx context.Context, tenantID string, limit int, opts ...ListOption) ([]*Session, error) {
+	o := applyListOpts(opts)
+	if o.cursor != nil {
+		rows, err := p.db.QueryContext(ctx, `
+			SELECT id, agent_addr, tenant_id, max_total, max_per_request, total_spent,
+			       request_count, strategy, allowed_types, warn_at_percent,
+			       max_requests_per_minute, status, expires_at, created_at, updated_at
+			FROM gateway_sessions
+			WHERE tenant_id = $1
+			  AND (created_at, id) < ($3, $4)
+			ORDER BY created_at DESC, id DESC
+			LIMIT $2`, tenantID, limit, o.cursor.CreatedAt, o.cursor.ID)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rows.Close() }()
+		return scanSessions(rows)
+	}
+
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT id, agent_addr, tenant_id, max_total, max_per_request, total_spent,
 		       request_count, strategy, allowed_types, warn_at_percent,
-		       status, expires_at, created_at, updated_at
+		       max_requests_per_minute, status, expires_at, created_at, updated_at
 		FROM gateway_sessions
 		WHERE tenant_id = $1
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC, id DESC
 		LIMIT $2`, tenantID, limit)
 	if err != nil {
 		return nil, err
@@ -124,7 +160,7 @@ func (p *PostgresStore) ListByStatus(ctx context.Context, status Status, limit i
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT id, agent_addr, tenant_id, max_total, max_per_request, total_spent,
 		       request_count, strategy, allowed_types, warn_at_percent,
-		       status, expires_at, created_at, updated_at
+		       max_requests_per_minute, status, expires_at, created_at, updated_at
 		FROM gateway_sessions
 		WHERE status = $1
 		ORDER BY updated_at DESC
@@ -141,7 +177,7 @@ func (p *PostgresStore) ListExpired(ctx context.Context, before time.Time, limit
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT id, agent_addr, tenant_id, max_total, max_per_request, total_spent,
 		       request_count, strategy, allowed_types, warn_at_percent,
-		       status, expires_at, created_at, updated_at
+		       max_requests_per_minute, status, expires_at, created_at, updated_at
 		FROM gateway_sessions
 		WHERE status = 'active' AND expires_at < $1
 		ORDER BY expires_at ASC
@@ -178,14 +214,31 @@ func (p *PostgresStore) CreateLog(ctx context.Context, log *RequestLog) error {
 	return err
 }
 
-func (p *PostgresStore) ListLogs(ctx context.Context, sessionID string, limit int) ([]*RequestLog, error) {
-	rows, err := p.db.QueryContext(ctx, `
-		SELECT id, session_id, tenant_id, service_type, agent_called, amount,
+func (p *PostgresStore) ListLogs(ctx context.Context, sessionID string, limit int, opts ...ListOption) ([]*RequestLog, error) {
+	o := applyListOpts(opts)
+	var query string
+	var args []interface{}
+
+	if o.cursor != nil {
+		query = `SELECT id, session_id, tenant_id, service_type, agent_called, amount,
 		       fee_amount, status, latency_ms, error, policy_result, created_at
 		FROM gateway_request_logs
 		WHERE session_id = $1
-		ORDER BY created_at DESC
-		LIMIT $2`, sessionID, limit)
+		  AND (created_at, id) < ($3, $4)
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2`
+		args = []interface{}{sessionID, limit, o.cursor.CreatedAt, o.cursor.ID}
+	} else {
+		query = `SELECT id, session_id, tenant_id, service_type, agent_called, amount,
+		       fee_amount, status, latency_ms, error, policy_result, created_at
+		FROM gateway_request_logs
+		WHERE session_id = $1
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2`
+		args = []interface{}{sessionID, limit}
+	}
+
+	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +368,7 @@ func scanSession(sc sessionScanner) (*Session, error) {
 	err := sc.Scan(
 		&s.ID, &s.AgentAddr, &tenantID, &s.MaxTotal, &s.MaxPerRequest, &s.TotalSpent,
 		&s.RequestCount, &s.Strategy, &allowedTypes, &s.WarnAtPercent,
-		&status, &s.ExpiresAt, &s.CreatedAt, &s.UpdatedAt,
+		&s.MaxRequestsPerMinute, &status, &s.ExpiresAt, &s.CreatedAt, &s.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err

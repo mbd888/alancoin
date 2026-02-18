@@ -153,20 +153,6 @@ var (
 		Name:      "sessionkey_transactions_total",
 		Help:      "Total session key transactions processed.",
 	})
-
-	SessionKeyRiskScore = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: "alancoin",
-		Name:      "sessionkey_risk_score",
-		Help:      "Distribution of session key transaction risk scores.",
-		Buckets:   []float64{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
-	})
-
-	// RiskBlocksTotal counts transactions blocked by the risk scoring engine.
-	RiskBlocksTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "alancoin",
-		Name:      "risk_blocks_total",
-		Help:      "Total transactions blocked by risk scoring engine.",
-	})
 )
 
 func init() {
@@ -190,8 +176,6 @@ func init() {
 		EscrowAutoReleasedTotal,
 		EscrowDuration,
 		SessionKeyTransactionsTotal,
-		SessionKeyRiskScore,
-		RiskBlocksTotal,
 	)
 }
 

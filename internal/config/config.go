@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"time"
@@ -165,6 +166,32 @@ func (c *Config) Validate() error {
 
 	if c.RPCURL == "" {
 		return fmt.Errorf("RPC_URL is required")
+	}
+
+	// Port range
+	port, err := strconv.Atoi(c.Port)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("PORT must be a number between 1 and 65535, got %q", c.Port)
+	}
+
+	// Rate limit sanity
+	if c.RateLimitRPM < 1 {
+		return fmt.Errorf("RATE_LIMIT_RPM must be at least 1, got %d", c.RateLimitRPM)
+	}
+
+	// DB statement timeout sanity
+	if c.DBStatementTimeout < 1000 {
+		return fmt.Errorf("POSTGRES_STATEMENT_TIMEOUT must be at least 1000ms, got %d", c.DBStatementTimeout)
+	}
+
+	// Write timeout must exceed request timeout to avoid truncated responses
+	if c.HTTPWriteTimeout > 0 && c.RequestTimeout > 0 && c.HTTPWriteTimeout < c.RequestTimeout {
+		return fmt.Errorf("HTTP_WRITE_TIMEOUT (%v) must be >= REQUEST_TIMEOUT (%v)", c.HTTPWriteTimeout, c.RequestTimeout)
+	}
+
+	// Warnings (non-fatal)
+	if c.IsProduction() && c.AdminSecret == "" {
+		slog.Warn("ADMIN_SECRET not set — admin endpoints accept any authenticated request")
 	}
 
 	return nil

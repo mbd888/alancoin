@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,34 +55,94 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "valid config",
 			config: Config{
-				PrivateKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-				RPCURL:     "https://sepolia.base.org",
+				PrivateKey:         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				RPCURL:             "https://sepolia.base.org",
+				Port:               "8080",
+				RateLimitRPM:       100,
+				DBStatementTimeout: 30000,
+				HTTPWriteTimeout:   DefaultHTTPWriteTimeout,
+				RequestTimeout:     DefaultRequestTimeout,
 			},
 			wantErr: "",
 		},
 		{
 			name: "missing private key",
 			config: Config{
-				PrivateKey: "",
-				RPCURL:     "https://sepolia.base.org",
+				PrivateKey:         "",
+				RPCURL:             "https://sepolia.base.org",
+				Port:               "8080",
+				RateLimitRPM:       100,
+				DBStatementTimeout: 30000,
 			},
 			wantErr: "PRIVATE_KEY is required",
 		},
 		{
 			name: "invalid private key length",
 			config: Config{
-				PrivateKey: "abc123",
-				RPCURL:     "https://sepolia.base.org",
+				PrivateKey:         "abc123",
+				RPCURL:             "https://sepolia.base.org",
+				Port:               "8080",
+				RateLimitRPM:       100,
+				DBStatementTimeout: 30000,
 			},
 			wantErr: "64 hex characters",
 		},
 		{
 			name: "missing RPC URL",
 			config: Config{
-				PrivateKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-				RPCURL:     "",
+				PrivateKey:         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				RPCURL:             "",
+				Port:               "8080",
+				RateLimitRPM:       100,
+				DBStatementTimeout: 30000,
 			},
 			wantErr: "RPC_URL is required",
+		},
+		{
+			name: "invalid port",
+			config: Config{
+				PrivateKey:         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				RPCURL:             "https://sepolia.base.org",
+				Port:               "99999",
+				RateLimitRPM:       100,
+				DBStatementTimeout: 30000,
+			},
+			wantErr: "PORT must be a number between 1 and 65535",
+		},
+		{
+			name: "rate limit too low",
+			config: Config{
+				PrivateKey:         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				RPCURL:             "https://sepolia.base.org",
+				Port:               "8080",
+				RateLimitRPM:       0,
+				DBStatementTimeout: 30000,
+			},
+			wantErr: "RATE_LIMIT_RPM must be at least 1",
+		},
+		{
+			name: "statement timeout too low",
+			config: Config{
+				PrivateKey:         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				RPCURL:             "https://sepolia.base.org",
+				Port:               "8080",
+				RateLimitRPM:       100,
+				DBStatementTimeout: 500,
+			},
+			wantErr: "POSTGRES_STATEMENT_TIMEOUT must be at least 1000ms",
+		},
+		{
+			name: "write timeout less than request timeout",
+			config: Config{
+				PrivateKey:         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				RPCURL:             "https://sepolia.base.org",
+				Port:               "8080",
+				RateLimitRPM:       100,
+				DBStatementTimeout: 30000,
+				HTTPWriteTimeout:   10 * time.Second,
+				RequestTimeout:     30 * time.Second,
+			},
+			wantErr: "HTTP_WRITE_TIMEOUT",
 		},
 	}
 

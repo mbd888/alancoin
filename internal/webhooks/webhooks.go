@@ -19,6 +19,8 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/metrics"
 )
 
 // EventType represents the type of webhook event
@@ -259,6 +261,7 @@ func (d *Dispatcher) send(ctx context.Context, sub *Subscription, event *Event) 
 		_ = resp.Body.Close()
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			metrics.WebhookDeliveriesTotal.WithLabelValues("success").Inc()
 			d.updateSuccess(ctx, sub)
 			return
 		}
@@ -272,6 +275,7 @@ func (d *Dispatcher) send(ctx context.Context, sub *Subscription, event *Event) 
 	}
 
 	// All attempts exhausted
+	metrics.WebhookDeliveriesTotal.WithLabelValues("failed").Inc()
 	d.updateError(ctx, sub, lastErr)
 }
 

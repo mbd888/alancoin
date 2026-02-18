@@ -166,6 +166,23 @@ func (b *Breaker) State(key string) State {
 	return e.state
 }
 
+// Snapshot returns counts of entries in each circuit state.
+func (b *Breaker) Snapshot() (total, open, halfOpen int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for _, e := range b.entries {
+		total++
+		switch e.state {
+		case StateOpen:
+			open++
+		case StateHalfOpen:
+			halfOpen++
+		}
+	}
+	return total, open, halfOpen
+}
+
 // transition changes state and fires the callback if set.
 // Caller must hold b.mu.
 func (b *Breaker) transition(e *entry, key string, to State) {

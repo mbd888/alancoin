@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/mbd888/alancoin/internal/auth"
 	"github.com/mbd888/alancoin/internal/gateway"
+	"github.com/mbd888/alancoin/internal/pagination"
 	"github.com/mbd888/alancoin/internal/tenant"
 )
 
@@ -189,7 +190,12 @@ func (h *Handler) Sessions(c *gin.Context) {
 	limit := parseLimit(c, 50, 500)
 	statusFilter := c.Query("status")
 
-	sessions, err := h.gwStore.ListSessionsByTenant(ctx, tenantID, limit)
+	var opts []gateway.ListOption
+	if cursor := c.Query("cursor"); cursor != "" {
+		opts = append(opts, gateway.WithCursor(cursor))
+	}
+
+	sessions, err := h.gwStore.ListSessionsByTenant(ctx, tenantID, limit+1, opts...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 		return
@@ -205,10 +211,15 @@ func (h *Handler) Sessions(c *gin.Context) {
 		sessions = filtered
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"sessions": sessions,
-		"count":    len(sessions),
+	sessions, nextCursor, hasMore := pagination.ComputePage(sessions, limit, func(s *gateway.Session) (time.Time, string) {
+		return s.CreatedAt, s.ID
 	})
+
+	resp := gin.H{"sessions": sessions, "count": len(sessions), "has_more": hasMore}
+	if nextCursor != "" {
+		resp["next_cursor"] = nextCursor
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func parseTimeRange(c *gin.Context) (from, to time.Time) {

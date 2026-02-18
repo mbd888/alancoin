@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/mbd888/alancoin/internal/metrics"
 )
 
 var upgrader = websocket.Upgrader{
@@ -100,7 +101,15 @@ func (h *Hub) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			h.logger.Info("realtime hub shutting down")
+			h.logger.Info("realtime hub shutting down, closing client connections")
+			h.mu.Lock()
+			for client := range h.clients {
+				close(client.send) // writePump sends CloseMessage on closed channel
+				delete(h.clients, client)
+			}
+			h.mu.Unlock()
+			metrics.ActiveWebSocketClients.Set(0)
+			h.logger.Info("realtime hub stopped")
 			return
 
 		case client := <-h.register:
@@ -112,6 +121,7 @@ func (h *Hub) Run(ctx context.Context) {
 			}
 			n := len(h.clients)
 			h.mu.Unlock()
+			metrics.ActiveWebSocketClients.Set(float64(n))
 			h.logger.Info("client connected", "total", n)
 
 		case client := <-h.unregister:
@@ -122,6 +132,7 @@ func (h *Hub) Run(ctx context.Context) {
 			}
 			n := len(h.clients)
 			h.mu.Unlock()
+			metrics.ActiveWebSocketClients.Set(float64(n))
 			h.logger.Info("client disconnected", "total", n)
 
 		case event := <-h.broadcast:

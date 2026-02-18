@@ -59,7 +59,7 @@ func (m *MemoryStore) UpdateSession(_ context.Context, session *Session) error {
 	return nil
 }
 
-func (m *MemoryStore) ListSessions(_ context.Context, agentAddr string, limit int) ([]*Session, error) {
+func (m *MemoryStore) ListSessions(_ context.Context, agentAddr string, limit int, _ ...ListOption) ([]*Session, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -82,7 +82,7 @@ func (m *MemoryStore) ListSessions(_ context.Context, agentAddr string, limit in
 	return result, nil
 }
 
-func (m *MemoryStore) ListSessionsByTenant(_ context.Context, tenantID string, limit int) ([]*Session, error) {
+func (m *MemoryStore) ListSessionsByTenant(_ context.Context, tenantID string, limit int, _ ...ListOption) ([]*Session, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -154,7 +154,7 @@ func (m *MemoryStore) CreateLog(_ context.Context, log *RequestLog) error {
 	return nil
 }
 
-func (m *MemoryStore) ListLogs(_ context.Context, sessionID string, limit int) ([]*RequestLog, error) {
+func (m *MemoryStore) ListLogs(_ context.Context, sessionID string, limit int, _ ...ListOption) ([]*RequestLog, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

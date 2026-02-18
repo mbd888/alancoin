@@ -14,7 +14,10 @@ import (
 	"github.com/mbd888/alancoin/internal/idgen"
 	"github.com/mbd888/alancoin/internal/retry"
 	"github.com/mbd888/alancoin/internal/syncutil"
+	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 var validServiceType = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,100}$`)
@@ -285,7 +288,20 @@ func (s *Service) removePendingSpend(sessionID string, amount *big.Int) {
 
 // CreateSession creates a gateway session and holds the buyer's budget.
 // tenantID is optional; pass "" for non-tenant sessions.
-func (s *Service) CreateSession(ctx context.Context, agentAddr, tenantID string, req CreateSessionRequest) (*Session, error) {
+func (s *Service) CreateSession(ctx context.Context, agentAddr, tenantID string, req CreateSessionRequest) (_ *Session, retErr error) {
+	ctx, span := traces.StartSpan(ctx, "gateway.CreateSession",
+		attribute.String("agent", agentAddr),
+		attribute.String("tenant", tenantID),
+		attribute.String("max_total", req.MaxTotal),
+	)
+	defer func() {
+		if retErr != nil {
+			span.RecordError(retErr)
+			span.SetStatus(codes.Error, retErr.Error())
+		}
+		span.End()
+	}()
+
 	maxTotalBig, ok := usdc.Parse(req.MaxTotal)
 	if !ok || maxTotalBig.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: maxTotal", ErrInvalidAmount)
@@ -430,7 +446,19 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr, tenantID string,
 //
 // The pendingSpend reservation in 2a prevents concurrent requests from
 // over-allocating budget. Each request's reservation is visible to others.
-func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest) (*ProxyResult, error) {
+func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest) (_ *ProxyResult, retErr error) {
+	ctx, span := traces.StartSpan(ctx, "gateway.Proxy",
+		attribute.String("session_id", sessionID),
+		attribute.String("service_type", req.ServiceType),
+	)
+	defer func() {
+		if retErr != nil {
+			span.RecordError(retErr)
+			span.SetStatus(codes.Error, retErr.Error())
+		}
+		span.End()
+	}()
+
 	if !validServiceType.MatchString(req.ServiceType) {
 		return nil, fmt.Errorf("%w: invalid service type %q (must match [a-zA-Z0-9_-]{1,100})", ErrNoServiceAvailable, req.ServiceType)
 	}
@@ -927,7 +955,19 @@ func (s *Service) DryRun(ctx context.Context, sessionID string, req ProxyRequest
 }
 
 // CloseSession settles a session, releasing unspent funds.
-func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string) (*Session, error) {
+func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string) (_ *Session, retErr error) {
+	ctx, span := traces.StartSpan(ctx, "gateway.CloseSession",
+		attribute.String("session_id", sessionID),
+		attribute.String("caller", callerAddr),
+	)
+	defer func() {
+		if retErr != nil {
+			span.RecordError(retErr)
+			span.SetStatus(codes.Error, retErr.Error())
+		}
+		span.End()
+	}()
+
 	unlock := s.locks.Lock(sessionID)
 	defer unlock()
 
@@ -1068,11 +1108,11 @@ func (s *Service) GetSession(ctx context.Context, id string) (*Session, error) {
 }
 
 // ListSessions returns sessions for an agent.
-func (s *Service) ListSessions(ctx context.Context, agentAddr string, limit int) ([]*Session, error) {
+func (s *Service) ListSessions(ctx context.Context, agentAddr string, limit int, opts ...ListOption) ([]*Session, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	return s.store.ListSessions(ctx, strings.ToLower(agentAddr), limit)
+	return s.store.ListSessions(ctx, strings.ToLower(agentAddr), limit, opts...)
 }
 
 // ListByStatus returns sessions in a given status.
@@ -1084,11 +1124,11 @@ func (s *Service) ListByStatus(ctx context.Context, status Status, limit int) ([
 }
 
 // ListLogs returns request logs for a session.
-func (s *Service) ListLogs(ctx context.Context, sessionID string, limit int) ([]*RequestLog, error) {
+func (s *Service) ListLogs(ctx context.Context, sessionID string, limit int, opts ...ListOption) ([]*RequestLog, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	return s.store.ListLogs(ctx, sessionID, limit)
+	return s.store.ListLogs(ctx, sessionID, limit, opts...)
 }
 
 // computeFee calculates the platform fee for a given price and tenant.

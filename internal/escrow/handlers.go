@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/mbd888/alancoin/internal/pagination"
 	"github.com/mbd888/alancoin/internal/validation"
 )
 
@@ -171,7 +173,12 @@ func (h *Handler) ListEscrows(c *gin.Context) {
 		}
 	}
 
-	escrows, err := h.service.ListByAgent(c.Request.Context(), address, limit)
+	var opts []ListOption
+	if cursor := c.Query("cursor"); cursor != "" {
+		opts = append(opts, WithCursor(cursor))
+	}
+
+	escrows, err := h.service.ListByAgent(c.Request.Context(), address, limit+1, opts...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
@@ -180,10 +187,15 @@ func (h *Handler) ListEscrows(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"escrows": escrows,
-		"count":   len(escrows),
+	escrows, nextCursor, hasMore := pagination.ComputePage(escrows, limit, func(e *Escrow) (time.Time, string) {
+		return e.CreatedAt, e.ID
 	})
+
+	resp := gin.H{"escrows": escrows, "count": len(escrows), "has_more": hasMore}
+	if nextCursor != "" {
+		resp["next_cursor"] = nextCursor
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // MarkDelivered handles POST /v1/escrow/:id/deliver

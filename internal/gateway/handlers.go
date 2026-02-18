@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/mbd888/alancoin/internal/auth"
+	"github.com/mbd888/alancoin/internal/pagination"
 	"github.com/mbd888/alancoin/internal/validation"
 )
 
@@ -208,13 +210,27 @@ func (h *Handler) ListSessions(c *gin.Context) {
 		}
 	}
 
-	sessions, err := h.service.ListSessions(c.Request.Context(), agentAddr, limit)
+	var opts []ListOption
+	if cursor := c.Query("cursor"); cursor != "" {
+		opts = append(opts, WithCursor(cursor))
+	}
+
+	// Request limit+1 to detect if there are more results.
+	sessions, err := h.service.ListSessions(c.Request.Context(), agentAddr, limit+1, opts...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"sessions": sessions, "count": len(sessions)})
+	sessions, nextCursor, hasMore := pagination.ComputePage(sessions, limit, func(s *Session) (time.Time, string) {
+		return s.CreatedAt, s.ID
+	})
+
+	resp := gin.H{"sessions": sessions, "count": len(sessions), "has_more": hasMore}
+	if nextCursor != "" {
+		resp["next_cursor"] = nextCursor
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // CloseSession handles DELETE /v1/gateway/sessions/:id
@@ -438,11 +454,24 @@ func (h *Handler) ListLogs(c *gin.Context) {
 		return
 	}
 
-	logs, err := h.service.ListLogs(c.Request.Context(), sessionID, limit)
+	var opts []ListOption
+	if cursor := c.Query("cursor"); cursor != "" {
+		opts = append(opts, WithCursor(cursor))
+	}
+
+	logs, err := h.service.ListLogs(c.Request.Context(), sessionID, limit+1, opts...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"logs": logs, "count": len(logs)})
+	logs, nextCursor, hasMore := pagination.ComputePage(logs, limit, func(l *RequestLog) (time.Time, string) {
+		return l.CreatedAt, l.ID
+	})
+
+	resp := gin.H{"logs": logs, "count": len(logs), "has_more": hasMore}
+	if nextCursor != "" {
+		resp["next_cursor"] = nextCursor
+	}
+	c.JSON(http.StatusOK, resp)
 }

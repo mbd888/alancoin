@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/mbd888/alancoin/internal/logging"
+	"github.com/mbd888/alancoin/internal/metrics"
 	"github.com/mbd888/alancoin/internal/security"
 	"github.com/mbd888/alancoin/internal/validation"
 )
@@ -193,6 +194,8 @@ func (h *Handler) RecordTransaction(c *gin.Context) {
 		})
 		return
 	}
+
+	metrics.TransactionsTotal.WithLabelValues(tx.Status).Inc()
 
 	logger.Info("transaction recorded",
 		"tx_hash", tx.TxHash,

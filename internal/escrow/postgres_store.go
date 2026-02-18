@@ -94,12 +94,28 @@ func (p *PostgresStore) Update(ctx context.Context, e *Escrow) error {
 	return nil
 }
 
-func (p *PostgresStore) ListByAgent(ctx context.Context, agentAddr string, limit int) ([]*Escrow, error) {
+func (p *PostgresStore) ListByAgent(ctx context.Context, agentAddr string, limit int, opts ...ListOption) ([]*Escrow, error) {
+	o := applyListOpts(opts)
+	if o.cursor != nil {
+		rows, err := p.db.QueryContext(ctx, `
+			SELECT `+escrowColumns+`
+			FROM escrows
+			WHERE (buyer_addr = $1 OR seller_addr = $1)
+			  AND (created_at, id) < ($3, $4)
+			ORDER BY created_at DESC, id DESC
+			LIMIT $2`, agentAddr, limit, o.cursor.CreatedAt, o.cursor.ID)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rows.Close() }()
+		return scanEscrows(rows)
+	}
+
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT `+escrowColumns+`
 		FROM escrows
 		WHERE buyer_addr = $1 OR seller_addr = $1
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC, id DESC
 		LIMIT $2`, agentAddr, limit)
 	if err != nil {
 		return nil, err
