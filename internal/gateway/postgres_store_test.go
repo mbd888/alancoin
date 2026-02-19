@@ -31,7 +31,7 @@ func setupTestDB(t *testing.T) (*PostgresStore, *sql.DB, func()) {
 
 	ctx := context.Background()
 
-	// Create tables (mirrors migrations 030 + 032)
+	// Create tables (mirrors migrations 030 + 032 + 036)
 	_, err = db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS gateway_sessions (
 			id              TEXT PRIMARY KEY,
@@ -44,6 +44,7 @@ func setupTestDB(t *testing.T) (*PostgresStore, *sql.DB, func()) {
 			strategy        TEXT NOT NULL DEFAULT 'cheapest',
 			allowed_types   TEXT[],
 			warn_at_percent INT NOT NULL DEFAULT 0,
+			max_requests_per_minute INT NOT NULL DEFAULT 100,
 			status          TEXT NOT NULL DEFAULT 'active',
 			expires_at      TIMESTAMPTZ NOT NULL,
 			created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
