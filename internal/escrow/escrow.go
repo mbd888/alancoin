@@ -29,11 +29,11 @@ import (
 )
 
 var (
-	ErrEscrowNotFound  = errors.New("escrow not found")
-	ErrInvalidStatus   = errors.New("invalid escrow status for this operation")
-	ErrUnauthorized    = errors.New("not authorized for this escrow operation")
-	ErrInvalidAmount   = errors.New("invalid amount")
-	ErrAlreadyResolved = errors.New("escrow already resolved")
+	ErrEscrowNotFound  = errors.New("escrow: not found")
+	ErrInvalidStatus   = errors.New("escrow: invalid status for this operation")
+	ErrUnauthorized    = errors.New("escrow: not authorized")
+	ErrInvalidAmount   = errors.New("escrow: invalid amount")
+	ErrAlreadyResolved = errors.New("escrow: already resolved")
 )
 
 // Status represents the state of an escrow.
@@ -70,6 +70,9 @@ const DefaultDisputeWindow = 24 * time.Hour
 
 // DefaultArbitrationDeadline is the time given for arbitration after assignment.
 const DefaultArbitrationDeadline = 72 * time.Hour
+
+// MaxReasonLength is the maximum length for dispute reasons and evidence content.
+const MaxReasonLength = 10000
 
 // EvidenceEntry represents a piece of evidence submitted during a dispute.
 type EvidenceEntry struct {
@@ -404,12 +407,18 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Escrow, error
 
 // MarkDelivered marks the escrow as delivered by the seller.
 func (s *Service) MarkDelivered(ctx context.Context, id, callerAddr string) (*Escrow, error) {
+	ctx, span := traces.StartSpan(ctx, "escrow.MarkDelivered",
+		traces.EscrowID(id),
+	)
+	defer span.End()
+
 	mu := s.escrowLock(id)
 	mu.Lock()
 	defer mu.Unlock()
 
 	escrow, err := s.store.Get(ctx, id)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 
@@ -432,8 +441,10 @@ func (s *Service) MarkDelivered(ctx context.Context, id, callerAddr string) (*Es
 	escrow.DisputeWindowUntil = &disputeWindow
 	escrow.UpdatedAt = now
 
-	if err := s.store.Update(ctx, escrow); err != nil {
-		return nil, err
+	if err := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
+		return s.store.Update(ctx, escrow)
+	}); err != nil {
+		return nil, fmt.Errorf("failed to update escrow status to delivered: %w", err)
 	}
 
 	if s.webhookEmitter != nil {
@@ -555,6 +566,10 @@ func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*
 	)
 	defer span.End()
 
+	if len(reason) == 0 || len(reason) > MaxReasonLength {
+		return nil, fmt.Errorf("reason must be between 1 and %d characters", MaxReasonLength)
+	}
+
 	mu := s.escrowLock(id)
 	mu.Lock()
 	defer mu.Unlock()
@@ -594,10 +609,12 @@ func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*
 	}}
 	escrow.UpdatedAt = now
 
-	if err := s.store.Update(ctx, escrow); err != nil {
+	if err := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
+		return s.store.Update(ctx, escrow)
+	}); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to update escrow")
-		return nil, fmt.Errorf("failed to update escrow: %w", err)
+		return nil, fmt.Errorf("failed to update escrow to disputed: %w", err)
 	}
 
 	// Record failed transaction for reputation
@@ -612,6 +629,7 @@ func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*
 
 	metrics.EscrowDisputedTotal.Inc()
 	metrics.EscrowsTotal.WithLabelValues("disputed").Inc()
+	metrics.EscrowDuration.Observe(time.Since(escrow.CreatedAt).Seconds())
 
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitEscrowDisputed(escrow.SellerAddr, escrow.ID, escrow.BuyerAddr, reason)
@@ -722,6 +740,15 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 // SubmitEvidence adds evidence to a disputed/arbitrating escrow.
 // Both buyer and seller can submit evidence.
 func (s *Service) SubmitEvidence(ctx context.Context, id, callerAddr, content string) (*Escrow, error) {
+	ctx, span := traces.StartSpan(ctx, "escrow.SubmitEvidence",
+		traces.EscrowID(id),
+	)
+	defer span.End()
+
+	if len(content) == 0 || len(content) > MaxReasonLength {
+		return nil, fmt.Errorf("evidence content must be between 1 and %d characters", MaxReasonLength)
+	}
+
 	mu := s.escrowLock(id)
 	mu.Lock()
 	defer mu.Unlock()
@@ -754,14 +781,26 @@ func (s *Service) SubmitEvidence(ctx context.Context, id, callerAddr, content st
 }
 
 // AssignArbitrator assigns an arbitrator to a disputed escrow.
-func (s *Service) AssignArbitrator(ctx context.Context, id, arbitratorAddr string) (*Escrow, error) {
+// Only the buyer or seller may assign an arbitrator.
+func (s *Service) AssignArbitrator(ctx context.Context, id, callerAddr, arbitratorAddr string) (*Escrow, error) {
+	ctx, span := traces.StartSpan(ctx, "escrow.AssignArbitrator",
+		traces.EscrowID(id),
+	)
+	defer span.End()
+
 	mu := s.escrowLock(id)
 	mu.Lock()
 	defer mu.Unlock()
 
 	escrow, err := s.store.Get(ctx, id)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
+	}
+
+	caller := strings.ToLower(callerAddr)
+	if caller != escrow.BuyerAddr && caller != escrow.SellerAddr {
+		return nil, ErrUnauthorized
 	}
 
 	if escrow.Status != StatusDisputed {

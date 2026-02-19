@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/mbd888/alancoin/internal/idgen"
+	"github.com/mbd888/alancoin/internal/pagination"
 	"github.com/mbd888/alancoin/internal/usdc"
 	"github.com/mbd888/alancoin/internal/validation"
 )
@@ -97,8 +98,27 @@ func (h *Handler) GetBalance(c *gin.Context) {
 func (h *Handler) GetHistory(c *gin.Context) {
 	address := c.Param("address")
 	limit := 50
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
 
-	entries, err := h.ledger.GetHistory(c.Request.Context(), address, limit)
+	cursor, err := pagination.Decode(c.Query("cursor"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_cursor",
+			"message": "Invalid pagination cursor",
+		})
+		return
+	}
+
+	var entries []*Entry
+	if cursor != nil {
+		entries, err = h.ledger.GetHistoryPage(c.Request.Context(), address, limit+1, cursor.CreatedAt, cursor.ID)
+	} else {
+		entries, err = h.ledger.GetHistoryPage(c.Request.Context(), address, limit+1, time.Time{}, "")
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "ledger_error",
@@ -107,9 +127,16 @@ func (h *Handler) GetHistory(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"entries": entries,
+	entries, nextCursor, hasMore := pagination.ComputePage(entries, limit, func(e *Entry) (time.Time, string) {
+		return e.CreatedAt, e.ID
 	})
+
+	resp := gin.H{"entries": entries}
+	if hasMore {
+		resp["nextCursor"] = nextCursor
+		resp["hasMore"] = true
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // DepositRequest for manual deposit recording (admin use)

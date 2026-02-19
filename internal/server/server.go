@@ -426,6 +426,19 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		})
 	}
 
+	// DB pool exhaustion check: degrade when >90% of connections are in use.
+	if s.db != nil {
+		db := s.db
+		maxOpen := cfg.DBMaxOpenConns
+		s.healthRegistry.Register("db_pool", func(_ context.Context) health.Status {
+			stats := db.Stats()
+			detail := fmt.Sprintf("in_use=%d idle=%d open=%d max=%d wait_count=%d",
+				stats.InUse, stats.Idle, stats.OpenConnections, maxOpen, stats.WaitCount)
+			healthy := maxOpen == 0 || float64(stats.InUse) < 0.9*float64(maxOpen)
+			return health.Status{Name: "db_pool", Healthy: healthy, Detail: detail}
+		})
+	}
+
 	s.logger.Info("API authentication enabled")
 
 	// Create realtime hub for WebSocket streaming
@@ -664,8 +677,9 @@ func (s *Server) setupRoutes() {
 
 	// PROTECTED ROUTES (require API key)
 	// These modify agent data and require ownership
+	tenantRL := s.tenantRateLimitMiddleware()
 	protected := v1.Group("")
-	protected.Use(auth.Middleware(s.authMgr))
+	protected.Use(auth.Middleware(s.authMgr), tenantRL)
 	{
 		// Transaction recording requires hard auth to prevent reputation manipulation.
 		// Soft middleware (Middleware) populates context; RequireAuth rejects unauthenticated callers.
@@ -711,7 +725,7 @@ func (s *Server) setupRoutes() {
 	}
 
 	protectedSessions := v1.Group("")
-	protectedSessions.Use(auth.Middleware(s.authMgr))
+	protectedSessions.Use(auth.Middleware(s.authMgr), tenantRL)
 	{
 		// Session key list/get require ownership — they expose spending limits and usage data
 		protectedSessions.GET("/agents/:address/sessions", auth.RequireOwnership(s.authMgr, "address"), sessionHandler.ListSessionKeys)
@@ -723,7 +737,7 @@ func (s *Server) setupRoutes() {
 
 	// Policy engine routes (CRUD + attach/detach, ownership required)
 	protectedPolicies := v1.Group("")
-	protectedPolicies.Use(auth.Middleware(s.authMgr))
+	protectedPolicies.Use(auth.Middleware(s.authMgr), tenantRL)
 	protectedPolicies.Use(auth.RequireOwnership(s.authMgr, "address"))
 	sessionHandler.RegisterPolicyRoutes(protectedPolicies)
 	// Using a session key to transact doesn't require API key (the session key IS the auth)
@@ -735,7 +749,7 @@ func (s *Server) setupRoutes() {
 	// Delegation read endpoints — require API key auth because they expose budget/spending data.
 	// Moved from public v1 group to prevent unauthenticated enumeration of financial PII.
 	protectedDelegation := v1.Group("")
-	protectedDelegation.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+	protectedDelegation.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
 	protectedDelegation.GET("/sessions/:keyId/tree", sessionHandler.GetDelegationTree)
 	protectedDelegation.GET("/sessions/:keyId/delegation-log", sessionHandler.GetDelegationLog)
 
@@ -748,13 +762,13 @@ func (s *Server) setupRoutes() {
 
 		// Protected routes - session CRUD requires API key auth
 		protectedGateway := v1.Group("")
-		protectedGateway.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		protectedGateway.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
 		gatewayHandler.RegisterProtectedRoutes(protectedGateway)
 
 		// Proxy route - requires both API key auth AND gateway token.
 		// API key verifies caller identity, gateway token authorizes session access.
 		protectedProxy := v1.Group("")
-		protectedProxy.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		protectedProxy.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
 		gatewayHandler.RegisterProxyRoute(protectedProxy)
 	}
 
@@ -769,12 +783,12 @@ func (s *Server) setupRoutes() {
 
 		// Admin routes: create tenant (requires admin secret)
 		adminTenants := v1.Group("")
-		adminTenants.Use(auth.Middleware(s.authMgr), auth.RequireAdmin())
+		adminTenants.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAdmin())
 		tenantHandler.RegisterAdminRoutes(adminTenants)
 
 		// Protected routes: tenant CRUD, agent binding, key management (requires API key)
 		protectedTenants := v1.Group("")
-		protectedTenants.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		protectedTenants.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
 		tenantHandler.RegisterProtectedRoutes(protectedTenants)
 
 		// Policy routes: spend policy CRUD under tenant-protected group
@@ -798,7 +812,7 @@ func (s *Server) setupRoutes() {
 
 		// Protected ledger routes
 		protectedLedger := v1.Group("")
-		protectedLedger.Use(auth.Middleware(s.authMgr))
+		protectedLedger.Use(auth.Middleware(s.authMgr), tenantRL)
 		{
 			protectedLedger.POST("/agents/:address/withdraw", auth.RequireOwnership(s.authMgr, "address"), ledgerHandler.RequestWithdrawal)
 		}
@@ -809,7 +823,7 @@ func (s *Server) setupRoutes() {
 
 		// Admin routes for reconciliation, audit, reversals, batch ops
 		adminLedger := v1.Group("")
-		adminLedger.Use(auth.Middleware(s.authMgr), auth.RequireAdmin())
+		adminLedger.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAdmin())
 		ledgerHandler.RegisterAdminRoutes(adminLedger)
 
 	}
@@ -832,8 +846,20 @@ func (s *Server) setupRoutes() {
 		if s.reconcileRunner != nil {
 			adminHandler.WithReconciler(&adminReconcileAdapter{runner: s.reconcileRunner})
 		}
+
+		// State inspection providers
+		if s.db != nil {
+			adminHandler.WithStateProvider("db", &adminDBStateProvider{db: s.db})
+		}
+		if s.realtimeHub != nil {
+			adminHandler.WithStateProvider("websocket", &adminWSStateProvider{hub: s.realtimeHub})
+		}
+		if s.reconcileRunner != nil {
+			adminHandler.WithStateProvider("reconciliation", &adminReconcileStateProvider{runner: s.reconcileRunner})
+		}
+
 		adminOps := v1.Group("")
-		adminOps.Use(auth.Middleware(s.authMgr), auth.RequireAdmin())
+		adminOps.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAdmin())
 		adminHandler.RegisterRoutes(adminOps)
 	}
 
@@ -873,7 +899,7 @@ func (s *Server) setupRoutes() {
 
 		// Protected webhook management routes
 		protectedWebhooks := v1.Group("")
-		protectedWebhooks.Use(auth.Middleware(s.authMgr))
+		protectedWebhooks.Use(auth.Middleware(s.authMgr), tenantRL)
 		{
 			protectedWebhooks.POST("/agents/:address/webhooks", auth.RequireOwnership(s.authMgr, "address"), webhookHandler.CreateWebhook)
 			protectedWebhooks.GET("/agents/:address/webhooks", auth.RequireOwnership(s.authMgr, "address"), webhookHandler.ListWebhooks)
@@ -893,7 +919,7 @@ func (s *Server) setupRoutes() {
 
 		// Protected routes - only authenticated agents can create/confirm/dispute
 		protectedEscrow := v1.Group("")
-		protectedEscrow.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		protectedEscrow.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
 		escrowHandler.RegisterProtectedRoutes(protectedEscrow)
 	}
 
@@ -904,7 +930,7 @@ func (s *Server) setupRoutes() {
 		msHandler.RegisterRoutes(v1)
 
 		protectedMS := v1.Group("")
-		protectedMS.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		protectedMS.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
 		msHandler.RegisterProtectedRoutes(protectedMS)
 	}
 
@@ -920,7 +946,7 @@ func (s *Server) setupRoutes() {
 
 		// Protected routes - only authenticated agents can open/tick/close
 		protectedStreams := v1.Group("")
-		protectedStreams.Use(auth.Middleware(s.authMgr), auth.RequireAuth(s.authMgr))
+		protectedStreams.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
 		streamHandler.RegisterProtectedRoutes(protectedStreams)
 	}
 
@@ -1453,6 +1479,22 @@ func appendDSNParams(dsn string, connectTimeout, statementTimeout int) string {
 	}
 	// Key-value format
 	return fmt.Sprintf("%s connect_timeout=%d statement_timeout=%d", dsn, connectTimeout, statementTimeout)
+}
+
+// tenantRateLimitMiddleware returns a middleware that enforces per-tenant RPM
+// limits. Must run AFTER auth.Middleware so the tenant context key is set.
+func (s *Server) tenantRateLimitMiddleware() gin.HandlerFunc {
+	if s.tenantStore == nil || s.rateLimiter == nil {
+		return func(c *gin.Context) { c.Next() }
+	}
+	store := s.tenantStore
+	return s.rateLimiter.TenantMiddleware(auth.ContextKeyTenantID, func(tenantID string) int {
+		t, err := store.Get(context.Background(), tenantID)
+		if err != nil {
+			return 0
+		}
+		return t.Settings.RateLimitRPM
+	})
 }
 
 func (s *Server) timeoutMiddleware() gin.HandlerFunc {
@@ -1988,4 +2030,52 @@ func (a *adminReconcileAdapter) RunAll(ctx context.Context) (*admin.Reconciliati
 		Duration:         report.Duration,
 		Timestamp:        report.Timestamp,
 	}, nil
+}
+
+// --- Admin state inspection providers ---
+
+type adminDBStateProvider struct {
+	db *sql.DB
+}
+
+func (p *adminDBStateProvider) AdminState(_ context.Context) map[string]interface{} {
+	stats := p.db.Stats()
+	return map[string]interface{}{
+		"open_connections":    stats.OpenConnections,
+		"in_use":              stats.InUse,
+		"idle":                stats.Idle,
+		"max_open":            stats.MaxOpenConnections,
+		"wait_count":          stats.WaitCount,
+		"wait_duration_ms":    stats.WaitDuration.Milliseconds(),
+		"max_idle_closed":     stats.MaxIdleClosed,
+		"max_lifetime_closed": stats.MaxLifetimeClosed,
+	}
+}
+
+type adminWSStateProvider struct {
+	hub *realtime.Hub
+}
+
+func (p *adminWSStateProvider) AdminState(_ context.Context) map[string]interface{} {
+	return p.hub.Stats()
+}
+
+type adminReconcileStateProvider struct {
+	runner *reconciliation.Runner
+}
+
+func (p *adminReconcileStateProvider) AdminState(_ context.Context) map[string]interface{} {
+	report := p.runner.LastReport()
+	if report == nil {
+		return map[string]interface{}{"last_run": nil}
+	}
+	return map[string]interface{}{
+		"healthy":           report.Healthy,
+		"ledger_mismatches": report.LedgerMismatches,
+		"stuck_escrows":     report.StuckEscrows,
+		"stale_streams":     report.StaleStreams,
+		"orphaned_holds":    report.OrphanedHolds,
+		"last_run":          report.Timestamp,
+		"duration_ms":       report.Duration.Milliseconds(),
+	}
 }

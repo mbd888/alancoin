@@ -1274,7 +1274,7 @@ func TestHandler_AssignArbitrator(t *testing.T) {
 	body, _ := json.Marshal(ArbitrateRequest{ArbitratorAddr: "0xcccc000000000000000000000000000000000009"})
 	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/arbitrate", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Agent-Address", "0xcccc000000000000000000000000000000000009")
+	req.Header.Set("X-Agent-Address", "0xaaaa000000000000000000000000000000000001") // buyer
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -1326,7 +1326,7 @@ func TestHandler_AssignArbitratorWrongStatus(t *testing.T) {
 	body, _ := json.Marshal(ArbitrateRequest{ArbitratorAddr: "0xcccc000000000000000000000000000000000009"})
 	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/arbitrate", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Agent-Address", "0xcccc000000000000000000000000000000000009")
+	req.Header.Set("X-Agent-Address", "0xaaaa000000000000000000000000000000000001") // buyer — auth passes, status check fails
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -1341,7 +1341,7 @@ func TestHandler_AssignArbitratorBadBody(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/arbitrate", bytes.NewReader([]byte("{}")))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Agent-Address", "0xcccc000000000000000000000000000000000009")
+	req.Header.Set("X-Agent-Address", "0xaaaa000000000000000000000000000000000001") // buyer
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -1353,7 +1353,7 @@ func TestHandler_AssignArbitratorBadBody(t *testing.T) {
 func TestHandler_ResolveArbitration_Release(t *testing.T) {
 	router, svc := setupTestRouter()
 	esc := createDisputedEscrow(t, svc)
-	svc.AssignArbitrator(context.TODO(), esc.ID, "0xcccc000000000000000000000000000000000009")
+	svc.AssignArbitrator(context.TODO(), esc.ID, "0xaaaa000000000000000000000000000000000001", "0xcccc000000000000000000000000000000000009")
 
 	body, _ := json.Marshal(ResolveRequest{Resolution: "release", Reason: "seller was right"})
 	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/resolve", bytes.NewReader(body))
@@ -1382,7 +1382,7 @@ func TestHandler_ResolveArbitration_Release(t *testing.T) {
 func TestHandler_ResolveArbitration_Refund(t *testing.T) {
 	router, svc := setupTestRouter()
 	esc := createDisputedEscrow(t, svc)
-	svc.AssignArbitrator(context.TODO(), esc.ID, "0xcccc000000000000000000000000000000000009")
+	svc.AssignArbitrator(context.TODO(), esc.ID, "0xaaaa000000000000000000000000000000000001", "0xcccc000000000000000000000000000000000009")
 
 	body, _ := json.Marshal(ResolveRequest{Resolution: "refund", Reason: "seller failed"})
 	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/resolve", bytes.NewReader(body))
@@ -1410,7 +1410,7 @@ func TestHandler_ResolveArbitration_Refund(t *testing.T) {
 func TestHandler_ResolveArbitration_Partial(t *testing.T) {
 	router, svc := setupTestRouter()
 	esc := createDisputedEscrow(t, svc)
-	svc.AssignArbitrator(context.TODO(), esc.ID, "0xcccc000000000000000000000000000000000009")
+	svc.AssignArbitrator(context.TODO(), esc.ID, "0xaaaa000000000000000000000000000000000001", "0xcccc000000000000000000000000000000000009")
 
 	body, _ := json.Marshal(ResolveRequest{
 		Resolution:    "partial",
@@ -1465,7 +1465,7 @@ func TestHandler_ResolveArbitrationNotFound(t *testing.T) {
 func TestHandler_ResolveArbitrationUnauthorized(t *testing.T) {
 	router, svc := setupTestRouter()
 	esc := createDisputedEscrow(t, svc)
-	svc.AssignArbitrator(context.TODO(), esc.ID, "0xcccc000000000000000000000000000000000009")
+	svc.AssignArbitrator(context.TODO(), esc.ID, "0xaaaa000000000000000000000000000000000001", "0xcccc000000000000000000000000000000000009")
 
 	body, _ := json.Marshal(ResolveRequest{Resolution: "release"})
 	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/resolve", bytes.NewReader(body))
@@ -1482,7 +1482,7 @@ func TestHandler_ResolveArbitrationUnauthorized(t *testing.T) {
 func TestHandler_ResolveArbitrationBadBody(t *testing.T) {
 	router, svc := setupTestRouter()
 	esc := createDisputedEscrow(t, svc)
-	svc.AssignArbitrator(context.TODO(), esc.ID, "0xcccc000000000000000000000000000000000009")
+	svc.AssignArbitrator(context.TODO(), esc.ID, "0xaaaa000000000000000000000000000000000001", "0xcccc000000000000000000000000000000000009")
 
 	req := httptest.NewRequest("POST", "/v1/escrow/"+esc.ID+"/resolve", bytes.NewReader([]byte("{}")))
 	req.Header.Set("Content-Type", "application/json")
@@ -1498,7 +1498,7 @@ func TestHandler_ResolveArbitrationBadBody(t *testing.T) {
 func TestHandler_ResolveArbitrationInvalidPartialAmount(t *testing.T) {
 	router, svc := setupTestRouter()
 	esc := createDisputedEscrow(t, svc)
-	svc.AssignArbitrator(context.TODO(), esc.ID, "0xcccc000000000000000000000000000000000009")
+	svc.AssignArbitrator(context.TODO(), esc.ID, "0xaaaa000000000000000000000000000000000001", "0xcccc000000000000000000000000000000000009")
 
 	body, _ := json.Marshal(ResolveRequest{
 		Resolution:    "partial",

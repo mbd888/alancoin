@@ -342,6 +342,26 @@ func (m *MemoryStore) GetHistory(ctx context.Context, agentAddr string, limit in
 	return result, nil
 }
 
+func (m *MemoryStore) GetHistoryPage(ctx context.Context, agentAddr string, limit int, beforeTime time.Time, beforeID string) ([]*Entry, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []*Entry
+	for i := len(m.entries) - 1; i >= 0 && len(result) < limit; i-- {
+		e := m.entries[i]
+		if e.AgentAddr != agentAddr {
+			continue
+		}
+		if beforeID != "" {
+			if e.CreatedAt.After(beforeTime) || (e.CreatedAt.Equal(beforeTime) && e.ID >= beforeID) {
+				continue
+			}
+		}
+		result = append(result, e)
+	}
+	return result, nil
+}
+
 func (m *MemoryStore) HasDeposit(ctx context.Context, txHash string) (bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

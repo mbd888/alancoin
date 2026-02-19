@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -122,29 +123,21 @@ func TestMultiStep_PartialConfirmThenRefund(t *testing.T) {
 	}
 }
 
-func TestMultiStep_ConfirmExceedsRemaining(t *testing.T) {
+func TestMultiStep_StepAmountsSumMismatch(t *testing.T) {
 	svc, _ := newMultiStepTestService()
 	ctx := context.Background()
 
+	// Step amounts sum to 0.025 but totalAmount is 0.020 — should be rejected at creation
 	planned := []PlannedStep{
 		{SellerAddr: "0xSeller1", Amount: "0.015000"},
 		{SellerAddr: "0xSeller2", Amount: "0.010000"},
 	}
-	mse, err := svc.LockSteps(ctx, "0xBuyer", "0.020000", 2, planned)
-	if err != nil {
-		t.Fatalf("LockSteps: %v", err)
+	_, err := svc.LockSteps(ctx, "0xBuyer", "0.020000", 2, planned)
+	if err == nil {
+		t.Fatal("expected error for mismatched step amounts sum")
 	}
-
-	// Confirm step 0 with 0.015
-	_, err = svc.ConfirmStep(ctx, mse.ID, 0, "0xSeller1", "0.015000")
-	if err != nil {
-		t.Fatalf("ConfirmStep 0: %v", err)
-	}
-
-	// Step 1 tries to use 0.010 → total would be 0.025 > 0.020
-	_, err = svc.ConfirmStep(ctx, mse.ID, 1, "0xSeller2", "0.010000")
-	if !errors.Is(err, ErrAmountExceedsTotal) {
-		t.Fatalf("expected ErrAmountExceedsTotal, got %v", err)
+	if !strings.Contains(err.Error(), "planned step amounts sum") {
+		t.Fatalf("expected sum mismatch error, got: %v", err)
 	}
 }
 
@@ -310,16 +303,16 @@ func TestMultiStep_InvalidInputs(t *testing.T) {
 	}
 }
 
-func TestMultiStep_AutoCompleteDustRefund(t *testing.T) {
-	svc, ml := newMultiStepTestService()
+func TestMultiStep_AutoComplete(t *testing.T) {
+	svc, _ := newMultiStepTestService()
 	ctx := context.Background()
 
-	// Lock 0.030000 for 2 steps, but planned amounts sum to 0.020000
+	// Lock 0.020000 for 2 steps, amounts match total exactly
 	planned := []PlannedStep{
 		{SellerAddr: "0xSeller1", Amount: "0.010000"},
 		{SellerAddr: "0xSeller2", Amount: "0.010000"},
 	}
-	mse, err := svc.LockSteps(ctx, "0xBuyer", "0.030000", 2, planned)
+	mse, err := svc.LockSteps(ctx, "0xBuyer", "0.020000", 2, planned)
 	if err != nil {
 		t.Fatalf("LockSteps: %v", err)
 	}
@@ -329,19 +322,13 @@ func TestMultiStep_AutoCompleteDustRefund(t *testing.T) {
 		t.Fatalf("ConfirmStep 0: %v", err)
 	}
 
-	// Confirm final step with less than remaining → triggers auto-complete + dust refund
+	// Confirm final step → triggers auto-complete
 	mse, err = svc.ConfirmStep(ctx, mse.ID, 1, "0xSeller2", "0.010000")
 	if err != nil {
 		t.Fatalf("ConfirmStep 1: %v", err)
 	}
 	if mse.Status != MSCompleted {
 		t.Fatalf("expected completed, got %s", mse.Status)
-	}
-
-	// Dust refund of 0.010000 should have been issued
-	dustRef := "mse:" + mse.ID + ":dust"
-	if ml.refunded[dustRef] != "0.010000" {
-		t.Fatalf("expected dust refund of 0.010000, got %s", ml.refunded[dustRef])
 	}
 }
 

@@ -16,14 +16,14 @@ import (
 )
 
 var (
-	ErrStreamNotFound   = errors.New("stream not found")
-	ErrInvalidStatus    = errors.New("invalid stream status for this operation")
-	ErrUnauthorized     = errors.New("not authorized for this stream operation")
-	ErrInvalidAmount    = errors.New("invalid amount")
-	ErrHoldExhausted    = errors.New("stream hold exhausted: tick would exceed held amount")
-	ErrAlreadyClosed    = errors.New("stream already closed")
-	ErrInvalidTickSeq   = errors.New("tick sequence number invalid (must be monotonically increasing)")
-	ErrDuplicateTickSeq = errors.New("duplicate tick sequence number")
+	ErrStreamNotFound   = errors.New("streams: not found")
+	ErrInvalidStatus    = errors.New("streams: invalid status for this operation")
+	ErrUnauthorized     = errors.New("streams: not authorized")
+	ErrInvalidAmount    = errors.New("streams: invalid amount")
+	ErrHoldExhausted    = errors.New("streams: hold exhausted — tick would exceed held amount")
+	ErrAlreadyClosed    = errors.New("streams: already closed")
+	ErrInvalidTickSeq   = errors.New("streams: tick sequence number invalid")
+	ErrDuplicateTickSeq = errors.New("streams: duplicate tick sequence number")
 )
 
 // Status represents the state of a stream.

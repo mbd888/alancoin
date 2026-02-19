@@ -353,7 +353,8 @@ func (h *Handler) AssignArbitrator(c *gin.Context) {
 		return
 	}
 
-	escrow, err := h.service.AssignArbitrator(c.Request.Context(), id, req.ArbitratorAddr)
+	callerAddr := c.GetString("authAgentAddr")
+	escrow, err := h.service.AssignArbitrator(c.Request.Context(), id, callerAddr, req.ArbitratorAddr)
 	if err != nil {
 		status := http.StatusInternalServerError
 		code := "internal_error"
@@ -361,6 +362,9 @@ func (h *Handler) AssignArbitrator(c *gin.Context) {
 		case errors.Is(err, ErrEscrowNotFound):
 			status = http.StatusNotFound
 			code = "not_found"
+		case errors.Is(err, ErrUnauthorized):
+			status = http.StatusForbidden
+			code = "unauthorized"
 		case errors.Is(err, ErrInvalidStatus):
 			status = http.StatusConflict
 			code = "invalid_state"

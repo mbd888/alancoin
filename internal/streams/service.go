@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/logging"
 	"github.com/mbd888/alancoin/internal/retry"
 	"github.com/mbd888/alancoin/internal/syncutil"
 	"github.com/mbd888/alancoin/internal/traces"
@@ -128,6 +130,8 @@ func (s *Service) Open(ctx context.Context, req OpenRequest) (_ *Stream, retErr 
 		return nil, fmt.Errorf("failed to create stream record: %w", err)
 	}
 
+	streamsOpened.Inc()
+
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitStreamOpened(stream.SellerAddr, stream.ID, stream.BuyerAddr, stream.HoldAmount)
 	}
@@ -212,6 +216,7 @@ func (s *Service) RecordTick(ctx context.Context, streamID string, req TickReque
 		return nil, nil, fmt.Errorf("failed to update stream after tick: %w", err)
 	}
 
+	streamTicksTotal.Inc()
 	return tick, stream, nil
 }
 
@@ -277,7 +282,19 @@ func (s *Service) AutoClose(ctx context.Context, stream *Stream) error {
 //     is owed money (recoverable via reconciliation — no funds are stuck).
 //   - The reverse order (old code) would leave unused funds permanently stuck
 //     in pending if the process crashes after settle but before release.
-func (s *Service) settle(ctx context.Context, stream *Stream, status Status, reason string) (*Stream, error) {
+func (s *Service) settle(ctx context.Context, stream *Stream, status Status, reason string) (_ *Stream, retErr error) {
+	ctx, span := traces.StartSpan(ctx, "streams.settle",
+		attribute.String("stream_id", stream.ID),
+		attribute.String("target_status", string(status)),
+	)
+	defer func() {
+		if retErr != nil {
+			span.RecordError(retErr)
+			span.SetStatus(codes.Error, retErr.Error())
+		}
+		span.End()
+	}()
+
 	spentBig, _ := usdc.Parse(stream.SpentAmount)
 	holdBig, _ := usdc.Parse(stream.HoldAmount)
 	unused := new(big.Int).Sub(holdBig, spentBig)
@@ -295,8 +312,8 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 		if err := s.ledger.SettleHold(ctx, stream.BuyerAddr, stream.SellerAddr, stream.SpentAmount, stream.ID); err != nil {
 			// CRITICAL: Unused funds released but spent portion not settled.
 			// The seller is owed money. Log for reconciliation.
-			log.Printf("CRITICAL: stream %s release succeeded but settle failed — seller %s owed %s: %v",
-				stream.ID, stream.SellerAddr, stream.SpentAmount, err)
+			logging.L(ctx).Error("CRITICAL: stream release succeeded but settle failed — seller owed money",
+				"stream", stream.ID, "seller", stream.SellerAddr, "amount", stream.SpentAmount, "error", err)
 			return nil, fmt.Errorf("failed to settle hold (unused funds released, seller owed %s — requires reconciliation): %w",
 				stream.SpentAmount, err)
 		}
@@ -314,7 +331,8 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 	// retries to prevent double-settlement races. Sleep duration is short (50-100ms).
 	updateErr := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
 		if err := s.store.Update(ctx, stream); err != nil {
-			log.Printf("WARN: stream %s status update failed: %v", stream.ID, err)
+			logging.L(ctx).Warn("stream status update failed, retrying",
+				"stream", stream.ID, "error", err)
 			return err
 		}
 		return nil
@@ -323,13 +341,19 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 		// All retries exhausted. Mark as settlement_failed so auto-close won't re-settle.
 		stream.Status = StatusSettlementFailed
 		if retryErr := s.store.Update(ctx, stream); retryErr != nil {
-			log.Printf("CRITICAL: stream %s funds settled but ALL status updates failed (including sentinel): %v",
-				stream.ID, retryErr)
+			logging.L(ctx).Error("CRITICAL: stream funds settled but ALL status updates failed including sentinel",
+				"stream", stream.ID, "error", retryErr)
 		} else {
-			log.Printf("CRITICAL: stream %s marked as settlement_failed — funds moved but target status %q could not be set. Requires manual resolution.",
-				stream.ID, status)
+			logging.L(ctx).Error("CRITICAL: stream marked as settlement_failed — funds moved but target status could not be set",
+				"stream", stream.ID, "target_status", string(status))
 		}
 		return nil, fmt.Errorf("failed to update stream after settlement (requires manual resolution): %w", updateErr)
+	}
+
+	streamsClosed.WithLabelValues(string(stream.Status)).Inc()
+	streamDuration.Observe(time.Since(stream.CreatedAt).Seconds())
+	if amt, err := strconv.ParseFloat(stream.SpentAmount, 64); err == nil && amt > 0 {
+		streamSettlementAmount.Observe(amt)
 	}
 
 	if s.webhookEmitter != nil {
@@ -342,12 +366,16 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 		if status == StatusDisputed {
 			txStatus = "failed"
 		}
-		_ = s.recorder.RecordTransaction(ctx, stream.ID, stream.BuyerAddr, stream.SellerAddr, stream.SpentAmount, stream.ServiceID, txStatus)
+		if err := s.recorder.RecordTransaction(ctx, stream.ID, stream.BuyerAddr, stream.SellerAddr, stream.SpentAmount, stream.ServiceID, txStatus); err != nil {
+			slog.Error("stream settle: failed to record transaction", "stream_id", stream.ID, "error", err)
+		}
 	}
 
 	// Intercept revenue for stakes (seller earned money)
 	if s.revenue != nil && spentBig.Sign() > 0 && status != StatusDisputed {
-		_ = s.revenue.AccumulateRevenue(ctx, stream.SellerAddr, stream.SpentAmount, "stream_settle:"+stream.ID)
+		if err := s.revenue.AccumulateRevenue(ctx, stream.SellerAddr, stream.SpentAmount, "stream_settle:"+stream.ID); err != nil {
+			slog.Error("stream settle: failed to accumulate revenue", "stream_id", stream.ID, "seller", stream.SellerAddr, "error", err)
+		}
 	}
 
 	// Issue receipt for stream settlement
@@ -356,8 +384,10 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 		if status == StatusDisputed {
 			rcptStatus = "failed"
 		}
-		_ = s.receiptIssuer.IssueReceipt(ctx, "stream", stream.ID, stream.BuyerAddr,
-			stream.SellerAddr, stream.SpentAmount, stream.ServiceID, rcptStatus, string(status))
+		if err := s.receiptIssuer.IssueReceipt(ctx, "stream", stream.ID, stream.BuyerAddr,
+			stream.SellerAddr, stream.SpentAmount, stream.ServiceID, rcptStatus, string(status)); err != nil {
+			slog.Error("stream settle: failed to issue receipt", "stream_id", stream.ID, "error", err)
+		}
 	}
 
 	return stream, nil

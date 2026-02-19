@@ -19,6 +19,13 @@ import (
 	"github.com/mbd888/alancoin/internal/metrics"
 )
 
+// normalCloseCodes are WebSocket close codes that indicate an expected disconnect.
+var normalCloseCodes = []int{
+	websocket.CloseNormalClosure,
+	websocket.CloseGoingAway,
+	websocket.CloseNoStatusReceived,
+}
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
@@ -68,6 +75,9 @@ type Client struct {
 	sub  Subscription
 }
 
+// MaxClients is the maximum number of concurrent WebSocket connections.
+const MaxClients = 10000
+
 // Hub manages all WebSocket connections
 type Hub struct {
 	clients    map[*Client]bool
@@ -76,6 +86,8 @@ type Hub struct {
 	unregister chan *Client
 	mu         sync.RWMutex
 	logger     *slog.Logger
+	done       chan struct{} // closed when Run exits; prevents upgrade race
+	maxClients int
 
 	// Stats
 	totalEvents  atomic.Int64
@@ -91,12 +103,15 @@ func NewHub(logger *slog.Logger) *Hub {
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		logger:     logger,
+		done:       make(chan struct{}),
+		maxClients: MaxClients,
 	}
 }
 
 // Run starts the hub's main loop
 func (h *Hub) Run(ctx context.Context) {
 	h.logger.Info("realtime hub started")
+	defer close(h.done)
 
 	for {
 		select {
@@ -264,6 +279,23 @@ func (h *Hub) Stats() map[string]interface{} {
 
 // HandleWebSocket upgrades HTTP to WebSocket
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Reject upgrades after the hub has stopped to prevent orphaned connections.
+	select {
+	case <-h.done:
+		http.Error(w, "server shutting down", http.StatusServiceUnavailable)
+		return
+	default:
+	}
+
+	// Enforce connection limit
+	h.mu.RLock()
+	n := len(h.clients)
+	h.mu.RUnlock()
+	if n >= h.maxClients {
+		http.Error(w, "too many connections", http.StatusServiceUnavailable)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.logger.Error("websocket upgrade failed", "error", err)
@@ -301,6 +333,9 @@ func (c *Client) readPump() {
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
+			if !websocket.IsCloseError(err, normalCloseCodes...) {
+				c.hub.logger.Warn("websocket read error", "error", err)
+			}
 			break
 		}
 
@@ -332,12 +367,14 @@ func (c *Client) writePump() {
 			}
 
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				c.hub.logger.Warn("websocket write error", "error", err)
 				return
 			}
 
 		case <-ticker.C:
 			_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				c.hub.logger.Debug("websocket ping failed", "error", err)
 				return
 			}
 		}

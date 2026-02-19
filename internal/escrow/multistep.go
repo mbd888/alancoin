@@ -11,15 +11,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var (
-	ErrMultiStepNotFound  = errors.New("multistep escrow not found")
-	ErrDuplicateStep      = errors.New("step index already confirmed")
-	ErrStepOutOfRange     = errors.New("step index out of range")
-	ErrAmountExceedsTotal = errors.New("step amount exceeds remaining escrow balance")
-	ErrStepMismatch       = errors.New("seller or amount does not match planned step")
+	ErrMultiStepNotFound  = errors.New("escrow: multistep not found")
+	ErrDuplicateStep      = errors.New("escrow: step index already confirmed")
+	ErrStepOutOfRange     = errors.New("escrow: step index out of range")
+	ErrAmountExceedsTotal = errors.New("escrow: step amount exceeds remaining balance")
+	ErrStepMismatch       = errors.New("escrow: seller or amount does not match planned step")
 )
 
 // MaxTotalSteps is the maximum number of steps allowed in a multistep escrow.
@@ -100,9 +102,19 @@ func (s *MultiStepService) escrowLock(id string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
+func (s *MultiStepService) cleanupLock(id string) {
+	s.locks.Delete(id)
+}
+
 // LockSteps creates a multistep escrow, locking totalAmount from the buyer.
 // plannedSteps must have exactly totalSteps entries defining each step's seller and amount.
 func (s *MultiStepService) LockSteps(ctx context.Context, buyerAddr, totalAmount string, totalSteps int, plannedSteps []PlannedStep) (*MultiStepEscrow, error) {
+	ctx, span := traces.StartSpan(ctx, "escrow.multistep.LockSteps",
+		attribute.String("buyer", buyerAddr),
+		attribute.Int("total_steps", totalSteps),
+	)
+	defer span.End()
+
 	if totalSteps <= 0 || totalSteps > MaxTotalSteps {
 		return nil, fmt.Errorf("totalSteps must be between 1 and %d", MaxTotalSteps)
 	}
@@ -115,6 +127,7 @@ func (s *MultiStepService) LockSteps(ctx context.Context, buyerAddr, totalAmount
 
 	// Validate each planned step and normalize addresses
 	normalized := make([]PlannedStep, totalSteps)
+	stepSum := new(big.Int)
 	for i, ps := range plannedSteps {
 		if err := validateAmount(ps.Amount); err != nil {
 			return nil, fmt.Errorf("plannedSteps[%d]: %w", i, err)
@@ -122,10 +135,18 @@ func (s *MultiStepService) LockSteps(ctx context.Context, buyerAddr, totalAmount
 		if ps.SellerAddr == "" {
 			return nil, fmt.Errorf("plannedSteps[%d]: sellerAddr is required", i)
 		}
+		parsed, _ := usdc.Parse(ps.Amount)
+		stepSum.Add(stepSum, parsed)
 		normalized[i] = PlannedStep{
 			SellerAddr: strings.ToLower(ps.SellerAddr),
 			Amount:     ps.Amount,
 		}
+	}
+
+	// Verify planned step amounts sum to totalAmount
+	totalParsed, _ := usdc.Parse(totalAmount)
+	if stepSum.Cmp(totalParsed) != 0 {
+		return nil, fmt.Errorf("planned step amounts sum to %s but totalAmount is %s", usdc.Format(stepSum), totalAmount)
 	}
 
 	now := time.Now()
@@ -157,6 +178,12 @@ func (s *MultiStepService) LockSteps(ctx context.Context, buyerAddr, totalAmount
 
 // ConfirmStep releases funds for a single step to the seller.
 func (s *MultiStepService) ConfirmStep(ctx context.Context, id string, stepIndex int, sellerAddr, amount string) (*MultiStepEscrow, error) {
+	ctx, span := traces.StartSpan(ctx, "escrow.multistep.ConfirmStep",
+		attribute.String("escrow_id", id),
+		attribute.Int("step_index", stepIndex),
+	)
+	defer span.End()
+
 	mu := s.escrowLock(id)
 	mu.Lock()
 	defer mu.Unlock()
@@ -252,6 +279,8 @@ func (s *MultiStepService) ConfirmStep(ctx context.Context, id string, stepIndex
 				}
 			}
 		}
+
+		s.cleanupLock(id)
 	}
 
 	return mse, nil
@@ -259,6 +288,11 @@ func (s *MultiStepService) ConfirmStep(ctx context.Context, id string, stepIndex
 
 // RefundRemaining aborts the escrow and returns unspent funds to the buyer.
 func (s *MultiStepService) RefundRemaining(ctx context.Context, id, callerAddr string) (*MultiStepEscrow, error) {
+	ctx, span := traces.StartSpan(ctx, "escrow.multistep.RefundRemaining",
+		attribute.String("escrow_id", id),
+	)
+	defer span.End()
+
 	mu := s.escrowLock(id)
 	mu.Lock()
 	defer mu.Unlock()
@@ -299,6 +333,7 @@ func (s *MultiStepService) RefundRemaining(ctx context.Context, id, callerAddr s
 	mse.Status = MSAborted
 	mse.UpdatedAt = time.Now()
 
+	s.cleanupLock(id)
 	return mse, nil
 }
 

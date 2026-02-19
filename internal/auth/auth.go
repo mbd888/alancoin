@@ -20,10 +20,10 @@ import (
 
 // Errors
 var (
-	ErrNoAPIKey      = errors.New("API key required")
-	ErrInvalidAPIKey = errors.New("invalid or expired API key")
-	ErrNotOwner      = errors.New("not authorized for this resource")
-	ErrKeyNotFound   = errors.New("API key not found")
+	ErrNoAPIKey      = errors.New("auth: API key required")
+	ErrInvalidAPIKey = errors.New("auth: invalid or expired API key")
+	ErrNotOwner      = errors.New("auth: not authorized for this resource")
+	ErrKeyNotFound   = errors.New("auth: key not found")
 )
 
 // APIKey represents an API key
@@ -124,12 +124,14 @@ func (m *Manager) ValidateKey(ctx context.Context, rawKey string) (*APIKey, erro
 
 	// Update last used (fire and forget) — re-read to avoid stomping concurrent mutations (e.g. revoke)
 	go func(keyHash string) {
-		current, err := m.store.GetByHash(context.Background(), keyHash)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		current, err := m.store.GetByHash(ctx, keyHash)
 		if err != nil {
 			return
 		}
 		current.LastUsed = time.Now()
-		_ = m.store.Update(context.Background(), current)
+		_ = m.store.Update(ctx, current)
 	}(hash)
 
 	return key, nil

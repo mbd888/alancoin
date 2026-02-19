@@ -80,8 +80,13 @@ func (l *Limiter) Stop() {
 	close(l.stop)
 }
 
-// Allow checks if a request should be allowed
+// Allow checks if a request should be allowed using the default RPM.
 func (l *Limiter) Allow(key string) bool {
+	return l.AllowWithLimit(key, l.cfg.RequestsPerMinute, l.cfg.BurstSize)
+}
+
+// AllowWithLimit checks if a request should be allowed using a custom RPM and burst.
+func (l *Limiter) AllowWithLimit(key string, rpm, burst int) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -90,7 +95,7 @@ func (l *Limiter) Allow(key string) bool {
 
 	if !exists {
 		l.clients[key] = &clientState{
-			tokens:    float64(l.cfg.BurstSize - 1),
+			tokens:    float64(burst - 1),
 			lastCheck: now,
 		}
 		return true
@@ -98,12 +103,12 @@ func (l *Limiter) Allow(key string) bool {
 
 	// Token bucket algorithm
 	elapsed := now.Sub(state.lastCheck).Seconds()
-	tokensPerSecond := float64(l.cfg.RequestsPerMinute) / 60.0
+	tokensPerSecond := float64(rpm) / 60.0
 	state.tokens += elapsed * tokensPerSecond
 
 	// Cap at burst size
-	if state.tokens > float64(l.cfg.BurstSize) {
-		state.tokens = float64(l.cfg.BurstSize)
+	if state.tokens > float64(burst) {
+		state.tokens = float64(burst)
 	}
 
 	state.lastCheck = now
@@ -142,6 +147,55 @@ func (l *Limiter) Middleware() gin.HandlerFunc {
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error":       "rate_limit_exceeded",
 				"message":     "Too many requests. Please slow down.",
+				"retry_after": 1,
+			})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// TenantRPMProvider returns the rate limit RPM for a tenant.
+// Returns 0 if the tenant has no custom limit (falls through to global).
+type TenantRPMProvider func(tenantID string) int
+
+// TenantMiddleware returns a Gin middleware that applies per-tenant rate limits.
+// It runs after auth middleware has set the tenant context key.
+// If the request has no tenant, the global limiter is used as fallback.
+func (l *Limiter) TenantMiddleware(tenantKey string, provider TenantRPMProvider) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Skip rate limiting for health checks
+		path := c.Request.URL.Path
+		if path == "/health" || path == "/health/live" || path == "/health/ready" {
+			c.Next()
+			return
+		}
+
+		tenantID, _ := c.Get(tenantKey)
+		tid, _ := tenantID.(string)
+		if tid == "" {
+			c.Next() // No tenant — global limiter already applied upstream
+			return
+		}
+
+		rpm := provider(tid)
+		if rpm <= 0 {
+			c.Next()
+			return
+		}
+
+		burst := rpm / 6 // ~10s burst window
+		if burst < 5 {
+			burst = 5
+		}
+
+		key := "tenant:" + tid
+		if !l.AllowWithLimit(key, rpm, burst) {
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":       "tenant_rate_limit_exceeded",
+				"message":     "Tenant rate limit exceeded. Upgrade your plan for higher limits.",
 				"retry_after": 1,
 			})
 			c.Abort()

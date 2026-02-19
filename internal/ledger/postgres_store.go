@@ -977,6 +977,47 @@ func (p *PostgresStore) GetHistory(ctx context.Context, agentAddr string, limit 
 	return entries, rows.Err()
 }
 
+// GetHistoryPage retrieves ledger entries with cursor-based pagination.
+func (p *PostgresStore) GetHistoryPage(ctx context.Context, agentAddr string, limit int, beforeTime time.Time, beforeID string) ([]*Entry, error) {
+	var rows *sql.Rows
+	var err error
+	if beforeID != "" {
+		rows, err = p.db.QueryContext(ctx, `
+			SELECT id, agent_address, type, amount, tx_hash, reference, description, created_at
+			FROM ledger_entries
+			WHERE agent_address = $1 AND (created_at, id) < ($3, $4)
+			ORDER BY created_at DESC, id DESC
+			LIMIT $2
+		`, agentAddr, limit, beforeTime, beforeID)
+	} else {
+		rows, err = p.db.QueryContext(ctx, `
+			SELECT id, agent_address, type, amount, tx_hash, reference, description, created_at
+			FROM ledger_entries
+			WHERE agent_address = $1
+			ORDER BY created_at DESC, id DESC
+			LIMIT $2
+		`, agentAddr, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []*Entry
+	for rows.Next() {
+		e := &Entry{}
+		var txHash, reference, description sql.NullString
+		if err := rows.Scan(&e.ID, &e.AgentAddr, &e.Type, &e.Amount, &txHash, &reference, &description, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		e.TxHash = txHash.String
+		e.Reference = reference.String
+		e.Description = description.String
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
 // HasDeposit checks if a deposit tx has already been processed
 func (p *PostgresStore) HasDeposit(ctx context.Context, txHash string) (bool, error) {
 	var count int

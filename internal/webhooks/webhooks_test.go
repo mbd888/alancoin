@@ -15,6 +15,16 @@ import (
 	"time"
 )
 
+// noopValidator allows any URL (including loopback) for test servers.
+func noopValidator(_ string) error { return nil }
+
+// newTestDispatcher creates a dispatcher that skips SSRF checks for localhost test servers.
+func newTestDispatcher(store Store) *Dispatcher {
+	d := NewDispatcher(store)
+	d.urlValidator = noopValidator
+	return d
+}
+
 // ---------------------------------------------------------------------------
 // MemoryStore tests
 // ---------------------------------------------------------------------------
@@ -96,7 +106,7 @@ func TestMemoryStore_GetByEvent(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSign(t *testing.T) {
-	d := NewDispatcher(NewMemoryStore())
+	d := newTestDispatcher(NewMemoryStore())
 
 	payload := []byte(`{"type":"payment.received","data":{}}`)
 	secret := "test_secret_key"
@@ -114,7 +124,7 @@ func TestSign(t *testing.T) {
 }
 
 func TestSign_DifferentSecrets(t *testing.T) {
-	d := NewDispatcher(NewMemoryStore())
+	d := newTestDispatcher(NewMemoryStore())
 
 	payload := []byte(`{"test": true}`)
 	sig1 := d.sign(payload, "secret1")
@@ -147,7 +157,7 @@ func TestDispatch_SendsToSubscribers(t *testing.T) {
 		Active: true,
 	})
 
-	d := NewDispatcher(store)
+	d := newTestDispatcher(store)
 	event := &Event{
 		Type:      EventPaymentReceived,
 		Timestamp: time.Now(),
@@ -185,7 +195,7 @@ func TestDispatch_SkipsInactiveSubscribers(t *testing.T) {
 		Active: false, // Inactive
 	})
 
-	d := NewDispatcher(store)
+	d := newTestDispatcher(store)
 	d.Dispatch(ctx, &Event{Type: EventPaymentReceived, Timestamp: time.Now()})
 
 	time.Sleep(200 * time.Millisecond)
@@ -221,7 +231,7 @@ func TestDispatch_IncludesSignature(t *testing.T) {
 		Secret: secret,
 	})
 
-	d := NewDispatcher(store)
+	d := newTestDispatcher(store)
 	d.Dispatch(ctx, &Event{
 		Type:      EventPaymentReceived,
 		Timestamp: time.Now(),
@@ -271,7 +281,7 @@ func TestDispatch_IncludesEventHeaders(t *testing.T) {
 		Active: true,
 	})
 
-	d := NewDispatcher(store)
+	d := newTestDispatcher(store)
 	d.Dispatch(ctx, &Event{Type: EventBalanceDeposit, Timestamp: time.Now()})
 
 	time.Sleep(200 * time.Millisecond)
@@ -309,7 +319,7 @@ func TestDispatch_PayloadFormat(t *testing.T) {
 		Active: true,
 	})
 
-	d := NewDispatcher(store)
+	d := newTestDispatcher(store)
 	d.Dispatch(ctx, &Event{
 		Type:      EventPaymentReceived,
 		Timestamp: time.Now(),
@@ -353,6 +363,7 @@ func TestDispatch_ErrorUpdatesSubscription(t *testing.T) {
 		MaxDelay:    10 * time.Millisecond,
 		MaxFailures: 50,
 	})
+	d.urlValidator = noopValidator
 	d.Dispatch(ctx, &Event{Type: EventPaymentReceived, Timestamp: time.Now()})
 
 	time.Sleep(200 * time.Millisecond)
@@ -379,7 +390,7 @@ func TestDispatch_SuccessUpdatesSubscription(t *testing.T) {
 		Active: true,
 	})
 
-	d := NewDispatcher(store)
+	d := newTestDispatcher(store)
 	d.Dispatch(ctx, &Event{Type: EventPaymentReceived, Timestamp: time.Now()})
 
 	time.Sleep(200 * time.Millisecond)
@@ -414,7 +425,7 @@ func TestDispatchToAgent_FiltersCorrectly(t *testing.T) {
 	// Agent B has 1 hook
 	store.Create(ctx, &Subscription{ID: "wh3", AgentAddr: "0xb", URL: server.URL, Events: []EventType{EventPaymentReceived}, Active: true})
 
-	d := NewDispatcher(store)
+	d := newTestDispatcher(store)
 	d.DispatchToAgent(ctx, "0xa", &Event{Type: EventPaymentReceived, Timestamp: time.Now()})
 
 	time.Sleep(200 * time.Millisecond)
@@ -437,7 +448,7 @@ func TestDispatchToAgent_NoMatchingEvents(t *testing.T) {
 	ctx := context.Background()
 	store.Create(ctx, &Subscription{ID: "wh1", AgentAddr: "0xa", URL: server.URL, Events: []EventType{EventPaymentSent}, Active: true})
 
-	d := NewDispatcher(store)
+	d := newTestDispatcher(store)
 	d.DispatchToAgent(ctx, "0xa", &Event{Type: EventPaymentReceived, Timestamp: time.Now()})
 
 	time.Sleep(200 * time.Millisecond)

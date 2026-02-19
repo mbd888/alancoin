@@ -1639,7 +1639,7 @@ func TestSubmitEvidence_ArbitratingStatus(t *testing.T) {
 		Amount:     "1.00",
 	})
 	svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
-	svc.AssignArbitrator(ctx, esc.ID, "0xarbitrator")
+	svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xarbitrator")
 
 	// Both parties can still submit evidence during arbitration
 	_, err := svc.SubmitEvidence(ctx, esc.ID, "0xseller", "additional proof")
@@ -1665,7 +1665,7 @@ func TestAssignArbitrator_HappyPath(t *testing.T) {
 	})
 	svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
 
-	result, err := svc.AssignArbitrator(ctx, esc.ID, "0xARBITRATOR")
+	result, err := svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xARBITRATOR")
 	if err != nil {
 		t.Fatalf("AssignArbitrator failed: %v", err)
 	}
@@ -1692,8 +1692,8 @@ func TestAssignArbitrator_WrongStatus(t *testing.T) {
 		Amount:     "1.00",
 	})
 
-	// Pending — not disputed yet
-	_, err := svc.AssignArbitrator(ctx, esc.ID, "0xarbitrator")
+	// Pending — not disputed yet (but caller is buyer, so auth passes)
+	_, err := svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xarbitrator")
 	if err != ErrInvalidStatus {
 		t.Errorf("Expected ErrInvalidStatus for pending escrow, got %v", err)
 	}
@@ -1705,7 +1705,7 @@ func TestAssignArbitrator_Nonexistent(t *testing.T) {
 	svc := NewService(store, ledger)
 	ctx := context.Background()
 
-	_, err := svc.AssignArbitrator(ctx, "esc_ghost", "0xarbitrator")
+	_, err := svc.AssignArbitrator(ctx, "esc_ghost", "0xanyone", "0xarbitrator")
 	if err != ErrEscrowNotFound {
 		t.Errorf("Expected ErrEscrowNotFound, got %v", err)
 	}
@@ -1728,7 +1728,7 @@ func TestResolveArbitration_Release(t *testing.T) {
 		Amount:     "5.00",
 	})
 	svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
-	svc.AssignArbitrator(ctx, esc.ID, "0xarbitrator")
+	svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xarbitrator")
 
 	result, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
 		Resolution: "release",
@@ -1768,7 +1768,7 @@ func TestResolveArbitration_Refund(t *testing.T) {
 		Amount:     "3.00",
 	})
 	svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
-	svc.AssignArbitrator(ctx, esc.ID, "0xarbitrator")
+	svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xarbitrator")
 
 	result, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
 		Resolution: "refund",
@@ -1805,7 +1805,7 @@ func TestResolveArbitration_Partial(t *testing.T) {
 		Amount:     "10.00",
 	})
 	svc.Dispute(ctx, esc.ID, "0xbuyer", "partial delivery")
-	svc.AssignArbitrator(ctx, esc.ID, "0xarbitrator")
+	svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xarbitrator")
 
 	result, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
 		Resolution:    "partial",
@@ -1849,7 +1849,7 @@ func TestResolveArbitration_Unauthorized(t *testing.T) {
 		Amount:     "1.00",
 	})
 	svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
-	svc.AssignArbitrator(ctx, esc.ID, "0xarbitrator")
+	svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xarbitrator")
 
 	// Wrong arbitrator
 	_, err := svc.ResolveArbitration(ctx, esc.ID, "0xstranger", ResolveRequest{
@@ -1893,7 +1893,7 @@ func TestResolveArbitration_InvalidPartialAmount(t *testing.T) {
 		Amount:     "10.00",
 	})
 	svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
-	svc.AssignArbitrator(ctx, esc.ID, "0xarbitrator")
+	svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xarbitrator")
 
 	// Release amount >= total should fail
 	_, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{

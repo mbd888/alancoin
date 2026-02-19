@@ -57,11 +57,12 @@ type GatewayStoreAdmin interface {
 
 // Handler provides admin HTTP endpoints.
 type Handler struct {
-	gwService    GatewayService
-	escrowForce  EscrowService
-	streamForce  StreamService
-	reconciler   ReconciliationRunner
-	denialExport DenialExporter
+	gwService      GatewayService
+	escrowForce    EscrowService
+	streamForce    StreamService
+	reconciler     ReconciliationRunner
+	denialExport   DenialExporter
+	stateProviders map[string]StateProvider
 }
 
 // NewHandler creates a new admin handler.
@@ -99,6 +100,20 @@ func (h *Handler) WithDenialExporter(d DenialExporter) *Handler {
 	return h
 }
 
+// StateProvider returns operational state for admin inspection.
+type StateProvider interface {
+	AdminState(ctx context.Context) map[string]interface{}
+}
+
+// WithStateProvider adds a state provider for the admin state endpoint.
+func (h *Handler) WithStateProvider(name string, p StateProvider) *Handler {
+	if h.stateProviders == nil {
+		h.stateProviders = make(map[string]StateProvider)
+	}
+	h.stateProviders[name] = p
+	return h
+}
+
 // RegisterRoutes sets up admin routes.
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/admin/gateway/stuck", h.listStuck)
@@ -108,6 +123,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.POST("/admin/streams/force-close-stale", h.forceCloseStaleStreams)
 	r.POST("/admin/reconcile", h.triggerReconciliation)
 	r.GET("/admin/denials/export", h.exportDenials)
+	r.GET("/admin/state", h.inspectState)
 }
 
 // listStuck returns sessions with settlement_failed status.
@@ -273,4 +289,16 @@ func (h *Handler) exportDenials(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"denials": records, "count": len(records), "since": since})
+}
+
+// inspectState returns aggregated operational state from all subsystems.
+func (h *Handler) inspectState(c *gin.Context) {
+	ctx := c.Request.Context()
+	state := make(map[string]interface{})
+
+	for name, p := range h.stateProviders {
+		state[name] = p.AdminState(ctx)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"state": state, "timestamp": time.Now().UTC()})
 }

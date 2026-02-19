@@ -152,8 +152,14 @@ func (h *Handler) RegenerateKey(c *gin.Context) {
 
 	keyID := c.Param("keyId")
 
-	// Revoke old key (best-effort; new key is generated regardless)
-	_ = h.manager.RevokeKey(c.Request.Context(), keyID, key.AgentAddr)
+	// Revoke old key first — abort if revocation fails to prevent dual active keys.
+	if err := h.manager.RevokeKey(c.Request.Context(), keyID, key.AgentAddr); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "revocation_failed",
+			"message": "Failed to revoke old key. New key not issued to prevent dual active keys.",
+		})
+		return
+	}
 
 	// Create new key
 	rawKey, newKey, err := h.manager.GenerateKey(c.Request.Context(), key.AgentAddr, "Regenerated key")

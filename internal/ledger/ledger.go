@@ -24,13 +24,13 @@ import (
 )
 
 var (
-	ErrInsufficientBalance = errors.New("insufficient balance")
-	ErrAgentNotFound       = errors.New("agent not found")
-	ErrInvalidAmount       = errors.New("invalid amount")
-	ErrDuplicateDeposit    = errors.New("deposit already processed")
-	ErrDuplicateRefund     = errors.New("refund already processed")
-	ErrAlreadyReversed     = errors.New("entry already reversed")
-	ErrEntryNotFound       = errors.New("entry not found")
+	ErrInsufficientBalance = errors.New("ledger: insufficient balance")
+	ErrAgentNotFound       = errors.New("ledger: agent not found")
+	ErrInvalidAmount       = errors.New("ledger: invalid amount")
+	ErrDuplicateDeposit    = errors.New("ledger: deposit already processed")
+	ErrDuplicateRefund     = errors.New("ledger: refund already processed")
+	ErrAlreadyReversed     = errors.New("ledger: entry already reversed")
+	ErrEntryNotFound       = errors.New("ledger: entry not found")
 )
 
 // Entry represents a ledger entry
@@ -98,6 +98,7 @@ type Store interface {
 	Refund(ctx context.Context, agentAddr, amount, reference, description string) error
 	Withdraw(ctx context.Context, agentAddr, amount, txHash string) error
 	GetHistory(ctx context.Context, agentAddr string, limit int) ([]*Entry, error)
+	GetHistoryPage(ctx context.Context, agentAddr string, limit int, beforeTime time.Time, beforeID string) ([]*Entry, error)
 	HasDeposit(ctx context.Context, txHash string) (bool, error)
 
 	// Two-phase hold operations for safe transaction execution.
@@ -372,6 +373,14 @@ func (l *Ledger) GetHistory(ctx context.Context, agentAddr string, limit int) ([
 		limit = 50
 	}
 	return l.store.GetHistory(ctx, strings.ToLower(agentAddr), limit)
+}
+
+// GetHistoryPage returns a page of ledger entries with cursor support.
+func (l *Ledger) GetHistoryPage(ctx context.Context, agentAddr string, limit int, beforeTime time.Time, beforeID string) ([]*Entry, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	return l.store.GetHistoryPage(ctx, strings.ToLower(agentAddr), limit, beforeTime, beforeID)
 }
 
 // Refund credits back an agent's balance (used when a transfer fails after debit)

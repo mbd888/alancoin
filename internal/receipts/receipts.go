@@ -11,8 +11,8 @@ import (
 )
 
 var (
-	ErrReceiptNotFound = errors.New("receipt not found")
-	ErrSigningDisabled = errors.New("receipt signing is disabled (no HMAC secret configured)")
+	ErrReceiptNotFound = errors.New("receipts: not found")
+	ErrSigningDisabled = errors.New("receipts: signing disabled (no HMAC secret configured)")
 )
 
 // PaymentPath identifies which subsystem issued the receipt.

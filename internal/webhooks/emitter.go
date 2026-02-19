@@ -52,7 +52,8 @@ func (e *Emitter) emit(agentAddr string, eventType EventType, data map[string]in
 		Timestamp: time.Now(),
 		Data:      data,
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	if err := e.d.DispatchToAgent(ctx, agentAddr, event); err != nil {
 		webhookEmitErrors.WithLabelValues(string(eventType)).Inc()
 		e.logger.Warn("webhook emit failed", "event", eventType, "agent", agentAddr, "error", err)

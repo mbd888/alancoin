@@ -21,6 +21,10 @@ import (
 	"time"
 
 	"github.com/mbd888/alancoin/internal/metrics"
+	"github.com/mbd888/alancoin/internal/security"
+	"github.com/mbd888/alancoin/internal/traces"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // EventType represents the type of webhook event
@@ -108,12 +112,16 @@ type Store interface {
 	Delete(ctx context.Context, id string) error
 }
 
+// URLValidator checks if a URL is safe for server-side requests.
+type URLValidator func(rawURL string) error
+
 // Dispatcher sends webhook events
 type Dispatcher struct {
-	store  Store
-	client *http.Client
-	retry  RetryConfig
-	sem    chan struct{} // concurrency limiter
+	store        Store
+	client       *http.Client
+	retry        RetryConfig
+	sem          chan struct{} // concurrency limiter
+	urlValidator URLValidator  // nil = use security.ValidateEndpointURL
 }
 
 const maxConcurrentWebhooks = 50
@@ -149,18 +157,30 @@ func NewDispatcherWithRetry(store Store, retryCfg RetryConfig) *Dispatcher {
 
 // Dispatch sends an event to all relevant subscribers
 func (d *Dispatcher) Dispatch(ctx context.Context, event *Event) error {
+	ctx, span := traces.StartSpan(ctx, "webhooks.Dispatch",
+		attribute.String("event_type", string(event.Type)),
+	)
+	defer span.End()
+
 	subs, err := d.store.GetByEvent(ctx, event.Type)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("failed to get subscribers: %w", err)
 	}
+	span.SetAttributes(attribute.Int("subscriber_count", len(subs)))
 
 	for _, sub := range subs {
 		if !sub.Active {
 			continue
 		}
 
-		// Send async with concurrency limit
-		d.sem <- struct{}{}
+		// Send async with concurrency limit; bail if context cancelled (e.g. shutdown).
+		select {
+		case d.sem <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		go func(s *Subscription) {
 			defer func() {
 				<-d.sem
@@ -177,8 +197,16 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event *Event) error {
 
 // DispatchToAgent sends an event to a specific agent's webhooks
 func (d *Dispatcher) DispatchToAgent(ctx context.Context, agentAddr string, event *Event) error {
+	ctx, span := traces.StartSpan(ctx, "webhooks.DispatchToAgent",
+		attribute.String("event_type", string(event.Type)),
+		attribute.String("agent", agentAddr),
+	)
+	defer span.End()
+
 	subs, err := d.store.GetByAgent(ctx, agentAddr)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("failed to get subscriptions: %w", err)
 	}
 
@@ -190,7 +218,11 @@ func (d *Dispatcher) DispatchToAgent(ctx context.Context, agentAddr string, even
 		// Check if subscribed to this event type
 		for _, et := range sub.Events {
 			if et == event.Type {
-				d.sem <- struct{}{}
+				select {
+				case d.sem <- struct{}{}:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 				go func(s *Subscription) {
 					defer func() {
 						<-d.sem
@@ -209,8 +241,16 @@ func (d *Dispatcher) DispatchToAgent(ctx context.Context, agentAddr string, even
 }
 
 func (d *Dispatcher) send(ctx context.Context, sub *Subscription, event *Event) {
+	ctx, span := traces.StartSpan(ctx, "webhooks.send",
+		attribute.String("subscription_id", sub.ID),
+		attribute.String("url", sub.URL),
+	)
+	defer span.End()
+
 	payload, err := json.Marshal(event)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "marshal failed")
 		d.updateError(ctx, sub, "failed to marshal event")
 		return
 	}
@@ -229,6 +269,16 @@ func (d *Dispatcher) send(ctx context.Context, sub *Subscription, event *Event) 
 				d.updateError(ctx, sub, "context cancelled during retry")
 				return
 			}
+		}
+
+		// Re-validate URL + DNS on every attempt to prevent DNS rebinding SSRF.
+		validate := d.urlValidator
+		if validate == nil {
+			validate = security.ValidateEndpointURL
+		}
+		if err := validate(sub.URL); err != nil {
+			lastErr = fmt.Sprintf("URL validation failed: %v", err)
+			break // DNS rebinding is not transient; don't retry
 		}
 
 		parsedURL, err := url.Parse(sub.URL)
