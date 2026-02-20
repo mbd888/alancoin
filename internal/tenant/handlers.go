@@ -2,6 +2,7 @@ package tenant
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -308,7 +309,12 @@ func (h *Handler) RegisterAgent(c *gin.Context) {
 	// Generate a tenant-scoped API key for this agent.
 	rawKey, keyInfo, err := h.authMgr.GenerateKey(c.Request.Context(), agent.Address, "Tenant agent key")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "agent registered but key generation failed"})
+		// Rollback agent registration to prevent zombie agents (registered but no key).
+		if delErr := h.registry.DeleteAgent(c.Request.Context(), agent.Address); delErr != nil {
+			slog.Error("failed to rollback agent after key generation failure",
+				"agent", agent.Address, "error", delErr)
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "failed to generate API key"})
 		return
 	}
 

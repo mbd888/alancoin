@@ -3,6 +3,7 @@ package streams
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -123,6 +124,9 @@ func (p *PostgresStore) CreateTick(ctx context.Context, t *Tick) error {
 		VALUES ($1, $2, $3, $4::NUMERIC(20,6), $5::NUMERIC(20,6), $6, $7)`,
 		t.ID, t.StreamID, t.Seq, t.Amount, t.Cumulative, nullString(t.Metadata), t.CreatedAt,
 	)
+	if err != nil && strings.Contains(err.Error(), "unique constraint") {
+		return ErrDuplicateTickSeq
+	}
 	return err
 }
 

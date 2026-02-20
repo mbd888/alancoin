@@ -110,6 +110,13 @@ func (m *MemoryStore) CreateTick(_ context.Context, tick *Tick) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Enforce unique (stream_id, seq)
+	for _, existing := range m.ticks[tick.StreamID] {
+		if existing.Seq == tick.Seq {
+			return ErrDuplicateTickSeq
+		}
+	}
+
 	m.ticks[tick.StreamID] = append(m.ticks[tick.StreamID], tick)
 	return nil
 }

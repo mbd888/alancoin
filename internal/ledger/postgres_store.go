@@ -206,11 +206,19 @@ func (p *PostgresStore) Refund(ctx context.Context, agentAddr, amount, reference
 		return ErrDuplicateRefund
 	}
 
+	// Credit-aware refund: repay credit_used first, then add remainder to available.
+	// eff = min(amount, total_out) — cap refund at what was actually spent.
+	// credit_repay = min(eff, credit_used) — repay outstanding credit draws first.
+	// available += eff - credit_repay, credit_used -= credit_repay.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE agent_balances SET
-			available  = available + LEAST($2::NUMERIC(20,6), total_out),
-			total_out  = GREATEST(0, total_out - $2::NUMERIC(20,6)),
-			updated_at = NOW()
+			available   = available
+			            + LEAST($2::NUMERIC(20,6), total_out)
+			            - LEAST(LEAST($2::NUMERIC(20,6), total_out), COALESCE(credit_used, 0)),
+			credit_used = COALESCE(credit_used, 0)
+			            - LEAST(LEAST($2::NUMERIC(20,6), total_out), COALESCE(credit_used, 0)),
+			total_out   = GREATEST(0, total_out - $2::NUMERIC(20,6)),
+			updated_at  = NOW()
 		WHERE agent_address = $1
 	`, agentAddr, amount)
 	if err != nil {

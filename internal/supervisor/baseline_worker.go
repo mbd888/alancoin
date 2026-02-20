@@ -200,9 +200,10 @@ func computeMeanStddev(totals map[time.Time]*big.Int) (mean, stddev *big.Int) {
 
 	// Population variance = sum((x - mean)^2) / n
 	var varianceSum float64
-	meanF := float64(mean.Int64())
+	meanF, _ := new(big.Float).SetInt(mean).Float64()
 	for _, v := range totals {
-		diff := float64(v.Int64()) - meanF
+		vF, _ := new(big.Float).SetInt(v).Float64()
+		diff := vF - meanF
 		varianceSum += diff * diff
 	}
 	stddevF := math.Sqrt(varianceSum / float64(n))

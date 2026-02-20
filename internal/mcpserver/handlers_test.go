@@ -26,6 +26,7 @@ func newTestSetup(handler http.Handler) (*Handlers, func()) {
 		AgentAddress: "0xBUYER",
 	}
 	client := NewAlancoinClient(cfg)
+	client.allowLoopback = true // tests use httptest servers on loopback
 	h := NewHandlers(client)
 	return h, ts.Close
 }
@@ -243,6 +244,7 @@ func TestClient_CallEndpoint_Headers(t *testing.T) {
 	defer ts.Close()
 
 	client := NewAlancoinClient(Config{APIURL: "http://unused:9999", APIKey: "k", AgentAddress: "0xAGENT"})
+	client.allowLoopback = true
 	_, err := client.CallEndpoint(context.Background(), ts.URL, map[string]any{"text": "hello"}, "esc-77", "5.00")
 	require.NoError(t, err)
 }
@@ -255,6 +257,7 @@ func TestClient_CallEndpoint_ServiceReturns500(t *testing.T) {
 	defer ts.Close()
 
 	client := NewAlancoinClient(Config{APIURL: "http://unused:9999", APIKey: "k", AgentAddress: "0x1"})
+	client.allowLoopback = true
 	_, err := client.CallEndpoint(context.Background(), ts.URL, nil, "esc-1", "1.00")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
@@ -269,6 +272,7 @@ func TestClient_CallEndpoint_ServiceReturns402(t *testing.T) {
 	defer ts.Close()
 
 	client := NewAlancoinClient(Config{APIURL: "http://unused:9999", APIKey: "k", AgentAddress: "0x1"})
+	client.allowLoopback = true
 	_, err := client.CallEndpoint(context.Background(), ts.URL, nil, "esc-1", "1.00")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "402")

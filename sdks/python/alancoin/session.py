@@ -379,17 +379,23 @@ class BudgetSession:
             )
             escrow_id = None
         else:
-            # Escrow-protected payment
-            escrow_resp = self._client.create_escrow(
-                buyer_addr=self._client.address,
-                seller_addr=service.agent_address,
-                amount=service.price,
-                service_id=service.id,
-            )
-            escrow_id = escrow_resp.get("escrow", {}).get("id")
-            tx_result = {"escrowId": escrow_id, "amount": service.price}
+            # Reserve budget before escrow call to close the TOCTOU window
+            # between the budget check above and the actual spend.
             self._total_spent += price_dec
             self._tx_count += 1
+            try:
+                escrow_resp = self._client.create_escrow(
+                    buyer_addr=self._client.address,
+                    seller_addr=service.agent_address,
+                    amount=service.price,
+                    service_id=service.id,
+                )
+            except Exception:
+                self._total_spent -= price_dec
+                self._tx_count -= 1
+                raise
+            escrow_id = escrow_resp.get("escrow", {}).get("id")
+            tx_result = {"escrowId": escrow_id, "amount": service.price}
 
         # 4. Call endpoint (if the service has one)
         if service.endpoint:
@@ -538,21 +544,25 @@ class BudgetSession:
             )
 
         # Phase 2: Lock — create multistep escrow with planned step manifest
+        # Reserve budget before the escrow call to close the TOCTOU window.
+        self._total_spent += total_price
         planned_steps = [
             {"sellerAddr": svc.agent_address, "amount": svc.price}
             for svc, _ in discovered
         ]
-        mse_resp = self._client.create_multistep_escrow(
-            total_amount=str(total_price),
-            total_steps=len(steps),
-            planned_steps=planned_steps,
-        )
+        try:
+            mse_resp = self._client.create_multistep_escrow(
+                total_amount=str(total_price),
+                total_steps=len(steps),
+                planned_steps=planned_steps,
+            )
+        except Exception:
+            self._total_spent -= total_price
+            raise
         escrow_id = mse_resp.get("escrow", {}).get("id")
         if not escrow_id:
+            self._total_spent -= total_price
             raise AlancoinError("Failed to create multistep escrow", code="escrow_failed")
-
-        # Track spend against session budget
-        self._total_spent += total_price
 
         # Phase 3: Execute — call each step, confirm on success, refund on failure
         results: List[ServiceResult] = []

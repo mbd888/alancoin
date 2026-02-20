@@ -51,17 +51,9 @@ func (p *PostgresStore) GetSession(ctx context.Context, id string) (*Session, er
 }
 
 func (p *PostgresStore) UpdateSession(ctx context.Context, session *Session) error {
-	// Check existence first so a missing row isn't masked by a cast error
-	// (e.g. empty TotalSpent → invalid NUMERIC).
-	var exists bool
-	if err := p.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM gateway_sessions WHERE id = $1)`,
-		session.ID,
-	).Scan(&exists); err != nil {
-		return err
-	}
-	if !exists {
-		return ErrSessionNotFound
+	// Validate TotalSpent before SQL to prevent a cast error from masking not-found.
+	if session.TotalSpent == "" {
+		session.TotalSpent = "0"
 	}
 
 	result, err := p.db.ExecContext(ctx, `

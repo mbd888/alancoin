@@ -70,6 +70,7 @@ type MultiStepStore interface {
 	Create(ctx context.Context, mse *MultiStepEscrow) error
 	Get(ctx context.Context, id string) (*MultiStepEscrow, error)
 	RecordStep(ctx context.Context, id string, step Step) error
+	DeleteStep(ctx context.Context, id string, stepIndex int) error
 	Abort(ctx context.Context, id string) error
 	Complete(ctx context.Context, id string) error
 }
@@ -243,11 +244,16 @@ func (s *MultiStepService) ConfirmStep(ctx context.Context, id string, stepIndex
 		return nil, fmt.Errorf("failed to record step: %w", err)
 	}
 
-	// Release this step's amount from buyer's escrow to seller
+	// Release this step's amount from buyer's escrow to seller.
+	// On failure, roll back the step record to avoid permanently locking funds.
 	stepRef := fmt.Sprintf("mse:%s:step:%d", id, stepIndex)
 	if err := s.ledger.ReleaseEscrow(ctx, mse.BuyerAddr, seller, amount, stepRef); err != nil {
-		s.logger.Error("CRITICAL: step recorded but fund release failed",
+		s.logger.Error("fund release failed, rolling back step record",
 			"escrow_id", id, "step", stepIndex, "seller", seller, "amount", amount, "error", err)
+		if rbErr := s.store.DeleteStep(ctx, id, stepIndex); rbErr != nil {
+			s.logger.Error("CRITICAL: step rollback also failed — manual intervention required",
+				"escrow_id", id, "step", stepIndex, "rollback_error", rbErr)
+		}
 		return nil, fmt.Errorf("failed to release step funds: %w", err)
 	}
 

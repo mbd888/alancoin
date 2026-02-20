@@ -90,6 +90,13 @@ func (rl *rateLimiter) sweep() int {
 	removed := 0
 	for k, entry := range rl.entries {
 		if now.Sub(entry.windowStart) > 2*rl.window {
+			if entry.limit != defaultMaxRequestsPerMinute {
+				// Custom limit — reset counter but keep the entry so the
+				// configured limit survives the sweep.
+				entry.count = 0
+				entry.windowStart = now
+				continue
+			}
 			delete(rl.entries, k)
 			removed++
 		}

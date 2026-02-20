@@ -88,6 +88,10 @@ type AgentSnapshot struct {
 	TotalSpent    *big.Int
 }
 
+// edgeEventRetention is the maximum age of events kept in FlowEdge.Events.
+// Matches the cycle detection window used by CircularFlowRule.
+const edgeEventRetention = 1 * time.Hour
+
 // FlowEdge tracks bilateral volume between two agents.
 type FlowEdge struct {
 	From      string
@@ -95,6 +99,18 @@ type FlowEdge struct {
 	Volume    *big.Int
 	LastEvent time.Time
 	Events    []SpendEvent
+}
+
+// evictOld removes events older than edgeEventRetention to prevent unbounded growth.
+func (e *FlowEdge) evictOld(now time.Time) {
+	cutoff := now.Add(-edgeEventRetention)
+	i := 0
+	for i < len(e.Events) && e.Events[i].At.Before(cutoff) {
+		i++
+	}
+	if i > 0 {
+		e.Events = append(e.Events[:0], e.Events[i:]...)
+	}
 }
 
 // SpendGraph is the in-memory behavioral graph. All access is serialized
@@ -149,6 +165,7 @@ func (g *SpendGraph) RecordEvent(agent, counterparty string, amount *big.Int, no
 		}
 		edge.Volume.Add(edge.Volume, amount)
 		edge.LastEvent = now
+		edge.evictOld(now)
 		edge.Events = append(edge.Events, SpendEvent{Amount: new(big.Int).Set(amount), At: now})
 	}
 }
@@ -179,6 +196,7 @@ func (g *SpendGraph) RecordEdgeOnly(agent, counterparty string, amount *big.Int,
 	}
 	edge.Volume.Add(edge.Volume, amount)
 	edge.LastEvent = now
+	edge.evictOld(now)
 	edge.Events = append(edge.Events, SpendEvent{Amount: new(big.Int).Set(amount), At: now})
 }
 

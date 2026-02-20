@@ -188,8 +188,17 @@ func (s *Service) RecordTick(ctx context.Context, streamID string, req TickReque
 		return nil, nil, ErrHoldExhausted
 	}
 
-	// Determine next sequence number
+	// Determine next sequence number.
+	// If caller supplies a seq, validate for idempotency: reject duplicates and out-of-order.
 	nextSeq := stream.TickCount + 1
+	if req.Seq > 0 {
+		if req.Seq <= stream.TickCount {
+			return nil, nil, ErrDuplicateTickSeq
+		}
+		if req.Seq != nextSeq {
+			return nil, nil, fmt.Errorf("%w: expected %d, got %d", ErrInvalidTickSeq, nextSeq, req.Seq)
+		}
+	}
 
 	now := time.Now()
 	tick := &Tick{
@@ -251,7 +260,7 @@ func (s *Service) Close(ctx context.Context, streamID, callerAddr, reason string
 		return nil, ErrAlreadyClosed
 	}
 
-	return s.settle(ctx, stream, StatusClosed, reason)
+	return s.settle(ctx, stream, StatusClosed, reason, unlock)
 }
 
 // AutoClose settles a stale stream (no tick within timeout).
@@ -270,7 +279,7 @@ func (s *Service) AutoClose(ctx context.Context, stream *Stream) error {
 		return ErrAlreadyClosed
 	}
 
-	_, err = s.settle(ctx, stream, StatusStaleClosed, "stale_timeout")
+	_, err = s.settle(ctx, stream, StatusStaleClosed, "stale_timeout", unlock)
 	return err
 }
 
@@ -282,7 +291,7 @@ func (s *Service) AutoClose(ctx context.Context, stream *Stream) error {
 //     is owed money (recoverable via reconciliation — no funds are stuck).
 //   - The reverse order (old code) would leave unused funds permanently stuck
 //     in pending if the process crashes after settle but before release.
-func (s *Service) settle(ctx context.Context, stream *Stream, status Status, reason string) (_ *Stream, retErr error) {
+func (s *Service) settle(ctx context.Context, stream *Stream, status Status, reason string, unlockFn func()) (_ *Stream, retErr error) {
 	ctx, span := traces.StartSpan(ctx, "streams.settle",
 		attribute.String("stream_id", stream.ID),
 		attribute.String("target_status", string(status)),
@@ -311,9 +320,16 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 	if spentBig.Sign() > 0 {
 		if err := s.ledger.SettleHold(ctx, stream.BuyerAddr, stream.SellerAddr, stream.SpentAmount, stream.ID); err != nil {
 			// CRITICAL: Unused funds released but spent portion not settled.
-			// The seller is owed money. Log for reconciliation.
+			// The seller is owed money. Mark as settlement_failed so the stale
+			// timer won't keep retrying (which would fail identically each time).
 			logging.L(ctx).Error("CRITICAL: stream release succeeded but settle failed — seller owed money",
 				"stream", stream.ID, "seller", stream.SellerAddr, "amount", stream.SpentAmount, "error", err)
+			stream.Status = StatusSettlementFailed
+			stream.UpdatedAt = time.Now()
+			if storeErr := s.store.Update(ctx, stream); storeErr != nil {
+				logging.L(ctx).Error("CRITICAL: could not mark stream as settlement_failed",
+					"stream", stream.ID, "error", storeErr)
+			}
 			return nil, fmt.Errorf("failed to settle hold (unused funds released, seller owed %s — requires reconciliation): %w",
 				stream.SpentAmount, err)
 		}
@@ -327,9 +343,12 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 
 	// CRITICAL: Funds already moved. Retry the status update because if this fails
 	// and the stream stays "open", the auto-close timer could settle again (double payment).
-	// Note: caller holds s.locks.Lock(stream.ID) via defer. We hold the lock across
-	// retries to prevent double-settlement races. Sleep duration is short (50-100ms).
-	updateErr := retry.Do(ctx, 3, 50*time.Millisecond, func() error {
+	// We use DoWithUnlock to release the shard lock during backoff sleep so other
+	// streams on the same shard are not blocked. The settlement itself (above) is
+	// already complete, so releasing the lock during retry is safe — any concurrent
+	// caller would fail at the ledger level (hold already released/settled).
+	relockFn := func() { _ = s.locks.Lock(stream.ID) }
+	updateErr := retry.DoWithUnlock(ctx, 3, 50*time.Millisecond, unlockFn, relockFn, func() error {
 		if err := s.store.Update(ctx, stream); err != nil {
 			logging.L(ctx).Warn("stream status update failed, retrying",
 				"stream", stream.ID, "error", err)

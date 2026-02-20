@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -109,6 +110,47 @@ func (p *MultiStepPostgresStore) RecordStep(ctx context.Context, id string, step
 	}
 	if rows == 0 {
 		return ErrMultiStepNotFound
+	}
+
+	return tx.Commit()
+}
+
+// DeleteStep reverses a RecordStep: removes the step row and decrements counters.
+// Used as a rollback when fund release fails after step recording.
+func (p *MultiStepPostgresStore) DeleteStep(ctx context.Context, id string, stepIndex int) error {
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Get step amount before deleting
+	var amount string
+	err = tx.QueryRowContext(ctx, `
+		SELECT amount FROM multistep_escrow_steps
+		WHERE escrow_id = $1 AND step_index = $2`,
+		id, stepIndex).Scan(&amount)
+	if err != nil {
+		return fmt.Errorf("failed to find step for rollback: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		DELETE FROM multistep_escrow_steps
+		WHERE escrow_id = $1 AND step_index = $2`,
+		id, stepIndex)
+	if err != nil {
+		return fmt.Errorf("failed to delete step: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE multistep_escrows
+		SET spent_amount = spent_amount - $1::NUMERIC(20,6),
+		    confirmed_steps = confirmed_steps - 1,
+		    updated_at = $2
+		WHERE id = $3 AND status = 'open'`,
+		amount, time.Now(), id)
+	if err != nil {
+		return fmt.Errorf("failed to update counters: %w", err)
 	}
 
 	return tx.Commit()

@@ -141,7 +141,9 @@ func (c *idempotencyCache) cancel(sessionID, idempotencyKey string) {
 	}
 }
 
-// sweep removes all expired entries. Called by the Timer goroutine.
+// sweep removes expired entries that have completed processing.
+// In-flight entries (done channel still open) are never swept, preventing
+// goroutine leaks from waiters blocking on a deleted entry's done channel.
 func (c *idempotencyCache) sweep() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -149,8 +151,14 @@ func (c *idempotencyCache) sweep() int {
 	removed := 0
 	for k, entry := range c.entries {
 		if now.After(entry.expiresAt) {
-			delete(c.entries, k)
-			removed++
+			// Only sweep if the done channel is closed (processing complete).
+			select {
+			case <-entry.done:
+				delete(c.entries, k)
+				removed++
+			default:
+				// Still in-flight — leave it for the goroutine to clean up.
+			}
 		}
 	}
 	return removed
@@ -616,6 +624,21 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 				unlock()
 				cancelIdem()
 				return nil, fmt.Errorf("%w: %v", ErrPolicyDenied, err)
+			}
+			// Hard denial: policy denied and not in shadow mode.
+			if policyDecision != nil && !policyDecision.Allowed && !policyDecision.Shadow {
+				s.logger.Info("policy denied proxy request",
+					"session", sessionID,
+					"agent", session.AgentAddr,
+					"policy", policyDecision.GetDeniedBy(),
+					"rule", policyDecision.GetDeniedRule(),
+					"reason", policyDecision.GetReason())
+				s.logRequestWithPolicy(ctx, sessionIDCopy, tenantIDCopy, req.ServiceType, "", "0", "policy_denied", 0, policyDecision.GetReason(), policyDecision)
+				gwProxyRequests.WithLabelValues("policy_denied").Inc()
+				gwPolicyDenials.WithLabelValues(policyDecision.GetDeniedRule()).Inc()
+				unlock()
+				cancelIdem()
+				return nil, fmt.Errorf("%w: %s", ErrPolicyDenied, policyDecision.GetReason())
 			}
 			// Shadow mode: policy would deny but enforcement is shadow-only.
 			// Log the shadow denial and let the request proceed.

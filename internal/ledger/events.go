@@ -86,6 +86,36 @@ func RebuildBalance(agentAddr string, events []*Event) *Balance {
 		case "escrow_refund":
 			escrowed.Sub(escrowed, amt)
 			available.Add(available, amt)
+		case "settle_hold_out":
+			// Buyer: hold is settled, pending → out.
+			pending.Sub(pending, amt)
+			totalOut.Add(totalOut, amt)
+		case "settle_hold_in":
+			// Seller: receives settled hold payment.
+			available.Add(available, amt)
+			totalIn.Add(totalIn, amt)
+		case "transfer_out":
+			available.Sub(available, amt)
+			totalOut.Add(totalOut, amt)
+		case "transfer_in":
+			available.Add(available, amt)
+			totalIn.Add(totalIn, amt)
+		case "fee_in":
+			// Platform receives fee.
+			available.Add(available, amt)
+			totalIn.Add(totalIn, amt)
+		case "escrow_partial_release":
+			// Buyer: escrowed portion released to seller.
+			escrowed.Sub(escrowed, amt)
+			totalOut.Add(totalOut, amt)
+		case "escrow_partial_refund":
+			// Buyer: escrowed portion refunded.
+			escrowed.Sub(escrowed, amt)
+			available.Add(available, amt)
+		case "escrow_partial_receive":
+			// Seller: receives partial escrow release.
+			available.Add(available, amt)
+			totalIn.Add(totalIn, amt)
 		}
 	}
 

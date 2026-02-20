@@ -20,6 +20,13 @@ func (s *ShardedMutex) Lock(key string) func() {
 	return mu.Unlock
 }
 
+// Unlock releases the mutex for the given key. Use this when you need a
+// separate unlock callable (e.g. for retry.DoWithUnlock) rather than the
+// closure returned by Lock.
+func (s *ShardedMutex) Unlock(key string) {
+	s.shard(key).Unlock()
+}
+
 func (s *ShardedMutex) shard(key string) *sync.Mutex {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(key))

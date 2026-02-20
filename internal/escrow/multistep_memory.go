@@ -86,6 +86,38 @@ func (m *MultiStepMemoryStore) RecordStep(ctx context.Context, id string, step S
 	return nil
 }
 
+// DeleteStep reverses a RecordStep: removes the step and decrements counters.
+func (m *MultiStepMemoryStore) DeleteStep(ctx context.Context, id string, stepIndex int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	mse, ok := m.escrows[id]
+	if !ok {
+		return ErrMultiStepNotFound
+	}
+
+	stepMap, ok := m.steps[id]
+	if !ok {
+		return ErrMultiStepNotFound
+	}
+
+	step, exists := stepMap[stepIndex]
+	if !exists {
+		return ErrStepOutOfRange
+	}
+
+	amountBig, _ := usdc.Parse(step.Amount)
+	spentBig, _ := usdc.Parse(mse.SpentAmount)
+	newSpent := new(big.Int).Sub(spentBig, amountBig)
+
+	mse.SpentAmount = usdc.Format(newSpent)
+	mse.ConfirmedSteps--
+	mse.UpdatedAt = time.Now()
+	delete(stepMap, stepIndex)
+
+	return nil
+}
+
 func (m *MultiStepMemoryStore) Abort(ctx context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

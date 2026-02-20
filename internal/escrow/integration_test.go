@@ -158,8 +158,13 @@ func TestIntegration_CreateDisputeRefund(t *testing.T) {
 		t.Errorf("After dispute: expected escrowed 8.000000, got %s", buyerBal.Escrowed)
 	}
 
-	// Resolve arbitration → refund to buyer
-	_, err = svc.ResolveArbitration(ctx, esc.ID, "", escrow.ResolveRequest{
+	// Assign arbitrator then resolve → refund to buyer
+	arbitrator := "0xarbitrator1"
+	_, err = svc.AssignArbitrator(ctx, esc.ID, buyer, arbitrator)
+	if err != nil {
+		t.Fatalf("AssignArbitrator failed: %v", err)
+	}
+	_, err = svc.ResolveArbitration(ctx, esc.ID, arbitrator, escrow.ResolveRequest{
 		Resolution: "refund",
 		Reason:     "seller failed to deliver",
 	})
@@ -249,9 +254,11 @@ func TestIntegration_MultipleEscrowsExhaustBudget(t *testing.T) {
 	}
 
 	// Confirm 1, dispute+resolve 2, confirm 3
+	arbitrator := "0xarbitrator1"
 	svc.Confirm(ctx, e1.ID, buyer)
 	svc.Dispute(ctx, e2.ID, buyer, "bad")
-	svc.ResolveArbitration(ctx, e2.ID, "", escrow.ResolveRequest{Resolution: "refund"})
+	svc.AssignArbitrator(ctx, e2.ID, buyer, arbitrator)
+	svc.ResolveArbitration(ctx, e2.ID, arbitrator, escrow.ResolveRequest{Resolution: "refund"})
 	svc.Confirm(ctx, e3.ID, buyer)
 
 	// Buyer: available=4 (refunded from e2), escrowed=0, totalOut=6
@@ -495,7 +502,12 @@ func TestIntegration_HighVolumeStressTest(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Dispute %d failed: %v", i, err)
 			}
-			_, err = svc.ResolveArbitration(ctx, esc.ID, "", escrow.ResolveRequest{Resolution: "refund"})
+			arbitrator := "0xarbitrator1"
+			_, err = svc.AssignArbitrator(ctx, esc.ID, buyer, arbitrator)
+			if err != nil {
+				t.Fatalf("AssignArbitrator %d failed: %v", i, err)
+			}
+			_, err = svc.ResolveArbitration(ctx, esc.ID, arbitrator, escrow.ResolveRequest{Resolution: "refund"})
 			if err != nil {
 				t.Fatalf("ResolveArbitration %d failed: %v", i, err)
 			}

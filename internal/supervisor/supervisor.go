@@ -132,11 +132,13 @@ func (s *Supervisor) RefreshBaselines(updated map[string]*AgentBaseline) {
 // -------------------------------------------------------------------------
 
 func (s *Supervisor) Hold(ctx context.Context, agentAddr, amount, reference string) error {
-	if err := s.evaluate(ctx, agentAddr, "", amount, "hold"); err != nil {
+	// Compute tier once to avoid double reputation RPC.
+	tier := s.getTier(ctx, agentAddr)
+	if err := s.evaluateWithTier(ctx, agentAddr, "", amount, "hold", tier); err != nil {
 		return err
 	}
 	// Atomically reserve a hold slot before calling inner to prevent TOCTOU.
-	limit := s.concurrencyLimit(ctx, agentAddr)
+	limit := concurrencyLimitForTier(tier)
 	if !s.graph.TryAcquireHold(agentAddr, limit) {
 		return fmt.Errorf("%w: at concurrency limit %d for holds/escrows", ErrDenied, limit)
 	}
@@ -151,11 +153,13 @@ func (s *Supervisor) Hold(ctx context.Context, agentAddr, amount, reference stri
 }
 
 func (s *Supervisor) EscrowLock(ctx context.Context, agentAddr, amount, reference string) error {
-	if err := s.evaluate(ctx, agentAddr, "", amount, "escrow_lock"); err != nil {
+	// Compute tier once to avoid double reputation RPC.
+	tier := s.getTier(ctx, agentAddr)
+	if err := s.evaluateWithTier(ctx, agentAddr, "", amount, "escrow_lock", tier); err != nil {
 		return err
 	}
 	// Atomically reserve an escrow slot before calling inner to prevent TOCTOU.
-	limit := s.concurrencyLimit(ctx, agentAddr)
+	limit := concurrencyLimitForTier(tier)
 	if !s.graph.TryAcquireEscrow(agentAddr, limit) {
 		return fmt.Errorf("%w: at concurrency limit %d for holds/escrows", ErrDenied, limit)
 	}
@@ -222,6 +226,9 @@ func (s *Supervisor) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amou
 	s.recordEdge(buyerAddr, sellerAddr, amount)
 	// Persist settled amount for baseline learning (money actually moved).
 	s.persistSpend(buyerAddr, sellerAddr, amount)
+	if !s.graph.ReleaseActiveHold(buyerAddr) {
+		s.logger.Error("settle hold underflow", "agent", buyerAddr)
+	}
 	return nil
 }
 
@@ -239,6 +246,9 @@ func (s *Supervisor) SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAdd
 		s.persistSpend(buyerAddr, sellerAddr, usdc.Format(totalBig))
 	} else {
 		s.persistSpend(buyerAddr, sellerAddr, sellerAmount)
+	}
+	if !s.graph.ReleaseActiveHold(buyerAddr) {
+		s.logger.Error("settle hold with fee underflow", "agent", buyerAddr)
 	}
 	return nil
 }
@@ -327,12 +337,14 @@ func (s *Supervisor) GetHistory(ctx context.Context, agentAddr string, limit int
 
 // evaluate checks rules and returns ErrDenied if blocked.
 func (s *Supervisor) evaluate(ctx context.Context, agentAddr, counterparty, amount, opType string) error {
+	return s.evaluateWithTier(ctx, agentAddr, counterparty, amount, opType, s.getTier(ctx, agentAddr))
+}
+
+func (s *Supervisor) evaluateWithTier(ctx context.Context, agentAddr, counterparty, amount, opType, tier string) error {
 	amountBig, ok := usdc.Parse(amount)
 	if !ok {
 		return fmt.Errorf("supervisor: invalid amount %q", amount)
 	}
-
-	tier := s.getTier(ctx, agentAddr)
 
 	ec := &EvalContext{
 		AgentAddr:    agentAddr,
@@ -460,9 +472,8 @@ func (s *Supervisor) persistSpend(agent, counterparty, amount string) {
 	s.eventWriter.Send(agent, counterparty, amountBig, time.Now())
 }
 
-// concurrencyLimit resolves the max simultaneous holds+escrows for an agent's tier.
-func (s *Supervisor) concurrencyLimit(ctx context.Context, agentAddr string) int {
-	tier := s.getTier(ctx, agentAddr)
+// concurrencyLimitForTier looks up the concurrency limit for a pre-computed tier.
+func concurrencyLimitForTier(tier string) int {
 	limit, ok := concurrencyLimitByTier[tier]
 	if !ok {
 		limit = concurrencyLimitByTier["established"]

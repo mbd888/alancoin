@@ -88,6 +88,7 @@ type Hub struct {
 	logger     *slog.Logger
 	done       chan struct{} // closed when Run exits; prevents upgrade race
 	maxClients int
+	connSem    chan struct{} // buffered semaphore; capacity = maxClients
 
 	// Stats
 	totalEvents  atomic.Int64
@@ -105,6 +106,7 @@ func NewHub(logger *slog.Logger) *Hub {
 		logger:     logger,
 		done:       make(chan struct{}),
 		maxClients: MaxClients,
+		connSem:    make(chan struct{}, MaxClients),
 	}
 }
 
@@ -144,6 +146,10 @@ func (h *Hub) Run(ctx context.Context) {
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
+				select {
+				case <-h.connSem: // release semaphore slot
+				default:
+				}
 			}
 			n := len(h.clients)
 			h.mu.Unlock()
@@ -287,17 +293,19 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	default:
 	}
 
-	// Enforce connection limit
-	h.mu.RLock()
-	n := len(h.clients)
-	h.mu.RUnlock()
-	if n >= h.maxClients {
+	// Enforce connection limit: reserve a slot via semaphore before upgrading.
+	// This is atomic — no TOCTOU between the check and the actual upgrade.
+	select {
+	case h.connSem <- struct{}{}:
+		// slot reserved
+	default:
 		http.Error(w, "too many connections", http.StatusServiceUnavailable)
 		return
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		<-h.connSem // release reserved slot
 		h.logger.Error("websocket upgrade failed", "error", err)
 		return
 	}

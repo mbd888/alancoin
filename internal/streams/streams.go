@@ -128,6 +128,7 @@ type OpenRequest struct {
 
 // TickRequest contains the parameters for recording a tick.
 type TickRequest struct {
+	Seq      int    `json:"seq"`    // Caller-supplied sequence number for idempotency (0 = auto-increment)
 	Amount   string `json:"amount"` // Amount for this tick (or omit for pricePerTick)
 	Metadata string `json:"metadata"`
 }

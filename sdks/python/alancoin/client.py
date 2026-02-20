@@ -1374,9 +1374,9 @@ class Alancoin:
             print(f"Spent so far: ${result['stream']['spentAmount']}")
         """
         payload = {}
-        if amount:
+        if amount is not None:
             payload["amount"] = amount
-        if metadata:
+        if metadata is not None:
             payload["metadata"] = metadata
         return self._request("POST", f"/v1/streams/{stream_id}/tick", json=payload)
 

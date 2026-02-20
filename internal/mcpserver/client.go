@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/security"
 )
 
 // Config holds the configuration for connecting to the Alancoin platform.
@@ -21,8 +23,9 @@ type Config struct {
 
 // AlancoinClient is a pure HTTP client for the Alancoin platform API.
 type AlancoinClient struct {
-	cfg        Config
-	httpClient *http.Client
+	cfg           Config
+	httpClient    *http.Client
+	allowLoopback bool // test-only: skip SSRF loopback check for httptest servers
 }
 
 // NewAlancoinClient creates a new client for the Alancoin platform.
@@ -164,6 +167,11 @@ func (c *AlancoinClient) DisputeEscrow(ctx context.Context, escrowID, reason str
 
 // CallEndpoint makes a direct HTTP POST to a service endpoint with payment headers.
 func (c *AlancoinClient) CallEndpoint(ctx context.Context, endpoint string, params map[string]any, escrowID, amount string) (json.RawMessage, error) {
+	if !c.allowLoopback {
+		if err := security.ValidateEndpointURL(endpoint); err != nil {
+			return nil, fmt.Errorf("invalid service endpoint URL: %w", err)
+		}
+	}
 	parsedURL, err := url.Parse(endpoint)
 	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
 		return nil, fmt.Errorf("invalid service endpoint URL: %s", endpoint)

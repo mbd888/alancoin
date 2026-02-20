@@ -217,12 +217,12 @@ func (r *CounterpartyConcentrationRule) Evaluate(_ context.Context, graph *Spend
 	scaled := new(big.Int).Mul(edge.Volume, big.NewInt(100))
 	pct := new(big.Int).Div(scaled, snap.TotalSpent)
 
-	if pct.Int64() > 80 {
+	if pct.Cmp(big.NewInt(80)) > 0 {
 		return &Verdict{
 			Action: Flag,
 			Rule:   r.Name(),
-			Reason: fmt.Sprintf("%d%% of volume concentrated on counterparty %s",
-				pct.Int64(), ec.Counterparty),
+			Reason: fmt.Sprintf("%s%% of volume concentrated on counterparty %s",
+				pct.String(), ec.Counterparty),
 		}
 	}
 	return nil

@@ -843,8 +843,11 @@ func (s *Service) ResolveArbitration(ctx context.Context, id, callerAddr string,
 		return nil, ErrInvalidStatus
 	}
 
-	// Only assigned arbitrator (or anyone if no arbitrator yet)
-	if escrow.ArbitratorAddr != "" && strings.ToLower(callerAddr) != escrow.ArbitratorAddr {
+	// Require an assigned arbitrator to resolve disputes.
+	if escrow.ArbitratorAddr == "" {
+		return nil, fmt.Errorf("%w: no arbitrator assigned", ErrUnauthorized)
+	}
+	if strings.ToLower(callerAddr) != escrow.ArbitratorAddr {
 		return nil, ErrUnauthorized
 	}
 
