@@ -137,7 +137,8 @@ func truncateAll(ctx context.Context, db *sql.DB) {
 
 	if len(tables) > 0 {
 		// TRUNCATE all at once with CASCADE to handle FK dependencies.
-		stmt := "TRUNCATE " + strings.Join(tables, ", ") + " CASCADE"
-		_, _ = db.ExecContext(ctx, stmt) // #nosec G104 -- best-effort cleanup in test teardown
+		// Table names come from pg_tables system catalog, not user input.
+		stmt := "TRUNCATE " + strings.Join(tables, ", ") + " CASCADE" // #nosec G202 -- table names from pg_tables, not user input
+		_, _ = db.ExecContext(ctx, stmt)                              // #nosec G104 -- best-effort cleanup in test teardown
 	}
 }
