@@ -28,6 +28,7 @@ var (
 	ErrInvalidAmount      = errors.New("gateway: invalid amount")
 	ErrUnauthorized       = errors.New("gateway: not authorized for this session")
 	ErrPolicyDenied       = errors.New("gateway: policy denied request")
+	ErrPolicyUnavailable  = errors.New("gateway: policy evaluation temporarily unavailable")
 	ErrRateLimited        = errors.New("gateway: rate limit exceeded")
 	ErrTenantSuspended    = errors.New("gateway: tenant is suspended or cancelled")
 )

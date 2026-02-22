@@ -391,6 +391,9 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr, tenantID string,
 	if s.policyEvaluator != nil {
 		decision, err := s.policyEvaluator.EvaluateProxy(ctx, session, "")
 		if err != nil {
+			if decision == nil {
+				return nil, fmt.Errorf("%w: %v", ErrPolicyUnavailable, err)
+			}
 			return nil, fmt.Errorf("%w: %v", ErrPolicyDenied, err)
 		}
 		if decision != nil && !decision.Allowed {
@@ -620,6 +623,9 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 					s.logRequest(ctx, sessionIDCopy, tenantIDCopy, req.ServiceType, "", "0", "policy_error", 0, err.Error())
 					gwProxyRequests.WithLabelValues("policy_error").Inc()
 					gwPolicyDenials.WithLabelValues("evaluation_error").Inc()
+					unlock()
+					cancelIdem()
+					return nil, fmt.Errorf("%w: %v", ErrPolicyUnavailable, err)
 				}
 				unlock()
 				cancelIdem()

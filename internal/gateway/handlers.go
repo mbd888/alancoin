@@ -152,6 +152,10 @@ func (h *Handler) CreateSession(c *gin.Context) {
 			status = http.StatusBadRequest
 			code = "invalid_amount"
 			msg = err.Error()
+		case errors.Is(err, ErrPolicyUnavailable):
+			status = http.StatusServiceUnavailable
+			code = "policy_unavailable"
+			msg = err.Error()
 		case errors.Is(err, ErrPolicyDenied):
 			status = http.StatusForbidden
 			code = "policy_denied"
@@ -298,6 +302,9 @@ func (h *Handler) Proxy(c *gin.Context) {
 		case errors.Is(err, ErrNoServiceAvailable):
 			status = http.StatusNotFound
 			code = "no_service"
+		case errors.Is(err, ErrPolicyUnavailable):
+			status = http.StatusServiceUnavailable
+			code = "policy_unavailable"
 		case errors.Is(err, ErrPolicyDenied):
 			status = http.StatusForbidden
 			code = "policy_denied"
@@ -352,6 +359,9 @@ func (h *Handler) SingleCall(c *gin.Context) {
 		case errors.Is(err, ErrNoServiceAvailable):
 			status = http.StatusNotFound
 			code = "no_service"
+		case errors.Is(err, ErrPolicyUnavailable):
+			status = http.StatusServiceUnavailable
+			code = "policy_unavailable"
 		case errors.Is(err, ErrPolicyDenied):
 			status = http.StatusForbidden
 			code = "policy_denied"

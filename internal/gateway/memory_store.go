@@ -2,11 +2,13 @@ package gateway
 
 import (
 	"context"
-	"fmt"
+	"math/big"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/usdc"
 )
 
 // MemoryStore is an in-memory gateway store for demo/development mode.
@@ -293,19 +295,17 @@ func (m *MemoryStore) GetPolicyDenials(_ context.Context, tenantID string, limit
 	return result, nil
 }
 
-// addDecimalStrings adds two USDC decimal strings for in-memory billing aggregation.
+// addDecimalStrings adds two USDC decimal strings using exact big.Int arithmetic.
 func addDecimalStrings(a, b string) string {
-	fa, fb := parseDecimal(a), parseDecimal(b)
-	return fmt.Sprintf("%.6f", fa+fb)
-}
-
-func parseDecimal(s string) float64 {
-	if s == "" {
-		return 0
+	aBig, ok := usdc.Parse(a)
+	if !ok {
+		aBig = new(big.Int)
 	}
-	var f float64
-	_, _ = fmt.Sscanf(s, "%f", &f)
-	return f
+	bBig, ok := usdc.Parse(b)
+	if !ok {
+		bBig = new(big.Int)
+	}
+	return usdc.Format(new(big.Int).Add(aBig, bBig))
 }
 
 // Compile-time assertion.

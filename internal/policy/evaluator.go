@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mbd888/alancoin/internal/gateway"
@@ -18,14 +19,86 @@ import (
 // false positive; too long and it becomes a bypass window.
 const spendVelocityGracePeriod = 60 * time.Second
 
-// Evaluator implements gateway.PolicyEvaluator using tenant-scoped spend policies.
-type Evaluator struct {
-	store Store
+// DefaultPolicyCacheTTL is how long tenant policies are cached before re-fetching.
+const DefaultPolicyCacheTTL = 30 * time.Second
+
+// policyCacheEntry holds cached policies for a tenant.
+type policyCacheEntry struct {
+	policies  []*SpendPolicy
+	fetchedAt time.Time
 }
 
-// NewEvaluator creates a new policy evaluator.
+// Evaluator implements gateway.PolicyEvaluator using tenant-scoped spend policies.
+type Evaluator struct {
+	store    Store
+	cacheTTL time.Duration
+
+	mu    sync.RWMutex
+	cache map[string]*policyCacheEntry
+}
+
+// NewEvaluator creates a new policy evaluator with default cache TTL.
 func NewEvaluator(store Store) *Evaluator {
-	return &Evaluator{store: store}
+	return &Evaluator{
+		store:    store,
+		cacheTTL: DefaultPolicyCacheTTL,
+		cache:    make(map[string]*policyCacheEntry),
+	}
+}
+
+// WithCacheTTL overrides the default policy cache TTL.
+func (e *Evaluator) WithCacheTTL(ttl time.Duration) *Evaluator {
+	e.cacheTTL = ttl
+	return e
+}
+
+// InvalidateCache removes cached policies for a tenant. Call after policy CRUD operations.
+func (e *Evaluator) InvalidateCache(tenantID string) {
+	e.mu.Lock()
+	delete(e.cache, tenantID)
+	e.mu.Unlock()
+}
+
+// SweepCache removes expired entries. Returns the number removed.
+func (e *Evaluator) SweepCache() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := time.Now()
+	removed := 0
+	for k, entry := range e.cache {
+		if now.Sub(entry.fetchedAt) > e.cacheTTL {
+			delete(e.cache, k)
+			removed++
+		}
+	}
+	return removed
+}
+
+// cachedList returns policies from cache if fresh, otherwise fetches from store.
+func (e *Evaluator) cachedList(ctx context.Context, tenantID string) ([]*SpendPolicy, error) {
+	now := time.Now()
+
+	e.mu.RLock()
+	entry, ok := e.cache[tenantID]
+	if ok && now.Sub(entry.fetchedAt) < e.cacheTTL {
+		e.mu.RUnlock()
+		return entry.policies, nil
+	}
+	e.mu.RUnlock()
+
+	policies, err := e.store.List(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	e.mu.Lock()
+	e.cache[tenantID] = &policyCacheEntry{
+		policies:  policies,
+		fetchedAt: now,
+	}
+	e.mu.Unlock()
+
+	return policies, nil
 }
 
 // EvaluateProxy checks whether a proxy request should be allowed.
@@ -37,7 +110,7 @@ func (e *Evaluator) EvaluateProxy(ctx context.Context, session *gateway.Session,
 		return &gateway.PolicyDecision{Allowed: true, LatencyUs: time.Since(start).Microseconds()}, nil
 	}
 
-	policies, err := e.store.List(ctx, session.TenantID)
+	policies, err := e.cachedList(ctx, session.TenantID)
 	if err != nil {
 		return nil, fmt.Errorf("policy check failed: %w", err) // fail closed
 	}

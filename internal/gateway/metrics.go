@@ -1,6 +1,10 @@
 package gateway
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"fmt"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 var (
 	gwSessionsCreated = prometheus.NewCounter(prometheus.CounterOpts{
@@ -89,4 +93,15 @@ func init() {
 		gwPolicyShadowDenials,
 		gwSettlementRetries,
 	)
+}
+
+// parseDecimal converts a USDC decimal string to float64 for Prometheus metrics.
+// This is intentionally float64 — rounding is acceptable for observability histograms.
+func parseDecimal(s string) float64 {
+	if s == "" {
+		return 0
+	}
+	var f float64
+	_, _ = fmt.Sscanf(s, "%f", &f)
+	return f
 }

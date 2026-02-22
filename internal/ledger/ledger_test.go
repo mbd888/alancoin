@@ -1100,3 +1100,378 @@ func TestParseUSDC(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SettleHoldWithFee tests
+// ---------------------------------------------------------------------------
+
+func TestSettleHoldWithFee(t *testing.T) {
+	tests := []struct {
+		name                string
+		depositAmount       string
+		holdAmount          string
+		sellerAmount        string
+		feeAmount           string
+		wantErr             error
+		wantBuyerPending    string
+		wantBuyerTotalOut   string
+		wantSellerAvailable string
+		wantPlatformAvail   string
+	}{
+		{
+			name:                "basic_fee_split",
+			depositAmount:       "10.00",
+			holdAmount:          "5.00",
+			sellerAmount:        "4.50",
+			feeAmount:           "0.50",
+			wantErr:             nil,
+			wantBuyerPending:    "0.000000",
+			wantBuyerTotalOut:   "5.000000",
+			wantSellerAvailable: "4.500000",
+			wantPlatformAvail:   "0.500000",
+		},
+		{
+			name:                "zero_fee",
+			depositAmount:       "10.00",
+			holdAmount:          "5.00",
+			sellerAmount:        "5.00",
+			feeAmount:           "0.00",
+			wantErr:             nil,
+			wantBuyerPending:    "0.000000",
+			wantBuyerTotalOut:   "5.000000",
+			wantSellerAvailable: "5.000000",
+			wantPlatformAvail:   "0.000000",
+		},
+		{
+			name:          "insufficient_pending",
+			depositAmount: "10.00",
+			holdAmount:    "3.00",
+			sellerAmount:  "4.00",
+			feeAmount:     "1.00",
+			wantErr:       ErrInsufficientBalance,
+		},
+		{
+			name:                "fee_larger_than_price",
+			depositAmount:       "10.00",
+			holdAmount:          "5.00",
+			sellerAmount:        "1.00",
+			feeAmount:           "4.00",
+			wantErr:             nil,
+			wantBuyerPending:    "0.000000",
+			wantBuyerTotalOut:   "5.000000",
+			wantSellerAvailable: "1.000000",
+			wantPlatformAvail:   "4.000000",
+		},
+		{
+			name:                "first_settlement",
+			depositAmount:       "20.00",
+			holdAmount:          "6.00",
+			sellerAmount:        "5.70",
+			feeAmount:           "0.30",
+			wantErr:             nil,
+			wantBuyerPending:    "0.000000",
+			wantBuyerTotalOut:   "6.000000",
+			wantSellerAvailable: "5.700000",
+			wantPlatformAvail:   "0.300000",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := NewMemoryStore()
+			l := New(store)
+			ctx := context.Background()
+
+			buyer := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			seller := "0xssssssssssssssssssssssssssssssssssssssss"
+			platform := "0xpppppppppppppppppppppppppppppppppppppppp"
+
+			// Setup: deposit to buyer
+			err := l.Deposit(ctx, buyer, tt.depositAmount, "0xtx_buyer")
+			if err != nil {
+				t.Fatalf("Deposit failed: %v", err)
+			}
+
+			// Hold funds
+			err = l.Hold(ctx, buyer, tt.holdAmount, "hold_ref1")
+			if err != nil {
+				t.Fatalf("Hold failed: %v", err)
+			}
+
+			// Settle hold with fee
+			err = l.SettleHoldWithFee(ctx, buyer, seller, tt.sellerAmount, platform, tt.feeAmount, "hold_ref1")
+			if tt.wantErr != nil {
+				if err == nil {
+					t.Fatalf("Expected error %v, got nil", tt.wantErr)
+				}
+				if err != tt.wantErr {
+					t.Errorf("Expected error %v, got %v", tt.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SettleHoldWithFee failed: %v", err)
+			}
+
+			// Verify buyer balance
+			buyerBal, _ := l.GetBalance(ctx, buyer)
+			if buyerBal.Pending != tt.wantBuyerPending {
+				t.Errorf("Buyer pending: expected %s, got %s", tt.wantBuyerPending, buyerBal.Pending)
+			}
+			if buyerBal.TotalOut != tt.wantBuyerTotalOut {
+				t.Errorf("Buyer totalOut: expected %s, got %s", tt.wantBuyerTotalOut, buyerBal.TotalOut)
+			}
+
+			// Verify seller balance
+			sellerBal, _ := l.GetBalance(ctx, seller)
+			if sellerBal.Available != tt.wantSellerAvailable {
+				t.Errorf("Seller available: expected %s, got %s", tt.wantSellerAvailable, sellerBal.Available)
+			}
+
+			// Verify platform balance
+			platformBal, _ := l.GetBalance(ctx, platform)
+			// Handle both "0" and "0.000000" format
+			platformAvail := platformBal.Available
+			if platformAvail == "0" && tt.wantPlatformAvail == "0.000000" {
+				platformAvail = "0.000000"
+			}
+			if platformAvail != tt.wantPlatformAvail {
+				t.Errorf("Platform available: expected %s, got %s", tt.wantPlatformAvail, platformBal.Available)
+			}
+		})
+	}
+}
+
+func TestSettleHoldWithFee_MultipleSettlements(t *testing.T) {
+	// Verify that multiple sequential settlements accumulate correctly
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	buyer := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	seller := "0xssssssssssssssssssssssssssssssssssssssss"
+	platform := "0xpppppppppppppppppppppppppppppppppppppppp"
+
+	// Setup: deposit $20 to buyer
+	l.Deposit(ctx, buyer, "20.00", "0xtx1")
+
+	// First settlement: hold $6, settle with $5.70 to seller, $0.30 fee
+	l.Hold(ctx, buyer, "6.00", "hold1")
+	err := l.SettleHoldWithFee(ctx, buyer, seller, "5.70", platform, "0.30", "hold1")
+	if err != nil {
+		t.Fatalf("First settlement failed: %v", err)
+	}
+
+	// Second settlement: hold $4, settle with $3.60 to seller, $0.40 fee
+	l.Hold(ctx, buyer, "4.00", "hold2")
+	err = l.SettleHoldWithFee(ctx, buyer, seller, "3.60", platform, "0.40", "hold2")
+	if err != nil {
+		t.Fatalf("Second settlement failed: %v", err)
+	}
+
+	// Verify final balances
+	buyerBal, _ := l.GetBalance(ctx, buyer)
+	if buyerBal.Available != "10.000000" {
+		t.Errorf("Buyer available: expected 10.000000, got %s", buyerBal.Available)
+	}
+	if buyerBal.Pending != "0.000000" {
+		t.Errorf("Buyer pending: expected 0.000000, got %s", buyerBal.Pending)
+	}
+	if buyerBal.TotalOut != "10.000000" {
+		t.Errorf("Buyer totalOut: expected 10.000000, got %s", buyerBal.TotalOut)
+	}
+
+	// Seller should have received cumulative $5.70 + $3.60 = $9.30
+	sellerBal, _ := l.GetBalance(ctx, seller)
+	if sellerBal.Available != "9.300000" {
+		t.Errorf("Seller available: expected 9.300000, got %s", sellerBal.Available)
+	}
+	if sellerBal.TotalIn != "9.300000" {
+		t.Errorf("Seller totalIn: expected 9.300000, got %s", sellerBal.TotalIn)
+	}
+
+	// Platform should have received cumulative $0.30 + $0.40 = $0.70
+	platformBal, _ := l.GetBalance(ctx, platform)
+	if platformBal.Available != "0.700000" {
+		t.Errorf("Platform available: expected 0.700000, got %s", platformBal.Available)
+	}
+	if platformBal.TotalIn != "0.700000" {
+		t.Errorf("Platform totalIn: expected 0.700000, got %s", platformBal.TotalIn)
+	}
+
+	// Verify fund conservation
+	assertFundConservation(t, buyerBal, "buyer after two settlements")
+	assertFundConservation(t, sellerBal, "seller after two settlements")
+	assertFundConservation(t, platformBal, "platform after two settlements")
+}
+
+func TestSettleHoldWithFee_FundConservation(t *testing.T) {
+	// Verify no money is created or destroyed in the fee settlement
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	buyer := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	seller := "0xssssssssssssssssssssssssssssssssssssssss"
+	platform := "0xpppppppppppppppppppppppppppppppppppppppp"
+
+	l.Deposit(ctx, buyer, "100.00", "0xtx1")
+	l.Hold(ctx, buyer, "15.00", "hold1")
+
+	// Before settlement: get all balances
+	buyerBefore, _ := l.GetBalance(ctx, buyer)
+	sellerBefore, _ := l.GetBalance(ctx, seller)
+	platformBefore, _ := l.GetBalance(ctx, platform)
+
+	totalAvailBefore, _ := usdc.Parse(buyerBefore.Available)
+	totalAvailBefore.Add(totalAvailBefore, mustParse(sellerBefore.Available))
+	totalAvailBefore.Add(totalAvailBefore, mustParse(platformBefore.Available))
+
+	totalPendingBefore, _ := usdc.Parse(buyerBefore.Pending)
+	totalPendingBefore.Add(totalPendingBefore, mustParse(sellerBefore.Pending))
+	totalPendingBefore.Add(totalPendingBefore, mustParse(platformBefore.Pending))
+
+	// Settle: $14.25 to seller, $0.75 fee
+	err := l.SettleHoldWithFee(ctx, buyer, seller, "14.25", platform, "0.75", "hold1")
+	if err != nil {
+		t.Fatalf("SettleHoldWithFee failed: %v", err)
+	}
+
+	// After settlement: get all balances
+	buyerAfter, _ := l.GetBalance(ctx, buyer)
+	sellerAfter, _ := l.GetBalance(ctx, seller)
+	platformAfter, _ := l.GetBalance(ctx, platform)
+
+	totalAvailAfter, _ := usdc.Parse(buyerAfter.Available)
+	totalAvailAfter.Add(totalAvailAfter, mustParse(sellerAfter.Available))
+	totalAvailAfter.Add(totalAvailAfter, mustParse(platformAfter.Available))
+
+	totalPendingAfter, _ := usdc.Parse(buyerAfter.Pending)
+	totalPendingAfter.Add(totalPendingAfter, mustParse(sellerAfter.Pending))
+	totalPendingAfter.Add(totalPendingAfter, mustParse(platformAfter.Pending))
+
+	// Pending should decrease by $15.00, available should increase by $15.00
+	pendingDelta := new(big.Int).Sub(totalPendingBefore, totalPendingAfter)
+	availDelta := new(big.Int).Sub(totalAvailAfter, totalAvailBefore)
+
+	if pendingDelta.Cmp(mustParse("15.00")) != 0 {
+		t.Errorf("Expected pending to decrease by 15.00, got %s", usdc.Format(pendingDelta))
+	}
+	if availDelta.Cmp(mustParse("15.00")) != 0 {
+		t.Errorf("Expected available to increase by 15.00, got %s", usdc.Format(availDelta))
+	}
+
+	// Verify individual fund conservation
+	assertFundConservation(t, buyerAfter, "buyer")
+	assertFundConservation(t, sellerAfter, "seller")
+	assertFundConservation(t, platformAfter, "platform")
+}
+
+func TestSettleHoldWithFee_NonexistentBuyer(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	err := l.SettleHoldWithFee(ctx, "0xghost", "0xseller", "1.00", "0xplatform", "0.10", "ref1")
+	if err == nil {
+		t.Error("Expected error when settling for nonexistent buyer")
+	}
+}
+
+func TestSettleHoldWithFee_NewSellerAndPlatform(t *testing.T) {
+	// Verify that seller and platform balances are created if they don't exist
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	buyer := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	seller := "0xnew_seller_never_seen_before_1234567890"
+	platform := "0xnew_platform_never_seen_before_1234567"
+
+	l.Deposit(ctx, buyer, "10.00", "0xtx1")
+	l.Hold(ctx, buyer, "5.00", "hold1")
+
+	err := l.SettleHoldWithFee(ctx, buyer, seller, "4.75", platform, "0.25", "hold1")
+	if err != nil {
+		t.Fatalf("SettleHoldWithFee failed: %v", err)
+	}
+
+	// Seller should have $4.75 even though they never existed before
+	sellerBal, _ := l.GetBalance(ctx, seller)
+	if sellerBal.Available != "4.750000" {
+		t.Errorf("New seller available: expected 4.750000, got %s", sellerBal.Available)
+	}
+
+	// Platform should have $0.25
+	platformBal, _ := l.GetBalance(ctx, platform)
+	if platformBal.Available != "0.250000" {
+		t.Errorf("New platform available: expected 0.250000, got %s", platformBal.Available)
+	}
+}
+
+func TestSettleHoldWithFee_HistoryEntries(t *testing.T) {
+	// Verify correct ledger entries are created
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	buyer := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	seller := "0xssssssssssssssssssssssssssssssssssssssss"
+	platform := "0xpppppppppppppppppppppppppppppppppppppppp"
+
+	l.Deposit(ctx, buyer, "10.00", "0xtx1")
+	l.Hold(ctx, buyer, "5.00", "hold_ref_fee")
+	l.SettleHoldWithFee(ctx, buyer, seller, "4.50", platform, "0.50", "hold_ref_fee")
+
+	// Check buyer entries
+	buyerEntries, _ := l.GetHistory(ctx, buyer, 100)
+	// Expect 3 entries: deposit, hold, spend (most recent first)
+	if len(buyerEntries) < 3 {
+		t.Fatalf("Expected at least 3 buyer entries, got %d", len(buyerEntries))
+	}
+	if buyerEntries[0].Type != "spend" {
+		t.Errorf("Expected most recent entry type 'spend', got %s", buyerEntries[0].Type)
+	}
+	if buyerEntries[0].Amount != "5.000000" {
+		t.Errorf("Expected spend amount 5.000000 (total), got %s", buyerEntries[0].Amount)
+	}
+
+	// Check seller entries
+	sellerEntries, _ := l.GetHistory(ctx, seller, 100)
+	if len(sellerEntries) != 1 {
+		t.Fatalf("Expected 1 seller entry, got %d", len(sellerEntries))
+	}
+	if sellerEntries[0].Type != "deposit" {
+		t.Errorf("Expected seller entry type 'deposit', got %s", sellerEntries[0].Type)
+	}
+	// Amount may be stored in original format ("4.50") or normalized ("4.500000")
+	sellerAmt, _ := usdc.Parse(sellerEntries[0].Amount)
+	expectedSellerAmt, _ := usdc.Parse("4.50")
+	if sellerAmt.Cmp(expectedSellerAmt) != 0 {
+		t.Errorf("Expected seller deposit amount 4.50, got %s", sellerEntries[0].Amount)
+	}
+
+	// Check platform entries
+	platformEntries, _ := l.GetHistory(ctx, platform, 100)
+	if len(platformEntries) != 1 {
+		t.Fatalf("Expected 1 platform entry, got %d", len(platformEntries))
+	}
+	if platformEntries[0].Type != "deposit" {
+		t.Errorf("Expected platform entry type 'deposit', got %s", platformEntries[0].Type)
+	}
+	// Amount may be stored in original format ("0.50") or normalized ("0.500000")
+	platformAmt, _ := usdc.Parse(platformEntries[0].Amount)
+	expectedPlatformAmt, _ := usdc.Parse("0.50")
+	if platformAmt.Cmp(expectedPlatformAmt) != 0 {
+		t.Errorf("Expected platform deposit amount 0.50, got %s", platformEntries[0].Amount)
+	}
+}
+
+// Helper function for parsing USDC amounts in tests
+func mustParse(s string) *big.Int {
+	val, ok := usdc.Parse(s)
+	if !ok {
+		panic("failed to parse USDC amount: " + s)
+	}
+	return val
+}

@@ -12,12 +12,19 @@ import (
 
 // Handler provides HTTP endpoints for policy CRUD.
 type Handler struct {
-	store Store
+	store     Store
+	evaluator *Evaluator // optional; used to invalidate cache on mutations
 }
 
 // NewHandler creates a new policy handler.
 func NewHandler(store Store) *Handler {
 	return &Handler{store: store}
+}
+
+// WithEvaluator sets the evaluator for cache invalidation on policy mutations.
+func (h *Handler) WithEvaluator(e *Evaluator) *Handler {
+	h.evaluator = e
+	return h
 }
 
 // RegisterRoutes sets up policy routes under the tenant-protected group.
@@ -99,6 +106,10 @@ func (h *Handler) Create(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "failed to create policy"})
 		return
+	}
+
+	if h.evaluator != nil {
+		h.evaluator.InvalidateCache(tenantID)
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"policy": p})
@@ -229,6 +240,10 @@ func (h *Handler) Update(c *gin.Context) {
 		return
 	}
 
+	if h.evaluator != nil {
+		h.evaluator.InvalidateCache(tenantID)
+	}
+
 	c.JSON(http.StatusOK, gin.H{"policy": existing})
 }
 
@@ -263,6 +278,10 @@ func (h *Handler) Delete(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "failed to delete policy"})
 		return
+	}
+
+	if h.evaluator != nil {
+		h.evaluator.InvalidateCache(tenantID)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "policy deleted", "id": policyID})
