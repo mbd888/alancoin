@@ -2,7 +2,6 @@ package tenant
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -11,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/mbd888/alancoin/internal/auth"
 	"github.com/mbd888/alancoin/internal/idgen"
+	"github.com/mbd888/alancoin/internal/logging"
 	"github.com/mbd888/alancoin/internal/registry"
 	"github.com/mbd888/alancoin/internal/validation"
 )
@@ -311,7 +311,7 @@ func (h *Handler) RegisterAgent(c *gin.Context) {
 	if err != nil {
 		// Rollback agent registration to prevent zombie agents (registered but no key).
 		if delErr := h.registry.DeleteAgent(c.Request.Context(), agent.Address); delErr != nil {
-			slog.Error("failed to rollback agent after key generation failure",
+			logging.L(c.Request.Context()).Error("failed to rollback agent after key generation failure",
 				"agent", agent.Address, "error", delErr)
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "failed to generate API key"})

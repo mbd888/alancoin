@@ -10,16 +10,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log/slog"
+	"math/big"
 	"net/http"
 	"net/url"
 	"sync"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/logging"
 	"github.com/mbd888/alancoin/internal/metrics"
 	"github.com/mbd888/alancoin/internal/security"
 	"github.com/mbd888/alancoin/internal/traces"
@@ -82,6 +84,7 @@ type Subscription struct {
 	LastSuccess         *time.Time  `json:"lastSuccess,omitempty"`
 	LastError           string      `json:"lastError,omitempty"`
 	ConsecutiveFailures int         `json:"consecutiveFailures"`
+	SuspendedUntil      *time.Time  `json:"suspendedUntil,omitempty"`
 }
 
 // RetryConfig controls exponential backoff for webhook delivery
@@ -171,7 +174,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event *Event) error {
 	span.SetAttributes(attribute.Int("subscriber_count", len(subs)))
 
 	for _, sub := range subs {
-		if !sub.Active {
+		if !sub.Active || sub.isSuspended() {
 			continue
 		}
 
@@ -185,7 +188,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event *Event) error {
 			defer func() {
 				<-d.sem
 				if r := recover(); r != nil {
-					slog.Error("webhook dispatch panic", "subscription", s.ID, "panic", r)
+					logging.L(ctx).Error("webhook dispatch panic", "subscription", s.ID, "panic", r)
 				}
 			}()
 			d.send(ctx, s, event)
@@ -211,7 +214,7 @@ func (d *Dispatcher) DispatchToAgent(ctx context.Context, agentAddr string, even
 	}
 
 	for _, sub := range subs {
-		if !sub.Active {
+		if !sub.Active || sub.isSuspended() {
 			continue
 		}
 
@@ -227,7 +230,7 @@ func (d *Dispatcher) DispatchToAgent(ctx context.Context, agentAddr string, even
 					defer func() {
 						<-d.sem
 						if r := recover(); r != nil {
-							slog.Error("webhook dispatch panic", "subscription", s.ID, "panic", r)
+							logging.L(ctx).Error("webhook dispatch panic", "subscription", s.ID, "panic", r)
 						}
 					}()
 					d.send(ctx, s, event)
@@ -262,6 +265,15 @@ func (d *Dispatcher) send(ctx context.Context, sub *Subscription, event *Event) 
 			delay := d.retry.BaseDelay * (1 << (attempt - 1)) // exponential: 1s, 2s, 4s, 8s...
 			if delay > d.retry.MaxDelay {
 				delay = d.retry.MaxDelay
+			}
+			// Add ±25% jitter to prevent thundering herd on retries.
+			halfDelay := int64(delay / 2)
+			if halfDelay > 0 {
+				n, err := crand.Int(crand.Reader, big.NewInt(halfDelay))
+				if err == nil {
+					jitter := time.Duration(n.Int64()) - delay/4
+					delay += jitter
+				}
 			}
 			select {
 			case <-time.After(delay):
@@ -340,6 +352,7 @@ func (d *Dispatcher) updateSuccess(ctx context.Context, sub *Subscription) {
 	sub.LastSuccess = &now
 	sub.LastError = ""
 	sub.ConsecutiveFailures = 0
+	sub.SuspendedUntil = nil
 	_ = d.store.Update(ctx, sub)
 }
 
@@ -350,9 +363,30 @@ func (d *Dispatcher) updateError(ctx context.Context, sub *Subscription, errMsg 
 	// Auto-deactivate after too many consecutive failures
 	if d.retry.MaxFailures > 0 && sub.ConsecutiveFailures >= d.retry.MaxFailures {
 		sub.Active = false
+	} else {
+		// Graduated suspension: temporary backoff to protect the semaphore.
+		// 5+ failures → 1min, 10+ → 5min, 20+ → 30min.
+		var suspend time.Duration
+		switch {
+		case sub.ConsecutiveFailures >= 20:
+			suspend = 30 * time.Minute
+		case sub.ConsecutiveFailures >= 10:
+			suspend = 5 * time.Minute
+		case sub.ConsecutiveFailures >= 5:
+			suspend = 1 * time.Minute
+		}
+		if suspend > 0 {
+			t := time.Now().Add(suspend)
+			sub.SuspendedUntil = &t
+		}
 	}
 
 	_ = d.store.Update(ctx, sub)
+}
+
+// isSuspended returns true if the subscription is temporarily paused.
+func (s *Subscription) isSuspended() bool {
+	return s.SuspendedUntil != nil && time.Now().Before(*s.SuspendedUntil)
 }
 
 // MemoryStore is an in-memory implementation for testing

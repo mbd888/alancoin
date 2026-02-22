@@ -11,7 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
+	"github.com/mbd888/alancoin/internal/logging"
 	"math/big"
 	"strings"
 	"time"
@@ -200,7 +200,7 @@ func (l *Ledger) appendEvent(ctx context.Context, agentAddr, eventType, amount, 
 		Reference:    reference,
 		Counterparty: counterparty,
 	}); err != nil {
-		slog.Error("failed to append ledger event",
+		logging.L(ctx).Error("failed to append ledger event",
 			"agent", agentAddr, "type", eventType, "error", err)
 	}
 }

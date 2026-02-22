@@ -79,6 +79,23 @@ func (m *MemoryStore) ListByAgent(_ context.Context, agentAddr string, limit int
 	return result, nil
 }
 
+func (m *MemoryStore) ListByStatus(_ context.Context, status Status, limit int) ([]*Stream, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []*Stream
+	for _, s := range m.streams {
+		if s.Status == status {
+			cp := *s
+			result = append(result, &cp)
+			if len(result) >= limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
 func (m *MemoryStore) ListStale(_ context.Context, before time.Time, limit int) ([]*Stream, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

@@ -78,6 +78,34 @@ var (
 		Name:      "settlement_retries_total",
 		Help:      "Total settlement retry attempts (each retry after initial failure).",
 	})
+
+	gwIdemCacheHits = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Subsystem: "gateway",
+		Name:      "idempotency_cache_hits_total",
+		Help:      "Total idempotency cache hits (deduplicated requests).",
+	})
+
+	gwIdemCacheMisses = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Subsystem: "gateway",
+		Name:      "idempotency_cache_misses_total",
+		Help:      "Total idempotency cache misses (new requests reserved).",
+	})
+
+	gwIdemCacheFull = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Subsystem: "gateway",
+		Name:      "idempotency_cache_full_total",
+		Help:      "Total requests that bypassed idempotency due to cache capacity.",
+	})
+
+	gwIdemCacheSize = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "alancoin",
+		Subsystem: "gateway",
+		Name:      "idempotency_cache_size",
+		Help:      "Current number of entries in the idempotency cache.",
+	})
 )
 
 func init() {
@@ -92,6 +120,10 @@ func init() {
 		gwExpiredSessionsClosed,
 		gwPolicyShadowDenials,
 		gwSettlementRetries,
+		gwIdemCacheHits,
+		gwIdemCacheMisses,
+		gwIdemCacheFull,
+		gwIdemCacheSize,
 	)
 }
 

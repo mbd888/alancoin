@@ -84,6 +84,7 @@ func (c *idempotencyCache) getOrReserve(ctx context.Context, sessionID, idempote
 			entry, ok = c.entries[k]
 			c.mu.Unlock()
 			if ok {
+				gwIdemCacheHits.Inc()
 				return entry.result, entry.err, true
 			}
 			// Entry was cancelled — fall through to re-reserve below.
@@ -96,6 +97,7 @@ func (c *idempotencyCache) getOrReserve(ctx context.Context, sessionID, idempote
 	// Reject if cache is at capacity (prevents unbounded growth).
 	if len(c.entries) >= c.maxSize {
 		c.mu.Unlock()
+		gwIdemCacheFull.Inc()
 		// Process normally without idempotency — better than rejecting the request.
 		return nil, nil, false
 	}
@@ -106,6 +108,7 @@ func (c *idempotencyCache) getOrReserve(ctx context.Context, sessionID, idempote
 		expiresAt: time.Now().Add(c.ttl),
 	}
 	c.mu.Unlock()
+	gwIdemCacheMisses.Inc()
 	return nil, nil, false
 }
 
@@ -161,6 +164,7 @@ func (c *idempotencyCache) sweep() int {
 			}
 		}
 	}
+	gwIdemCacheSize.Set(float64(len(c.entries)))
 	return removed
 }
 

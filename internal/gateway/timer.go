@@ -9,23 +9,27 @@ import (
 )
 
 // Timer periodically checks for expired gateway sessions and auto-closes them.
+// It also reconciles settlement_failed sessions by attempting re-resolution.
 type Timer struct {
-	service  *Service
-	store    Store
-	interval time.Duration
-	logger   *slog.Logger
-	stop     chan struct{}
-	running  atomic.Bool
+	service           *Service
+	store             Store
+	interval          time.Duration
+	reconcileInterval time.Duration
+	logger            *slog.Logger
+	stop              chan struct{}
+	running           atomic.Bool
+	lastReconcileAt   time.Time
 }
 
 // NewTimer creates a new gateway session expiry timer.
 func NewTimer(service *Service, store Store, logger *slog.Logger) *Timer {
 	return &Timer{
-		service:  service,
-		store:    store,
-		interval: 30 * time.Second,
-		logger:   logger,
-		stop:     make(chan struct{}),
+		service:           service,
+		store:             store,
+		interval:          30 * time.Second,
+		reconcileInterval: 5 * time.Minute,
+		logger:            logger,
+		stop:              make(chan struct{}),
 	}
 }
 
@@ -121,5 +125,44 @@ func (t *Timer) sweepExpired(ctx context.Context) {
 	// Sweep stale rate limit entries for closed/expired sessions.
 	if removed := t.service.SweepRateLimiter(); removed > 0 {
 		t.logger.Info("swept rate limiter", "removed", removed)
+	}
+
+	// Periodically attempt to reconcile settlement_failed sessions.
+	if time.Since(t.lastReconcileAt) >= t.reconcileInterval {
+		t.reconcileStuck(ctx)
+		t.lastReconcileAt = time.Now()
+	}
+}
+
+// reconcileStuck attempts to resolve settlement_failed sessions by re-closing them.
+// This handles the case where funds moved but the status update failed — re-closing
+// releases any remaining hold and marks the session as closed.
+func (t *Timer) reconcileStuck(ctx context.Context) {
+	const batchSize = 50
+
+	stuck, err := t.store.ListByStatus(ctx, StatusSettlementFailed, batchSize)
+	if err != nil {
+		t.logger.Warn("reconcile: failed to list settlement_failed sessions", "error", err)
+		return
+	}
+	if len(stuck) == 0 {
+		return
+	}
+
+	t.logger.Info("reconcile: found settlement_failed sessions", "count", len(stuck))
+	resolved := 0
+	for _, sess := range stuck {
+		if _, err := t.service.CloseSession(ctx, sess.ID, sess.AgentAddr); err != nil {
+			t.logger.Warn("reconcile: failed to resolve session",
+				"session", sess.ID, "agent", sess.AgentAddr, "error", err)
+			continue
+		}
+		resolved++
+		t.logger.Info("reconcile: resolved settlement_failed session",
+			"session", sess.ID, "agent", sess.AgentAddr, "spent", sess.TotalSpent)
+		gwSessionsClosed.WithLabelValues("reconciled").Inc()
+	}
+	if resolved > 0 {
+		t.logger.Info("reconcile: sweep complete", "resolved", resolved, "total", len(stuck))
 	}
 }

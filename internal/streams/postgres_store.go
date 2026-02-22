@@ -96,6 +96,24 @@ func (p *PostgresStore) ListByAgent(ctx context.Context, agentAddr string, limit
 	return scanStreams(rows)
 }
 
+func (p *PostgresStore) ListByStatus(ctx context.Context, status Status, limit int) ([]*Stream, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT id, buyer_addr, seller_addr, service_id, session_key_id,
+		       hold_amount, spent_amount, price_per_tick, tick_count,
+		       status, stale_timeout_secs, last_tick_at, closed_at, close_reason,
+		       created_at, updated_at
+		FROM streams
+		WHERE status = $1
+		ORDER BY updated_at DESC
+		LIMIT $2`, string(status), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	return scanStreams(rows)
+}
+
 func (p *PostgresStore) ListStale(ctx context.Context, before time.Time, limit int) ([]*Stream, error) {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT id, buyer_addr, seller_addr, service_id, session_key_id,

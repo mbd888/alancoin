@@ -8,11 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/lib/pq"
+	"github.com/mbd888/alancoin/internal/logging"
 )
 
 // PostgresStore implements Store using PostgreSQL
@@ -51,7 +51,7 @@ func (p *PostgresStore) CreateAgent(ctx context.Context, agent *Agent) error {
 	if _, err := p.db.ExecContext(ctx, `
 		INSERT INTO agent_stats (agent_address) VALUES ($1) ON CONFLICT DO NOTHING
 	`, strings.ToLower(agent.Address)); err != nil {
-		slog.Warn("failed to initialize agent stats", "address", agent.Address, "error", err)
+		logging.L(ctx).Warn("failed to initialize agent stats", "address", agent.Address, "error", err)
 	}
 
 	return nil
@@ -79,20 +79,20 @@ func (p *PostgresStore) GetAgent(ctx context.Context, address string) (*Agent, e
 	agent.CreatedAt = createdAt
 	agent.UpdatedAt = updatedAt
 	if err := json.Unmarshal(metadata, &agent.Metadata); err != nil {
-		slog.Warn("failed to unmarshal agent metadata", "address", agent.Address, "error", err)
+		logging.L(ctx).Warn("failed to unmarshal agent metadata", "address", agent.Address, "error", err)
 	}
 
 	// Load services
 	services, svcErr := p.getAgentServices(ctx, address)
 	if svcErr != nil {
-		slog.Warn("failed to load agent services", "address", address, "error", svcErr)
+		logging.L(ctx).Warn("failed to load agent services", "address", address, "error", svcErr)
 	}
 	agent.Services = services
 
 	// Load stats
 	stats, statsErr := p.getAgentStats(ctx, address)
 	if statsErr != nil {
-		slog.Warn("failed to load agent stats", "address", address, "error", statsErr)
+		logging.L(ctx).Warn("failed to load agent stats", "address", address, "error", statsErr)
 	}
 	agent.Stats = stats
 
@@ -276,7 +276,7 @@ func (p *PostgresStore) GetService(ctx context.Context, agentAddress, serviceID 
 	}
 
 	if err := json.Unmarshal(metadata, &svc.Metadata); err != nil {
-		slog.Warn("failed to unmarshal service metadata", "service", svc.ID, "error", err)
+		logging.L(ctx).Warn("failed to unmarshal service metadata", "service", svc.ID, "error", err)
 	}
 	return &svc, nil
 }
@@ -468,7 +468,7 @@ func (p *PostgresStore) GetTransaction(ctx context.Context, id string) (*Transac
 
 	tx.ServiceID = serviceID.String
 	if err := json.Unmarshal(metadata, &tx.Metadata); err != nil {
-		slog.Warn("failed to unmarshal transaction metadata", "tx", tx.ID, "error", err)
+		logging.L(ctx).Warn("failed to unmarshal transaction metadata", "tx", tx.ID, "error", err)
 	}
 	return &tx, nil
 }
@@ -601,7 +601,7 @@ func (p *PostgresStore) getAgentServices(ctx context.Context, address string) ([
 		}
 		svc.AgentAddress = address
 		if err := json.Unmarshal(metadata, &svc.Metadata); err != nil {
-			slog.Warn("failed to unmarshal service metadata", "service", svc.ID, "error", err)
+			logging.L(ctx).Warn("failed to unmarshal service metadata", "service", svc.ID, "error", err)
 		}
 		services = append(services, svc)
 	}

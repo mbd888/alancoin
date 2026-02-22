@@ -690,7 +690,9 @@ func (m *Manager) RecordUsageWithCascade(ctx context.Context, keyID string, amou
 
 	// NOTE: Caller (Transact handler) must hold locks on the entire ancestor
 	// chain via LockKeyChain() to prevent concurrent sibling overspend.
-	for parentID != "" {
+	depth := 0
+	for parentID != "" && depth < MaxDelegationDepth+1 {
+		depth++
 		ancestor, err := m.store.Get(ctx, parentID)
 		if err != nil {
 			break
@@ -745,7 +747,9 @@ func (m *Manager) ValidateAncestorChain(ctx context.Context, key *SessionKey, am
 	}
 
 	parentID := key.ParentKeyID
-	for parentID != "" {
+	depth := 0
+	for parentID != "" && depth < MaxDelegationDepth+1 {
+		depth++
 		ancestor, err := m.store.Get(ctx, parentID)
 		if err != nil {
 			return ErrAncestorInvalid

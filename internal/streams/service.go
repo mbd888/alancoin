@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math/big"
 	"strconv"
 	"strings"
@@ -386,14 +385,14 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 			txStatus = "failed"
 		}
 		if err := s.recorder.RecordTransaction(ctx, stream.ID, stream.BuyerAddr, stream.SellerAddr, stream.SpentAmount, stream.ServiceID, txStatus); err != nil {
-			slog.Error("stream settle: failed to record transaction", "stream_id", stream.ID, "error", err)
+			logging.L(ctx).Error("stream settle: failed to record transaction", "stream_id", stream.ID, "error", err)
 		}
 	}
 
 	// Intercept revenue for stakes (seller earned money)
 	if s.revenue != nil && spentBig.Sign() > 0 && status != StatusDisputed {
 		if err := s.revenue.AccumulateRevenue(ctx, stream.SellerAddr, stream.SpentAmount, "stream_settle:"+stream.ID); err != nil {
-			slog.Error("stream settle: failed to accumulate revenue", "stream_id", stream.ID, "seller", stream.SellerAddr, "error", err)
+			logging.L(ctx).Error("stream settle: failed to accumulate revenue", "stream_id", stream.ID, "seller", stream.SellerAddr, "error", err)
 		}
 	}
 
@@ -405,7 +404,7 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 		}
 		if err := s.receiptIssuer.IssueReceipt(ctx, "stream", stream.ID, stream.BuyerAddr,
 			stream.SellerAddr, stream.SpentAmount, stream.ServiceID, rcptStatus, string(status)); err != nil {
-			slog.Error("stream settle: failed to issue receipt", "stream_id", stream.ID, "error", err)
+			logging.L(ctx).Error("stream settle: failed to issue receipt", "stream_id", stream.ID, "error", err)
 		}
 	}
 

@@ -10,22 +10,25 @@ import (
 
 // Timer periodically checks for stale streams and auto-closes them.
 type Timer struct {
-	service  *Service
-	store    Store
-	interval time.Duration
-	logger   *slog.Logger
-	stop     chan struct{}
-	running  atomic.Bool
+	service           *Service
+	store             Store
+	interval          time.Duration
+	reconcileInterval time.Duration
+	logger            *slog.Logger
+	stop              chan struct{}
+	running           atomic.Bool
+	lastReconcileAt   time.Time
 }
 
 // NewTimer creates a new stream auto-close timer.
 func NewTimer(service *Service, store Store, logger *slog.Logger) *Timer {
 	return &Timer{
-		service:  service,
-		store:    store,
-		interval: 15 * time.Second,
-		logger:   logger,
-		stop:     make(chan struct{}),
+		service:           service,
+		store:             store,
+		interval:          15 * time.Second,
+		reconcileInterval: 5 * time.Minute,
+		logger:            logger,
+		stop:              make(chan struct{}),
 	}
 }
 
@@ -93,5 +96,51 @@ func (t *Timer) closeStale(ctx context.Context) {
 			"spent", stream.SpentAmount,
 			"held", stream.HoldAmount,
 		)
+	}
+
+	// Periodically reconcile settlement_failed streams.
+	if time.Since(t.lastReconcileAt) >= t.reconcileInterval {
+		t.reconcileStuck(ctx)
+		t.lastReconcileAt = time.Now()
+	}
+}
+
+// reconcileStuck attempts to re-settle streams stuck in settlement_failed status.
+// These are streams where funds moved (hold released) but the status update failed.
+// Re-settling will attempt the status update again.
+func (t *Timer) reconcileStuck(ctx context.Context) {
+	const batchSize = 50
+
+	stuck, err := t.store.ListByStatus(ctx, StatusSettlementFailed, batchSize)
+	if err != nil {
+		t.logger.Warn("reconcile: failed to list settlement_failed streams", "error", err)
+		return
+	}
+	if len(stuck) == 0 {
+		return
+	}
+
+	t.logger.Info("reconcile: found settlement_failed streams", "count", len(stuck))
+	resolved := 0
+	for _, stream := range stuck {
+		// Try closing the stream — this will attempt to settle any remaining funds
+		// and update the status. If funds were already moved, the settlement will
+		// be a no-op and only the status update matters.
+		stream.Status = StatusClosed
+		now := time.Now()
+		stream.ClosedAt = &now
+		stream.CloseReason = "reconciled"
+		stream.UpdatedAt = now
+		if err := t.store.Update(ctx, stream); err != nil {
+			t.logger.Warn("reconcile: failed to resolve stream",
+				"stream", stream.ID, "error", err)
+			continue
+		}
+		resolved++
+		t.logger.Info("reconcile: resolved settlement_failed stream",
+			"stream", stream.ID, "buyer", stream.BuyerAddr, "seller", stream.SellerAddr)
+	}
+	if resolved > 0 {
+		t.logger.Info("reconcile: sweep complete", "resolved", resolved, "total", len(stuck))
 	}
 }

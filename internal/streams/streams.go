@@ -86,6 +86,7 @@ type Store interface {
 	Get(ctx context.Context, id string) (*Stream, error)
 	Update(ctx context.Context, stream *Stream) error
 	ListByAgent(ctx context.Context, agentAddr string, limit int) ([]*Stream, error)
+	ListByStatus(ctx context.Context, status Status, limit int) ([]*Stream, error)
 	ListStale(ctx context.Context, before time.Time, limit int) ([]*Stream, error)
 
 	CreateTick(ctx context.Context, tick *Tick) error
