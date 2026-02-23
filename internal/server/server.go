@@ -28,6 +28,7 @@ import (
 
 	"github.com/mbd888/alancoin/internal/admin"
 	"github.com/mbd888/alancoin/internal/auth"
+	"github.com/mbd888/alancoin/internal/billing"
 	"github.com/mbd888/alancoin/internal/circuitbreaker"
 	"github.com/mbd888/alancoin/internal/config"
 	"github.com/mbd888/alancoin/internal/dashboard"
@@ -86,6 +87,8 @@ type Server struct {
 	baselineTimer          *supervisor.BaselineTimer
 	eventWriter            *supervisor.EventWriter
 	tenantStore            tenant.Store
+	billingProvider        billing.Provider
+	billingMeter           *billing.Meter
 	policyStore            policy.Store           // tenant-scoped spend policies
 	gatewayStore           gateway.Store          // for billing aggregation
 	denialExporter         admin.DenialExporter   // denial log exporter for admin API
@@ -289,6 +292,13 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.reputationStore = reputation.NewPostgresSnapshotStore(db)
 		s.logger.Info("reputation snapshots enabled (postgres)")
 
+		// Billing provider (Stripe if configured, noop otherwise)
+		s.billingProvider = initBillingProvider(cfg, s.logger)
+		s.billingMeter = billing.NewMeter(s.billingProvider, s.logger)
+		s.gatewayService.WithUsageMeter(s.billingMeter)
+		s.gatewayTimer.WithMeter(s.billingMeter)
+		s.logger.Info("billing enabled", "provider", billingProviderName(cfg))
+
 		// Cross-subsystem reconciliation (PostgreSQL only)
 		s.reconcileRunner = reconciliation.NewRunner(s.logger).
 			WithLedger(&reconcileLedgerAdapter{eventStore: eventStore, ledgerStore: ledgerStore}).
@@ -388,6 +398,13 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		// Reputation snapshots (in-memory)
 		s.reputationStore = reputation.NewMemorySnapshotStore()
 		s.logger.Info("reputation snapshots enabled (in-memory)")
+
+		// Billing provider (Stripe if configured, noop otherwise)
+		s.billingProvider = initBillingProvider(cfg, s.logger)
+		s.billingMeter = billing.NewMeter(s.billingProvider, s.logger)
+		s.gatewayService.WithUsageMeter(s.billingMeter)
+		s.gatewayTimer.WithMeter(s.billingMeter)
+		s.logger.Info("billing enabled", "provider", billingProviderName(cfg))
 
 	}
 
@@ -786,6 +803,11 @@ func (s *Server) setupRoutes() {
 		adminTenants.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAdmin())
 		tenantHandler.RegisterAdminRoutes(adminTenants)
 
+		// Wire billing customer creator into tenant handler.
+		if s.billingProvider != nil {
+			tenantHandler.WithCustomerCreator(s.billingProvider)
+		}
+
 		// Protected routes: tenant CRUD, agent binding, key management (requires API key)
 		protectedTenants := v1.Group("")
 		protectedTenants.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
@@ -801,6 +823,18 @@ func (s *Server) setupRoutes() {
 		if s.gatewayStore != nil {
 			dashHandler := dashboard.NewHandler(s.gatewayStore, s.tenantStore)
 			dashHandler.RegisterRoutes(protectedTenants)
+		}
+
+		// Billing subscription management routes (tenant-scoped, requires API key)
+		if s.billingProvider != nil {
+			billingHandler := billing.NewHandler(s.billingProvider, s.tenantStore)
+			billingHandler.RegisterRoutes(protectedTenants)
+		}
+
+		// Stripe webhook handler (no auth — uses Stripe signature verification)
+		if s.cfg.StripeWebhookSecret != "" {
+			webhookHandler := billing.NewWebhookHandler(s.cfg.StripeWebhookSecret, s.tenantStore, s.logger)
+			webhookHandler.RegisterRoute(v1)
 		}
 	}
 
@@ -1755,6 +1789,14 @@ func (a *gatewayTenantSettingsAdapter) GetTenantStatus(ctx context.Context, tena
 	return string(t.Status), nil
 }
 
+func (a *gatewayTenantSettingsAdapter) GetStripeCustomerID(ctx context.Context, tenantID string) (string, error) {
+	t, err := a.store.Get(ctx, tenantID)
+	if err != nil {
+		return "", err
+	}
+	return t.StripeCustomerID, nil
+}
+
 // gatewayRegistryAdapter adapts registry.Store to gateway.RegistryProvider
 type gatewayRegistryAdapter struct {
 	store registry.Store
@@ -2078,4 +2120,29 @@ func (p *adminReconcileStateProvider) AdminState(_ context.Context) map[string]i
 		"last_run":          report.Timestamp,
 		"duration_ms":       report.Duration.Milliseconds(),
 	}
+}
+
+// initBillingProvider returns the Stripe provider if configured, otherwise noop.
+func initBillingProvider(cfg *config.Config, logger *slog.Logger) billing.Provider {
+	if cfg.StripeSecretKey == "" {
+		return billing.NewNoopProvider(logger)
+	}
+	priceIDs := map[tenant.Plan]string{}
+	if cfg.StripePriceStarterID != "" {
+		priceIDs[tenant.PlanStarter] = cfg.StripePriceStarterID
+	}
+	if cfg.StripePriceGrowthID != "" {
+		priceIDs[tenant.PlanGrowth] = cfg.StripePriceGrowthID
+	}
+	if cfg.StripePriceEnterpriseID != "" {
+		priceIDs[tenant.PlanEnterprise] = cfg.StripePriceEnterpriseID
+	}
+	return billing.NewStripeProvider(cfg.StripeSecretKey, priceIDs)
+}
+
+func billingProviderName(cfg *config.Config) string {
+	if cfg.StripeSecretKey != "" {
+		return "stripe"
+	}
+	return "noop"
 }

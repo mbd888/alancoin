@@ -63,6 +63,19 @@ func (m *MemoryStore) GetBySlug(_ context.Context, slug string) (*Tenant, error)
 	return &cp, nil
 }
 
+func (m *MemoryStore) GetByStripeCustomerID(_ context.Context, customerID string) (*Tenant, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, t := range m.tenants {
+		if t.StripeCustomerID == customerID {
+			cp := *t
+			return &cp, nil
+		}
+	}
+	return nil, ErrTenantNotFound
+}
+
 func (m *MemoryStore) Update(_ context.Context, t *Tenant) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -176,6 +176,7 @@ type LedgerService interface {
 type TenantSettingsProvider interface {
 	GetTakeRateBPS(ctx context.Context, tenantID string) (int, error)
 	GetTenantStatus(ctx context.Context, tenantID string) (string, error)
+	GetStripeCustomerID(ctx context.Context, tenantID string) (string, error)
 }
 
 // RegistryProvider abstracts service discovery.
@@ -199,6 +200,12 @@ type WebhookEmitter interface {
 	EmitSessionClosed(agentAddr, sessionID, totalSpent, status string)
 	EmitProxySuccess(agentAddr, sessionID, serviceUsed, amountPaid string)
 	EmitSettlementFailed(agentAddr, sessionID, sellerAddr, amount string)
+}
+
+// UsageMeter records per-tenant usage for billing metering.
+type UsageMeter interface {
+	RecordRequest(tenantID, customerID string)
+	RecordVolume(tenantID, customerID string, microUSDC int64)
 }
 
 // MoneyError wraps an error with funds-state context so callers know

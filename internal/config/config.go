@@ -65,6 +65,13 @@ type Config struct {
 
 	// Observability
 	OTLPEndpoint string // OpenTelemetry collector endpoint (e.g. "localhost:4317"), empty = disabled
+
+	// Stripe billing
+	StripeSecretKey         string // Stripe secret key (sk_test_... or sk_live_...)
+	StripeWebhookSecret     string // Stripe webhook signing secret (whsec_...)
+	StripePriceStarterID    string // Stripe Price ID for Starter plan
+	StripePriceGrowthID     string // Stripe Price ID for Growth plan
+	StripePriceEnterpriseID string // Stripe Price ID for Enterprise plan
 }
 
 // Base Sepolia defaults
@@ -140,6 +147,12 @@ func Load() (*Config, error) {
 		RequestTimeout:   getEnvDuration("REQUEST_TIMEOUT", DefaultRequestTimeout),
 
 		OTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+
+		StripeSecretKey:         os.Getenv("STRIPE_SECRET_KEY"),
+		StripeWebhookSecret:     os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		StripePriceStarterID:    os.Getenv("STRIPE_PRICE_STARTER"),
+		StripePriceGrowthID:     os.Getenv("STRIPE_PRICE_GROWTH"),
+		StripePriceEnterpriseID: os.Getenv("STRIPE_PRICE_ENTERPRISE"),
 	}
 
 	if err := cfg.Validate(); err != nil {

@@ -24,10 +24,10 @@ func (p *PostgresStore) Create(ctx context.Context, t *Tenant) error {
 		return err
 	}
 	_, err = p.db.ExecContext(ctx, `
-		INSERT INTO tenants (id, name, slug, plan, stripe_customer_id, status, settings, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		t.ID, t.Name, t.Slug, string(t.Plan), t.StripeCustomerID, string(t.Status),
-		settingsJSON, t.CreatedAt, t.UpdatedAt,
+		INSERT INTO tenants (id, name, slug, plan, stripe_customer_id, stripe_subscription_id, status, settings, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		t.ID, t.Name, t.Slug, string(t.Plan), t.StripeCustomerID, t.StripeSubscriptionID,
+		string(t.Status), settingsJSON, t.CreatedAt, t.UpdatedAt,
 	)
 	if err != nil {
 		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
@@ -40,14 +40,20 @@ func (p *PostgresStore) Create(ctx context.Context, t *Tenant) error {
 
 func (p *PostgresStore) Get(ctx context.Context, id string) (*Tenant, error) {
 	return p.scanTenant(p.db.QueryRowContext(ctx, `
-		SELECT id, name, slug, plan, stripe_customer_id, status, settings, created_at, updated_at
+		SELECT id, name, slug, plan, stripe_customer_id, stripe_subscription_id, status, settings, created_at, updated_at
 		FROM tenants WHERE id = $1`, id))
 }
 
 func (p *PostgresStore) GetBySlug(ctx context.Context, slug string) (*Tenant, error) {
 	return p.scanTenant(p.db.QueryRowContext(ctx, `
-		SELECT id, name, slug, plan, stripe_customer_id, status, settings, created_at, updated_at
+		SELECT id, name, slug, plan, stripe_customer_id, stripe_subscription_id, status, settings, created_at, updated_at
 		FROM tenants WHERE slug = $1`, slug))
+}
+
+func (p *PostgresStore) GetByStripeCustomerID(ctx context.Context, customerID string) (*Tenant, error) {
+	return p.scanTenant(p.db.QueryRowContext(ctx, `
+		SELECT id, name, slug, plan, stripe_customer_id, stripe_subscription_id, status, settings, created_at, updated_at
+		FROM tenants WHERE stripe_customer_id = $1`, customerID))
 }
 
 func (p *PostgresStore) Update(ctx context.Context, t *Tenant) error {
@@ -56,11 +62,11 @@ func (p *PostgresStore) Update(ctx context.Context, t *Tenant) error {
 		return err
 	}
 	result, err := p.db.ExecContext(ctx, `
-		UPDATE tenants SET name = $1, plan = $2, stripe_customer_id = $3, status = $4,
-			settings = $5, updated_at = $6
-		WHERE id = $7`,
-		t.Name, string(t.Plan), t.StripeCustomerID, string(t.Status),
-		settingsJSON, t.UpdatedAt, t.ID,
+		UPDATE tenants SET name = $1, plan = $2, stripe_customer_id = $3,
+			stripe_subscription_id = $4, status = $5, settings = $6, updated_at = $7
+		WHERE id = $8`,
+		t.Name, string(t.Plan), t.StripeCustomerID, t.StripeSubscriptionID,
+		string(t.Status), settingsJSON, t.UpdatedAt, t.ID,
 	)
 	if err != nil {
 		return err
@@ -111,10 +117,11 @@ func (p *PostgresStore) scanTenant(row *sql.Row) (*Tenant, error) {
 	var (
 		plan, status string
 		stripeID     sql.NullString
+		stripeSub    sql.NullString
 		settingsJSON []byte
 	)
-	err := row.Scan(&t.ID, &t.Name, &t.Slug, &plan, &stripeID, &status, &settingsJSON,
-		&t.CreatedAt, &t.UpdatedAt)
+	err := row.Scan(&t.ID, &t.Name, &t.Slug, &plan, &stripeID, &stripeSub, &status,
+		&settingsJSON, &t.CreatedAt, &t.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrTenantNotFound
 	}
@@ -125,6 +132,9 @@ func (p *PostgresStore) scanTenant(row *sql.Row) (*Tenant, error) {
 	t.Status = Status(status)
 	if stripeID.Valid {
 		t.StripeCustomerID = stripeID.String
+	}
+	if stripeSub.Valid {
+		t.StripeSubscriptionID = stripeSub.String
 	}
 	if len(settingsJSON) > 0 {
 		_ = json.Unmarshal(settingsJSON, &t.Settings)
@@ -141,6 +151,7 @@ func (p *PostgresStore) Migrate(ctx context.Context) error {
 			slug            TEXT NOT NULL UNIQUE,
 			plan            TEXT NOT NULL DEFAULT 'free',
 			stripe_customer_id TEXT,
+			stripe_subscription_id TEXT,
 			status          TEXT NOT NULL DEFAULT 'active',
 			settings        JSONB NOT NULL DEFAULT '{}',
 			created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -148,6 +159,7 @@ func (p *PostgresStore) Migrate(ctx context.Context) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_tenants_slug ON tenants(slug);
 		CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants(status);
+		CREATE INDEX IF NOT EXISTS idx_tenants_stripe_customer ON tenants(stripe_customer_id) WHERE stripe_customer_id IS NOT NULL;
 	`)
 	return err
 }
