@@ -8,11 +8,17 @@ import (
 	"time"
 )
 
+// MeterFlusher flushes accumulated usage counters to the billing provider.
+type MeterFlusher interface {
+	Flush(ctx context.Context)
+}
+
 // Timer periodically checks for expired gateway sessions and auto-closes them.
 // It also reconciles settlement_failed sessions by attempting re-resolution.
 type Timer struct {
 	service           *Service
 	store             Store
+	meter             MeterFlusher
 	interval          time.Duration
 	reconcileInterval time.Duration
 	logger            *slog.Logger
@@ -31,6 +37,12 @@ func NewTimer(service *Service, store Store, logger *slog.Logger) *Timer {
 		logger:            logger,
 		stop:              make(chan struct{}),
 	}
+}
+
+// WithMeter sets the billing meter for periodic usage flushing.
+func (t *Timer) WithMeter(m MeterFlusher) *Timer {
+	t.meter = m
+	return t
 }
 
 // Running reports whether the timer loop is actively running.
@@ -125,6 +137,11 @@ func (t *Timer) sweepExpired(ctx context.Context) {
 	// Sweep stale rate limit entries for closed/expired sessions.
 	if removed := t.service.SweepRateLimiter(); removed > 0 {
 		t.logger.Info("swept rate limiter", "removed", removed)
+	}
+
+	// Flush billing meter counters to the billing provider.
+	if t.meter != nil {
+		t.meter.Flush(ctx)
 	}
 
 	// Periodically attempt to reconcile settlement_failed sessions.

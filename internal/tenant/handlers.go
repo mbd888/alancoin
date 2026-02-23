@@ -22,6 +22,11 @@ type BillingProvider interface {
 	GetBillingSummary(ctx context.Context, tenantID string) (*BillingSummary, error)
 }
 
+// CustomerCreator creates billing customers for new tenants.
+type CustomerCreator interface {
+	CreateCustomer(ctx context.Context, tenantID, name, email string) (customerID string, err error)
+}
+
 // BillingSummary is the response payload for the billing endpoint.
 type BillingSummary struct {
 	TotalRequests   int64  `json:"totalRequests"`
@@ -34,10 +39,11 @@ type BillingSummary struct {
 
 // Handler provides HTTP endpoints for tenant management.
 type Handler struct {
-	store    Store
-	authMgr  *auth.Manager
-	registry registry.Store
-	billing  BillingProvider
+	store           Store
+	authMgr         *auth.Manager
+	registry        registry.Store
+	billing         BillingProvider
+	customerCreator CustomerCreator
 }
 
 // NewHandler creates a new tenant handler.
@@ -48,6 +54,11 @@ func NewHandler(store Store, authMgr *auth.Manager, reg registry.Store) *Handler
 // WithBilling sets the billing data provider.
 func (h *Handler) WithBilling(bp BillingProvider) {
 	h.billing = bp
+}
+
+// WithCustomerCreator sets the billing customer creator for new tenants.
+func (h *Handler) WithCustomerCreator(cc CustomerCreator) {
+	h.customerCreator = cc
 }
 
 // RegisterAdminRoutes sets up the admin-only tenant creation route.
@@ -118,6 +129,15 @@ func (h *Handler) CreateTenant(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "failed to create tenant"})
 		return
+	}
+
+	// Create a billing customer (non-blocking: if it fails, tenant is still usable).
+	if h.customerCreator != nil {
+		if customerID, err := h.customerCreator.CreateCustomer(c.Request.Context(), t.ID, t.Name, ""); err == nil {
+			t.StripeCustomerID = customerID
+			t.UpdatedAt = time.Now()
+			_ = h.store.Update(c.Request.Context(), t)
+		}
 	}
 
 	// Generate an admin API key scoped to this tenant.

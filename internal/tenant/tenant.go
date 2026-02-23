@@ -43,13 +43,14 @@ type Settings struct {
 
 // Tenant represents an organisation using the platform.
 type Tenant struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	Slug             string    `json:"slug"`
-	Plan             Plan      `json:"plan"`
-	StripeCustomerID string    `json:"stripeCustomerId,omitempty"`
-	Status           Status    `json:"status"`
-	Settings         Settings  `json:"settings"`
-	CreatedAt        time.Time `json:"createdAt"`
-	UpdatedAt        time.Time `json:"updatedAt"`
+	ID                   string    `json:"id"`
+	Name                 string    `json:"name"`
+	Slug                 string    `json:"slug"`
+	Plan                 Plan      `json:"plan"`
+	StripeCustomerID     string    `json:"stripeCustomerId,omitempty"`
+	StripeSubscriptionID string    `json:"stripeSubscriptionId,omitempty"`
+	Status               Status    `json:"status"`
+	Settings             Settings  `json:"settings"`
+	CreatedAt            time.Time `json:"createdAt"`
+	UpdatedAt            time.Time `json:"updatedAt"`
 }

@@ -187,6 +187,7 @@ type Service struct {
 	tenantSettings  TenantSettingsProvider
 	webhookEmitter  WebhookEmitter
 	circuitBreaker  *circuitbreaker.Breaker
+	usageMeter      UsageMeter
 	platformAddr    string // ledger address collecting platform fees
 	logger          *slog.Logger
 	locks           syncutil.ShardedMutex
@@ -255,6 +256,12 @@ func (s *Service) WithPlatformAddress(addr string) *Service {
 // WithWebhookEmitter adds a webhook emitter for lifecycle event notifications.
 func (s *Service) WithWebhookEmitter(e WebhookEmitter) *Service {
 	s.webhookEmitter = e
+	return s
+}
+
+// WithUsageMeter adds a billing usage meter for recording per-tenant request counts and volume.
+func (s *Service) WithUsageMeter(m UsageMeter) *Service {
+	s.usageMeter = m
 	return s
 }
 
@@ -875,6 +882,14 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		// Cache successful result for idempotency.
 		if idemReserved {
 			s.idemCache.complete(sessionID, req.IdempotencyKey, result)
+		}
+
+		// Record usage for billing metering (async, off hot path).
+		if s.usageMeter != nil && tenantIDCopy != "" && s.tenantSettings != nil {
+			if custID, err := s.tenantSettings.GetStripeCustomerID(ctx, tenantIDCopy); err == nil && custID != "" {
+				s.usageMeter.RecordRequest(tenantIDCopy, custID)
+				s.usageMeter.RecordVolume(tenantIDCopy, custID, priceBig.Int64())
+			}
 		}
 
 		gwProxyRequests.WithLabelValues("success").Inc()
