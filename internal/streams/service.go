@@ -188,15 +188,17 @@ func (s *Service) RecordTick(ctx context.Context, streamID string, req TickReque
 	}
 
 	// Determine next sequence number.
-	// If caller supplies a seq, validate for idempotency: reject duplicates and out-of-order.
+	// Seq is required for idempotency — without it, network retries can charge
+	// the buyer multiple times. Reject seq=0 (the zero-value default).
 	nextSeq := stream.TickCount + 1
-	if req.Seq > 0 {
-		if req.Seq <= stream.TickCount {
-			return nil, nil, ErrDuplicateTickSeq
-		}
-		if req.Seq != nextSeq {
-			return nil, nil, fmt.Errorf("%w: expected %d, got %d", ErrInvalidTickSeq, nextSeq, req.Seq)
-		}
+	if req.Seq <= 0 {
+		return nil, nil, fmt.Errorf("%w: seq is required (expected %d)", ErrInvalidTickSeq, nextSeq)
+	}
+	if req.Seq <= stream.TickCount {
+		return nil, nil, ErrDuplicateTickSeq
+	}
+	if req.Seq != nextSeq {
+		return nil, nil, fmt.Errorf("%w: expected %d, got %d", ErrInvalidTickSeq, nextSeq, req.Seq)
 	}
 
 	now := time.Now()

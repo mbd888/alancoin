@@ -62,8 +62,8 @@ func (a *AlertChecker) CheckBudget(ctx context.Context, key *SessionKey) {
 	}
 
 	spent, _ := usdc.Parse(key.Usage.TotalSpent)
-	// usedPct = spent / maxTotal as float64
-	usedPct := float64(new(big.Int).Mul(spent, big.NewInt(10000)).Div(
+	// usedPct = spent / maxTotal as float64 (scale by 10000 for precision)
+	usedPct := float64(new(big.Int).Div(
 		new(big.Int).Mul(spent, big.NewInt(10000)), maxTotal).Int64()) / 10000.0
 
 	for _, threshold := range a.thresholds {

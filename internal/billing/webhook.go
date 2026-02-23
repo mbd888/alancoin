@@ -17,14 +17,17 @@ import (
 type WebhookHandler struct {
 	webhookSecret string
 	tenantStore   tenant.Store
+	priceToPlan   map[string]tenant.Plan // Stripe Price ID → plan
 	logger        *slog.Logger
 }
 
 // NewWebhookHandler creates a handler for Stripe webhook events.
-func NewWebhookHandler(webhookSecret string, tenantStore tenant.Store, logger *slog.Logger) *WebhookHandler {
+// priceToPlan maps Stripe Price IDs back to plan names for subscription sync.
+func NewWebhookHandler(webhookSecret string, tenantStore tenant.Store, priceToPlan map[string]tenant.Plan, logger *slog.Logger) *WebhookHandler {
 	return &WebhookHandler{
 		webhookSecret: webhookSecret,
 		tenantStore:   tenantStore,
+		priceToPlan:   priceToPlan,
 		logger:        logger,
 	}
 }
@@ -69,11 +72,64 @@ func (h *WebhookHandler) HandleWebhook(c *gin.Context) {
 }
 
 func (h *WebhookHandler) handleSubscriptionUpdated(c *gin.Context, event *stripe.Event) {
-	sub, ok := event.Data.Object["id"].(string)
-	if !ok {
+	customerID, _ := event.Data.Object["customer"].(string)
+	if customerID == "" {
 		return
 	}
-	h.logger.Info("stripe subscription updated", "subscription", sub)
+
+	t := h.findTenantByCustomer(c, customerID)
+	if t == nil {
+		return
+	}
+
+	// Extract the current price ID from the subscription items.
+	var priceID string
+	if items, ok := event.Data.Object["items"].(map[string]interface{}); ok {
+		if data, ok := items["data"].([]interface{}); ok && len(data) > 0 {
+			if item, ok := data[0].(map[string]interface{}); ok {
+				if price, ok := item["price"].(map[string]interface{}); ok {
+					priceID, _ = price["id"].(string)
+				}
+			}
+		}
+	}
+
+	if priceID == "" {
+		h.logger.Warn("stripe subscription updated: could not extract price ID",
+			"tenant", t.ID, "event", event.ID)
+		return
+	}
+
+	newPlan, ok := h.priceToPlan[priceID]
+	if !ok {
+		h.logger.Warn("stripe subscription updated: unknown price ID",
+			"tenant", t.ID, "priceId", priceID)
+		return
+	}
+
+	// Sync status from Stripe.
+	stripeStatus, _ := event.Data.Object["status"].(string)
+	switch stripeStatus {
+	case "active":
+		t.Status = tenant.StatusActive
+	case "past_due":
+		t.Status = tenant.StatusSuspended
+	case "canceled", "unpaid":
+		t.Status = tenant.StatusCancelled
+	}
+
+	t.Plan = newPlan
+	t.Settings = tenant.DefaultSettingsForPlan(newPlan)
+	t.UpdatedAt = time.Now()
+
+	if err := h.tenantStore.Update(c.Request.Context(), t); err != nil {
+		h.logger.Error("failed to update tenant on subscription change",
+			"tenant", t.ID, "newPlan", newPlan, "error", err)
+		return
+	}
+
+	h.logger.Info("tenant plan synced from stripe subscription update",
+		"tenant", t.ID, "plan", newPlan, "stripeStatus", stripeStatus)
 }
 
 func (h *WebhookHandler) handleSubscriptionDeleted(c *gin.Context, event *stripe.Event) {

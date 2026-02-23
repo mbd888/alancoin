@@ -170,7 +170,9 @@ func (h *Handler) TickStream(c *gin.Context) {
 	// Allow empty body (uses pricePerTick as default)
 	_ = c.ShouldBindJSON(&req)
 
-	// Verify caller is either buyer or seller
+	// Verify caller is the buyer — only the buyer (service consumer) can record
+	// ticks. Allowing the seller to record ticks would let a malicious seller
+	// drain the buyer's held funds without delivering any service.
 	callerAddr := strings.ToLower(c.GetString("authAgentAddr"))
 	stream, err := h.service.Get(c.Request.Context(), id)
 	if err != nil {
@@ -181,10 +183,10 @@ func (h *Handler) TickStream(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
 		return
 	}
-	if callerAddr != stream.BuyerAddr && callerAddr != stream.SellerAddr {
+	if callerAddr != stream.BuyerAddr {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error":   "unauthorized",
-			"message": "Only stream buyer or seller can record ticks",
+			"message": "Only the stream buyer can record ticks",
 		})
 		return
 	}

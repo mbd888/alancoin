@@ -55,7 +55,8 @@ func (h *Handler) Subscribe(c *gin.Context) {
 		return
 	}
 
-	// Create Stripe customer if not yet created.
+	// Create Stripe customer if not yet created. Persist immediately so we
+	// don't orphan a Stripe customer object if the subscription step fails.
 	if t.StripeCustomerID == "" {
 		customerID, err := h.provider.CreateCustomer(c.Request.Context(), t.ID, t.Name, "")
 		if err != nil {
@@ -63,6 +64,10 @@ func (h *Handler) Subscribe(c *gin.Context) {
 			return
 		}
 		t.StripeCustomerID = customerID
+		if err := h.tenantStore.Update(c.Request.Context(), t); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "failed to save billing customer"})
+			return
+		}
 	}
 
 	subID, err := h.provider.CreateSubscription(c.Request.Context(), t.StripeCustomerID, t.Plan)
@@ -216,9 +221,6 @@ func (h *Handler) GetSubscription(c *gin.Context) {
 }
 
 func (h *Handler) requireOwnership(c *gin.Context, tenantID string) bool {
-	if auth.IsAdminRequest(c) {
-		return true
-	}
 	callerTenant := auth.GetTenantID(c)
 	if callerTenant != tenantID {
 		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden", "message": "not your tenant"})

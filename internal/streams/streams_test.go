@@ -112,7 +112,7 @@ func TestTickStream(t *testing.T) {
 
 	// Record 5 ticks using default price
 	for i := 0; i < 5; i++ {
-		tick, updated, err := svc.RecordTick(ctx, stream.ID, TickRequest{})
+		tick, updated, err := svc.RecordTick(ctx, stream.ID, TickRequest{Seq: i + 1})
 		if err != nil {
 			t.Fatalf("tick %d failed: %v", i+1, err)
 		}
@@ -146,14 +146,14 @@ func TestTickStreamExceedsHold(t *testing.T) {
 
 	// First two ticks should succeed (0.002 total = exactly hold)
 	for i := 0; i < 2; i++ {
-		_, _, err := svc.RecordTick(ctx, stream.ID, TickRequest{})
+		_, _, err := svc.RecordTick(ctx, stream.ID, TickRequest{Seq: i + 1})
 		if err != nil {
 			t.Fatalf("tick %d failed: %v", i+1, err)
 		}
 	}
 
 	// Third tick should fail (would exceed hold)
-	_, _, err := svc.RecordTick(ctx, stream.ID, TickRequest{})
+	_, _, err := svc.RecordTick(ctx, stream.ID, TickRequest{Seq: 3})
 	if err != ErrHoldExhausted {
 		t.Errorf("expected ErrHoldExhausted, got %v", err)
 	}
@@ -174,6 +174,7 @@ func TestTickStreamCustomAmount(t *testing.T) {
 
 	// Tick with custom amount
 	tick, _, err := svc.RecordTick(ctx, stream.ID, TickRequest{
+		Seq:      1,
 		Amount:   "0.005000",
 		Metadata: "5 tokens",
 	})
@@ -203,7 +204,7 @@ func TestCloseStream(t *testing.T) {
 
 	// Record 3 ticks (spent = 0.003)
 	for i := 0; i < 3; i++ {
-		svc.RecordTick(ctx, stream.ID, TickRequest{})
+		svc.RecordTick(ctx, stream.ID, TickRequest{Seq: i + 1})
 	}
 
 	// Close (buyer closes)
@@ -285,7 +286,7 @@ func TestTickClosedStream(t *testing.T) {
 
 	svc.Close(ctx, stream.ID, "0x1111111111111111111111111111111111111111", "")
 
-	_, _, err := svc.RecordTick(ctx, stream.ID, TickRequest{})
+	_, _, err := svc.RecordTick(ctx, stream.ID, TickRequest{Seq: 1})
 	if err != ErrAlreadyClosed {
 		t.Errorf("expected ErrAlreadyClosed, got %v", err)
 	}
@@ -306,7 +307,7 @@ func TestAutoCloseStaleStream(t *testing.T) {
 	})
 
 	// Record a tick
-	svc.RecordTick(ctx, stream.ID, TickRequest{})
+	svc.RecordTick(ctx, stream.ID, TickRequest{Seq: 1})
 
 	// Auto-close
 	err := svc.AutoClose(ctx, stream)
@@ -404,7 +405,7 @@ func TestListTicks(t *testing.T) {
 	})
 
 	for i := 0; i < 5; i++ {
-		svc.RecordTick(ctx, stream.ID, TickRequest{Metadata: "test"})
+		svc.RecordTick(ctx, stream.ID, TickRequest{Seq: i + 1, Metadata: "test"})
 	}
 
 	ticks, err := svc.ListTicks(ctx, stream.ID, 100)
@@ -437,7 +438,7 @@ func TestSellerCanCloseStream(t *testing.T) {
 	})
 
 	// Record a tick so there's something to settle
-	svc.RecordTick(ctx, stream.ID, TickRequest{})
+	svc.RecordTick(ctx, stream.ID, TickRequest{Seq: 1})
 
 	// Seller closes
 	closed, err := svc.Close(ctx, stream.ID, "0x2222222222222222222222222222222222222222", "service_complete")
@@ -467,7 +468,7 @@ func TestCloseFullySpentStream(t *testing.T) {
 
 	// Spend all 3 ticks (exactly exhausts hold)
 	for i := 0; i < 3; i++ {
-		_, _, err := svc.RecordTick(ctx, stream.ID, TickRequest{})
+		_, _, err := svc.RecordTick(ctx, stream.ID, TickRequest{Seq: i + 1})
 		if err != nil {
 			t.Fatalf("tick %d failed: %v", i+1, err)
 		}
@@ -562,7 +563,7 @@ func TestTickNonExistentStream(t *testing.T) {
 	ledger := newMockLedger()
 	svc := NewService(store, ledger)
 
-	_, _, err := svc.RecordTick(context.Background(), "str_nonexistent", TickRequest{})
+	_, _, err := svc.RecordTick(context.Background(), "str_nonexistent", TickRequest{Seq: 1})
 	if err != ErrStreamNotFound {
 		t.Errorf("expected ErrStreamNotFound, got %v", err)
 	}
@@ -586,7 +587,7 @@ func TestCumulativeAmountsWithMixedTicks(t *testing.T) {
 	expectedCumulative := []string{"0.001000", "0.006000", "0.007000", "0.017000"}
 
 	for i, amt := range amounts {
-		tick, _, err := svc.RecordTick(ctx, stream.ID, TickRequest{Amount: amt})
+		tick, _, err := svc.RecordTick(ctx, stream.ID, TickRequest{Seq: i + 1, Amount: amt})
 		if err != nil {
 			t.Fatalf("tick %d failed: %v", i+1, err)
 		}
@@ -637,8 +638,8 @@ func TestRecorderCalledOnClose(t *testing.T) {
 		ServiceID:    "svc_translate",
 	})
 
-	svc.RecordTick(ctx, stream.ID, TickRequest{})
-	svc.RecordTick(ctx, stream.ID, TickRequest{})
+	svc.RecordTick(ctx, stream.ID, TickRequest{Seq: 1})
+	svc.RecordTick(ctx, stream.ID, TickRequest{Seq: 2})
 
 	svc.Close(ctx, stream.ID, "0x1111111111111111111111111111111111111111", "done")
 
@@ -695,31 +696,36 @@ func TestConcurrentTicks(t *testing.T) {
 		PricePerTick: "0.001000",
 	})
 
-	// Fire 20 concurrent ticks
+	// Fire 20 concurrent ticks all claiming seq=1. Only one should win;
+	// the rest should get duplicate/invalid seq errors. This validates
+	// the per-stream mutex serialization.
 	var wg sync.WaitGroup
 	errs := make([]error, 20)
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			_, _, errs[idx] = svc.RecordTick(ctx, stream.ID, TickRequest{})
+			_, _, errs[idx] = svc.RecordTick(ctx, stream.ID, TickRequest{Seq: 1})
 		}(i)
 	}
 	wg.Wait()
 
-	// All should succeed (20 * 0.001 = 0.020 < 1.000)
-	for i, err := range errs {
-		if err != nil {
-			t.Errorf("concurrent tick %d failed: %v", i, err)
+	successes := 0
+	for _, err := range errs {
+		if err == nil {
+			successes++
 		}
 	}
-
-	// Verify final state is consistent
-	updated, _ := svc.Get(ctx, stream.ID)
-	if updated.TickCount != 20 {
-		t.Errorf("expected 20 ticks, got %d", updated.TickCount)
+	if successes != 1 {
+		t.Errorf("expected exactly 1 success out of 20 concurrent seq=1 ticks, got %d", successes)
 	}
-	if updated.SpentAmount != "0.020000" {
-		t.Errorf("expected spent 0.020000, got %s", updated.SpentAmount)
+
+	// Verify final state is consistent (1 tick recorded)
+	updated, _ := svc.Get(ctx, stream.ID)
+	if updated.TickCount != 1 {
+		t.Errorf("expected 1 tick, got %d", updated.TickCount)
+	}
+	if updated.SpentAmount != "0.001000" {
+		t.Errorf("expected spent 0.001000, got %s", updated.SpentAmount)
 	}
 }

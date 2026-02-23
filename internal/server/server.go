@@ -833,7 +833,8 @@ func (s *Server) setupRoutes() {
 
 		// Stripe webhook handler (no auth — uses Stripe signature verification)
 		if s.cfg.StripeWebhookSecret != "" {
-			webhookHandler := billing.NewWebhookHandler(s.cfg.StripeWebhookSecret, s.tenantStore, s.logger)
+			priceToPlan := buildPriceToPlanMap(s.cfg)
+			webhookHandler := billing.NewWebhookHandler(s.cfg.StripeWebhookSecret, s.tenantStore, priceToPlan, s.logger)
 			webhookHandler.RegisterRoute(v1)
 		}
 	}
@@ -2138,6 +2139,21 @@ func initBillingProvider(cfg *config.Config, logger *slog.Logger) billing.Provid
 		priceIDs[tenant.PlanEnterprise] = cfg.StripePriceEnterpriseID
 	}
 	return billing.NewStripeProvider(cfg.StripeSecretKey, priceIDs)
+}
+
+// buildPriceToPlanMap returns the reverse mapping from Stripe Price ID → plan.
+func buildPriceToPlanMap(cfg *config.Config) map[string]tenant.Plan {
+	m := map[string]tenant.Plan{}
+	if cfg.StripePriceStarterID != "" {
+		m[cfg.StripePriceStarterID] = tenant.PlanStarter
+	}
+	if cfg.StripePriceGrowthID != "" {
+		m[cfg.StripePriceGrowthID] = tenant.PlanGrowth
+	}
+	if cfg.StripePriceEnterpriseID != "" {
+		m[cfg.StripePriceEnterpriseID] = tenant.PlanEnterprise
+	}
+	return m
 }
 
 func billingProviderName(cfg *config.Config) string {
