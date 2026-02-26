@@ -140,8 +140,9 @@ class TestParseDurationToSecs:
     def test_pure_integer_string_returns_as_seconds(self):
         assert _parse_duration_to_secs("3600") == 3600
 
-    def test_invalid_unit_returns_default_3600(self):
-        assert _parse_duration_to_secs("5x") == 3600
+    def test_invalid_unit_raises_validation_error(self):
+        with pytest.raises(ValidationError, match="Invalid duration"):
+            _parse_duration_to_secs("5x")
 
     def test_whitespace_is_stripped(self):
         assert _parse_duration_to_secs("  1h  ") == 3600

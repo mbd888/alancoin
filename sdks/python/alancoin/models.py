@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import List, Optional
 
 
@@ -169,9 +170,13 @@ class NetworkStats:
 
 
 # Service type constants
-class ServiceType:
-    """Known service types."""
-    
+class ServiceType(str, Enum):
+    """Known service types.
+
+    Inherits from str so comparisons like ``ServiceType.INFERENCE == "inference"``
+    work as expected.
+    """
+
     INFERENCE = "inference"
     EMBEDDING = "embedding"
     TRANSLATION = "translation"
@@ -183,11 +188,11 @@ class ServiceType:
     COMPUTE = "compute"
     STORAGE = "storage"
     OTHER = "other"
-    
-    ALL = [
-        INFERENCE, EMBEDDING, TRANSLATION, CODE, DATA,
-        IMAGE, AUDIO, SEARCH, COMPUTE, STORAGE, OTHER
-    ]
+
+    @classmethod
+    @property
+    def ALL(cls) -> list:  # noqa: N802  — uppercase to preserve backward compat
+        return [member.value for member in cls]
 
 
 @dataclass

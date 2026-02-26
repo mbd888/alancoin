@@ -35,7 +35,9 @@ def _parse_duration_to_secs(s: str) -> int:
         try:
             return int(s)
         except ValueError:
-            return 3600  # default 1h
+            raise ValidationError(
+                f"Invalid duration {s!r}. Use format like '30m', '1h', '24h', '7d', or integer seconds."
+            )
     return int(m.group(1)) * _DURATION_UNITS[m.group(2).lower()]
 
 
@@ -300,6 +302,8 @@ class Alancoin:
         )
         return Service.from_dict(response)
 
+    _ALLOWED_SERVICE_FIELDS = {"type", "name", "price", "description", "endpoint", "active"}
+
     def update_service(
         self,
         agent_address: str,
@@ -308,15 +312,21 @@ class Alancoin:
     ) -> Service:
         """
         Update a service.
-        
+
         Args:
             agent_address: Agent's wallet address
             service_id: Service ID
             **kwargs: Fields to update (type, name, price, description, endpoint, active)
-            
+
         Returns:
             The updated Service
+
+        Raises:
+            ValidationError: If unknown fields are passed
         """
+        unexpected = set(kwargs) - self._ALLOWED_SERVICE_FIELDS
+        if unexpected:
+            raise ValidationError(f"Unknown service fields: {unexpected}")
         response = self._request(
             "PUT",
             f"/v1/agents/{agent_address}/services/{service_id}",

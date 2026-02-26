@@ -183,9 +183,11 @@ class BudgetSession:
 
     def _start(self):
         """Create session key and activate the session."""
+        if self._active:
+            raise AlancoinError("Session already started", code="already_active")
         if not self._client.address:
             raise ValidationError(
-                "Wallet required for sessions. Pass a Wallet to Alancoin()."
+                "Wallet required for sessions. Pass address= to Alancoin()."
             )
 
         self._skm = SessionKeyManager()
@@ -1271,15 +1273,15 @@ class GatewaySession:
                     self._total_spent += cost
             self._request_count += 1
 
-        # Return the service's actual response with gateway metadata attached
-        service_response = result.get("response", {})
-        if isinstance(service_response, dict):
-            service_response["_gateway"] = {
-                "amountPaid": result.get("amountPaid"),
-                "serviceUsed": result.get("serviceUsed"),
-                "serviceName": result.get("serviceName"),
-                "latencyMs": result.get("latencyMs"),
-            }
+        # Return a copy of the service's response with gateway metadata attached.
+        # We copy to avoid mutating the server's original dict.
+        service_response = dict(result.get("response", {}))
+        service_response["_gateway"] = {
+            "amountPaid": result.get("amountPaid"),
+            "serviceUsed": result.get("serviceUsed"),
+            "serviceName": result.get("serviceName"),
+            "latencyMs": result.get("latencyMs"),
+        }
         return service_response
 
     # -- Close ----------------------------------------------------------------
