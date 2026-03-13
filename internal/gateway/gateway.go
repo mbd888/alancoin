@@ -202,6 +202,11 @@ type WebhookEmitter interface {
 	EmitSettlementFailed(agentAddr, sessionID, sellerAddr, amount string)
 }
 
+// RevenueAccumulator intercepts payments for revenue staking.
+type RevenueAccumulator interface {
+	AccumulateRevenue(ctx context.Context, agentAddr, amount, txRef string) error
+}
+
 // UsageMeter records per-tenant usage for billing metering.
 type UsageMeter interface {
 	RecordRequest(tenantID, customerID string)

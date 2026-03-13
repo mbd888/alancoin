@@ -54,6 +54,7 @@ func (h *Handler) RegisterProtectedRoutes(r *gin.RouterGroup) {
 // RegisterProxyRoute sets up the proxy endpoint (gateway token auth).
 func (h *Handler) RegisterProxyRoute(r *gin.RouterGroup) {
 	r.POST("/gateway/proxy", h.gatewayTokenAuth(), h.Proxy)
+	r.POST("/gateway/pipeline", h.gatewayTokenAuth(), h.Pipeline)
 }
 
 // gatewayTokenAuth validates X-Gateway-Token header against session store
@@ -484,4 +485,59 @@ func (h *Handler) ListLogs(c *gin.Context) {
 		resp["next_cursor"] = nextCursor
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// Pipeline handles POST /v1/gateway/pipeline
+// Multi-step proxy: execute a sequence of service calls with $prev substitution.
+func (h *Handler) Pipeline(c *gin.Context) {
+	sessionID := c.GetString("gatewaySessionID")
+
+	var req PipelineRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "Invalid request body: steps array is required (1-10 steps)",
+		})
+		return
+	}
+
+	result, err := h.service.Pipeline(c.Request.Context(), sessionID, req)
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := "pipeline_failed"
+		switch {
+		case errors.Is(err, ErrSessionClosed):
+			status = http.StatusConflict
+			code = "session_closed"
+		case errors.Is(err, ErrSessionExpired):
+			status = http.StatusGone
+			code = "session_expired"
+		case errors.Is(err, ErrBudgetExceeded):
+			status = http.StatusPaymentRequired
+			code = "budget_exceeded"
+		case errors.Is(err, ErrNoServiceAvailable):
+			status = http.StatusNotFound
+			code = "no_service"
+		case errors.Is(err, ErrPolicyDenied):
+			status = http.StatusForbidden
+			code = "policy_denied"
+		}
+		resp := gin.H{
+			"error":   code,
+			"message": err.Error(),
+		}
+		// Include partial results if any steps completed
+		if result != nil && len(result.Steps) > 0 {
+			resp["partialResult"] = result
+		}
+		c.JSON(status, resp)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"result":     result,
+		"totalPaid":  result.TotalPaid,
+		"totalSpent": result.TotalSpent,
+		"remaining":  result.Remaining,
+	})
 }

@@ -186,6 +186,7 @@ type Service struct {
 	policyEvaluator PolicyEvaluator
 	tenantSettings  TenantSettingsProvider
 	webhookEmitter  WebhookEmitter
+	revenue         RevenueAccumulator
 	circuitBreaker  *circuitbreaker.Breaker
 	usageMeter      UsageMeter
 	platformAddr    string // ledger address collecting platform fees
@@ -262,6 +263,12 @@ func (s *Service) WithWebhookEmitter(e WebhookEmitter) *Service {
 // WithUsageMeter adds a billing usage meter for recording per-tenant request counts and volume.
 func (s *Service) WithUsageMeter(m UsageMeter) *Service {
 	s.usageMeter = m
+	return s
+}
+
+// WithRevenueAccumulator adds a revenue accumulator for stakes interception.
+func (s *Service) WithRevenueAccumulator(r RevenueAccumulator) *Service {
+	s.revenue = r
 	return s
 }
 
@@ -848,6 +855,12 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		if s.receiptIssuer != nil {
 			_ = s.receiptIssuer.IssueReceipt(ctx, "gateway", ref, agentAddr,
 				candidate.AgentAddress, candidate.Price, candidate.ServiceID, "confirmed", "")
+		}
+
+		if s.revenue != nil {
+			if err := s.revenue.AccumulateRevenue(ctx, candidate.AgentAddress, candidate.Price, "gateway_settle:"+ref); err != nil {
+				s.logger.Error("gateway proxy: failed to accumulate revenue", "session", sessionIDCopy, "seller", candidate.AgentAddress, "error", err)
+			}
 		}
 
 		if s.webhookEmitter != nil {
