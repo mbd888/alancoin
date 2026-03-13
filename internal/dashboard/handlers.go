@@ -82,7 +82,10 @@ func (h *Handler) Overview(c *gin.Context) {
 		}
 	}
 
-	agentCount, _ := h.tenantStore.CountAgents(ctx, tenantID)
+	agentCount, err3 := h.tenantStore.CountAgents(ctx, tenantID)
+	if err3 != nil {
+		agentCount = 0 // degrade gracefully
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"tenant": gin.H{

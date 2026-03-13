@@ -723,6 +723,32 @@ type SessionKey struct {
 	RotatedFromID    string               `json:"rotatedFromId,omitempty"`
 	RotatedToID      string               `json:"rotatedToId,omitempty"`
 	RotationGraceEnd *time.Time           `json:"rotationGraceEnd,omitempty"`
+	DelegationProof  *SDKDelegationProof  `json:"delegationProof,omitempty"`
+}
+
+// SDKDelegationProof is the client-side representation of a macaroon-inspired
+// HMAC-chain delegation proof. When present on a session key, it enables
+// O(1) verification of the entire delegation ancestry without database walks.
+type SDKDelegationProof struct {
+	Caveats   []SDKCaveat `json:"caveats"`
+	Tag       string      `json:"tag"`
+	RootKeyID string      `json:"rootKeyId"`
+}
+
+// SDKCaveat encodes a single permission restriction in a delegation chain.
+type SDKCaveat struct {
+	MaxTotal            string    `json:"maxTotal,omitempty"`
+	MaxPerTransaction   string    `json:"maxPerTx,omitempty"`
+	MaxPerDay           string    `json:"maxPerDay,omitempty"`
+	ExpiresAt           time.Time `json:"expiresAt"`
+	AllowedRecipients   []string  `json:"recipients,omitempty"`
+	AllowedServiceTypes []string  `json:"serviceTypes,omitempty"`
+	Scopes              []string  `json:"scopes,omitempty"`
+	PublicKey           string    `json:"publicKey"`
+	KeyID               string    `json:"keyId"`
+	Depth               int       `json:"depth"`
+	IssuedAt            time.Time `json:"issuedAt"`
+	IssuerID            string    `json:"issuerId,omitempty"`
 }
 
 // CreateSessionKeyRequest is the body for POST /v1/agents/:addr/sessions.

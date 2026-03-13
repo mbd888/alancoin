@@ -1,6 +1,10 @@
 package tracerank
 
-import "strings"
+import (
+	"math"
+	"strings"
+	"time"
+)
 
 // nodeInfo holds aggregated statistics for a node in the payment graph.
 type nodeInfo struct {
@@ -13,7 +17,7 @@ type nodeInfo struct {
 // weightedEdge is a normalized incoming edge for PageRank computation.
 type weightedEdge struct {
 	from   string
-	weight float64 // row-normalized weight (0-1)
+	weight float64 // row-normalized weight (0-1), possibly penalized
 }
 
 // graph is the internal representation of the payment graph.
@@ -34,6 +38,8 @@ func buildGraph(edges []PaymentEdge, cfg Config) *graph {
 		rawEdges:      make(map[string]map[string]float64),
 		incomingEdges: make(map[string][]weightedEdge),
 	}
+
+	now := time.Now()
 
 	// Track per-pair transaction counts for anti-wash-trading cap
 	pairTxCounts := make(map[string]int)
@@ -62,9 +68,22 @@ func buildGraph(edges []PaymentEdge, cfg Config) *graph {
 		if cfg.MaxPerCounterparty > 0 {
 			pairTxCounts[pairKey] += e.TxCount
 			if pairTxCounts[pairKey] > cfg.MaxPerCounterparty {
-				// Already at cap, skip additional edges from this pair
 				continue
 			}
+		}
+
+		// Apply temporal decay: recent edges matter more.
+		volume := e.Volume
+		if cfg.TemporalDecayRate > 0 && !e.LastTxAt.IsZero() {
+			daysSince := now.Sub(e.LastTxAt).Hours() / 24
+			if daysSince > 0 {
+				volume *= math.Exp(-cfg.TemporalDecayRate * daysSince)
+			}
+		}
+
+		// After decay, re-check minimum volume
+		if volume < cfg.MinEdgeVolume {
+			continue
 		}
 
 		// Register nodes
@@ -85,24 +104,73 @@ func buildGraph(edges []PaymentEdge, cfg Config) *graph {
 		}
 
 		if g.rawEdges[from][to] == 0 {
-			// First time seeing this edge
 			g.nodeInfo[from].outDegree++
 			g.nodeInfo[to].inDegree++
 			g.edgeCount++
 		}
 
-		g.rawEdges[from][to] += e.Volume
-		g.nodeInfo[from].outVolume += e.Volume
-		g.nodeInfo[to].inVolume += e.Volume
+		g.rawEdges[from][to] += volume
+		g.nodeInfo[from].outVolume += volume
+		g.nodeInfo[to].inVolume += volume
 	}
 
 	// Sort nodes for deterministic iteration
 	sortStrings(g.nodes)
 
-	// Precompute normalized incoming edges for PageRank
-	g.precomputeIncoming()
+	// Apply max source influence cap at the raw volume level (before normalization).
+	// This caps how much raw volume any single payer can contribute to a node's
+	// incoming total, preventing reputation concentration attacks.
+	if cfg.MaxSourceInfluence > 0 {
+		g.applySourceInfluenceCap(cfg.MaxSourceInfluence)
+	}
+
+	// Detect cycle edges for penalty during PageRank
+	cycleEdges := g.detectCycleEdges(cfg.CyclePenalty)
+
+	// Precompute normalized incoming edges for PageRank,
+	// applying cycle penalty to normalized weights.
+	g.precomputeIncoming(cycleEdges, cfg.CyclePenalty)
 
 	return g
+}
+
+// detectCycleEdges finds edges that participate in short cycles (length 2 or 3).
+// Returns a set of "from:to" keys for edges that should be penalized.
+func (g *graph) detectCycleEdges(penalty float64) map[string]bool {
+	if penalty <= 0 {
+		return nil
+	}
+
+	cycleEdges := make(map[string]bool)
+
+	// Detect 2-cycles: A->B and B->A
+	for from, targets := range g.rawEdges {
+		for to := range targets {
+			if _, ok := g.rawEdges[to][from]; ok {
+				cycleEdges[from+":"+to] = true
+				cycleEdges[to+":"+from] = true
+			}
+		}
+	}
+
+	// Detect 3-cycles: A->B->C->A
+	for a, aTargets := range g.rawEdges {
+		for b := range aTargets {
+			bTargets := g.rawEdges[b]
+			for c := range bTargets {
+				if c == a || c == b {
+					continue
+				}
+				if _, ok := g.rawEdges[c][a]; ok {
+					cycleEdges[a+":"+b] = true
+					cycleEdges[b+":"+c] = true
+					cycleEdges[c+":"+a] = true
+				}
+			}
+		}
+	}
+
+	return cycleEdges
 }
 
 // normalizedAdj returns the row-normalized adjacency for outgoing edges.
@@ -127,10 +195,44 @@ func (g *graph) normalizedAdj() map[string][]weightedEdge {
 	return adj
 }
 
+// applySourceInfluenceCap caps how much raw volume any single source can
+// contribute to a node's total incoming volume. This operates on raw edge
+// weights BEFORE normalization, which changes the normalized distribution
+// across a source's outgoing edges.
+func (g *graph) applySourceInfluenceCap(maxFraction float64) {
+	for _, to := range g.nodes {
+		// Collect all incoming raw volumes for this target
+		type sourceEdge struct {
+			from string
+			vol  float64
+		}
+		var sources []sourceEdge
+		totalIncoming := 0.0
+		for from, targets := range g.rawEdges {
+			if vol, ok := targets[to]; ok && vol > 0 {
+				sources = append(sources, sourceEdge{from, vol})
+				totalIncoming += vol
+			}
+		}
+		if totalIncoming == 0 || len(sources) <= 1 {
+			continue
+		}
+
+		maxAllowed := totalIncoming * maxFraction
+		for _, src := range sources {
+			if src.vol > maxAllowed {
+				diff := src.vol - maxAllowed
+				g.rawEdges[src.from][to] = maxAllowed
+				g.nodeInfo[to].inVolume -= diff
+				g.nodeInfo[src.from].outVolume -= diff
+			}
+		}
+	}
+}
+
 // precomputeIncoming builds the incoming edge list with row-normalized weights.
-// This is the critical data structure for PageRank iteration:
-// for each node, we need to know which nodes point to it and with what weight.
-func (g *graph) precomputeIncoming() {
+// Cycle edges have their normalized weight reduced by the penalty factor.
+func (g *graph) precomputeIncoming(cycleEdges map[string]bool, cyclePenalty float64) {
 	// First compute total outgoing volume per node (for normalization)
 	outTotal := make(map[string]float64, len(g.nodes))
 	for from, targets := range g.rawEdges {
@@ -139,16 +241,24 @@ func (g *graph) precomputeIncoming() {
 		}
 	}
 
-	// Build incoming edges with normalized weights
+	// Build incoming edges with normalized weights, applying cycle penalty
+	cycleMultiplier := 1.0 - cyclePenalty
 	for from, targets := range g.rawEdges {
 		total := outTotal[from]
 		if total == 0 {
 			continue
 		}
 		for to, vol := range targets {
+			w := vol / total
+
+			// Apply cycle penalty: reduce flow through cycle edges
+			if cycleEdges[from+":"+to] {
+				w *= cycleMultiplier
+			}
+
 			g.incomingEdges[to] = append(g.incomingEdges[to], weightedEdge{
 				from:   from,
-				weight: vol / total,
+				weight: w,
 			})
 		}
 	}

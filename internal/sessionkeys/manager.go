@@ -212,6 +212,14 @@ func (m *Manager) Create(ctx context.Context, ownerAddr string, req *SessionKeyR
 		},
 	}
 
+	// Generate HMAC-chain delegation proof for root keys.
+	// This enables O(1) ancestor verification when the key is later delegated.
+	rootSecret, err := GenerateRootSecret()
+	if err == nil {
+		key.RootSecret = rootSecret
+		key.DelegationProof = NewRootProof(rootSecret, key)
+	}
+
 	if err := m.store.Create(ctx, key); err != nil {
 		return nil, fmt.Errorf("failed to create session key: %w", err)
 	}
@@ -641,6 +649,15 @@ func (m *Manager) CreateDelegated(ctx context.Context, parentKeyID string, req *
 		Depth:           childDepth,
 		RootKeyID:       rootKeyID,
 		DelegationLabel: req.DelegationLabel,
+	}
+
+	// Extend parent's HMAC-chain proof if available.
+	// This is purely additive — delegation works without proofs, but when
+	// present, enables O(1) ancestor chain verification.
+	if parent.DelegationProof != nil {
+		if childProof, proofErr := ExtendProof(parent.DelegationProof, childKey); proofErr == nil {
+			childKey.DelegationProof = childProof
+		}
 	}
 
 	if err := m.store.Create(ctx, childKey); err != nil {

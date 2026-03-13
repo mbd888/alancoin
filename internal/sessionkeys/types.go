@@ -62,6 +62,12 @@ type SessionKey struct {
 	RotatedFromID    string     `json:"rotatedFromId,omitempty"`    // ID of the key this was rotated from
 	RotatedToID      string     `json:"rotatedToId,omitempty"`      // ID of the key this was rotated to
 	RotationGraceEnd *time.Time `json:"rotationGraceEnd,omitempty"` // Grace period: old key remains active until this time
+
+	// HMAC-chain delegation proof — enables O(1) ancestor verification
+	// without database walks. The proof cryptographically binds the entire
+	// delegation chain using chained HMAC-SHA256, inspired by macaroons.
+	DelegationProof *DelegationProof `json:"delegationProof,omitempty"`
+	RootSecret      []byte           `json:"-"` // Never serialized; stored separately
 }
 
 // SessionKeyUsage tracks how much the key has been used

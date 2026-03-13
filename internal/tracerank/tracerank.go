@@ -101,6 +101,22 @@ type Config struct {
 	MinEdgeVolume        float64       // minimum USDC volume for an edge to count
 	MinEdgeTxCount       int           // minimum tx count for an edge to count
 	MaxPerCounterparty   int           // cap transactions per counterparty pair (anti-wash)
+
+	// Sybil resistance: MeritRank-inspired decay mechanisms.
+	//
+	// TemporalDecayRate controls how fast old edges lose influence.
+	// Edge weight is multiplied by exp(-rate * daysSinceLastTx).
+	// 0 = no decay (default). 0.03 = ~50% weight after 23 days.
+	TemporalDecayRate float64
+
+	// CyclePenalty reduces the weight of edges that form short cycles (2-3 hops).
+	// 0 = no penalty. 0.5 = cycle edges carry 50% weight. 1.0 = fully remove cycles.
+	CyclePenalty float64
+
+	// MaxSourceInfluence caps how much any single payer can contribute to a node's
+	// incoming weight. Prevents reputation concentration attacks.
+	// 0 = no cap. 0.5 = no single source can provide more than 50% of incoming weight.
+	MaxSourceInfluence float64
 }
 
 // DefaultConfig returns production-safe defaults.
@@ -112,7 +128,10 @@ func DefaultConfig() Config {
 		EdgeWindow:           0, // all time
 		MinEdgeVolume:        0.001,
 		MinEdgeTxCount:       1,
-		MaxPerCounterparty:   50, // cap per-pair contribution
+		MaxPerCounterparty:   50,   // cap per-pair contribution
+		TemporalDecayRate:    0.03, // ~50% weight after 23 days
+		CyclePenalty:         0.8,  // cycle edges carry 20% weight
+		MaxSourceInfluence:   0.5,  // no single payer > 50% of incoming
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/mbd888/alancoin/internal/traces"
 	"go.opentelemetry.io/otel/attribute"
@@ -23,6 +24,11 @@ type RealtimeUpdater struct {
 	// deltaCache maps agent address to accumulated score delta since last snapshot.
 	mu         sync.RWMutex
 	deltaCache map[string]*scoreDelta
+
+	// Shutdown coordination for background persist goroutines.
+	wg             sync.WaitGroup
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 type scoreDelta struct {
@@ -35,12 +41,31 @@ type scoreDelta struct {
 
 // NewRealtimeUpdater creates a new real-time reputation updater.
 func NewRealtimeUpdater(provider MetricsProvider, store SnapshotStore, logger *slog.Logger) *RealtimeUpdater {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &RealtimeUpdater{
-		calculator: NewCalculator(),
-		provider:   provider,
-		store:      store,
-		logger:     logger,
-		deltaCache: make(map[string]*scoreDelta),
+		calculator:     NewCalculator(),
+		provider:       provider,
+		store:          store,
+		logger:         logger,
+		deltaCache:     make(map[string]*scoreDelta),
+		shutdownCtx:    ctx,
+		shutdownCancel: cancel,
+	}
+}
+
+// Shutdown cancels background persist goroutines and waits for them to complete.
+// Should be called during graceful server shutdown.
+func (u *RealtimeUpdater) Shutdown(timeout time.Duration) {
+	u.shutdownCancel()
+	done := make(chan struct{})
+	go func() {
+		u.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		u.logger.Warn("realtime updater: shutdown timed out waiting for persist goroutines")
 	}
 }
 
@@ -63,8 +88,10 @@ func (u *RealtimeUpdater) OnTransactionConfirmed(ctx context.Context, buyerAddr,
 	u.applyDelta(buyerAddr, 1, vol, 1, 0, 0)
 
 	// Persist updated scores asynchronously
-	go u.persistScore(context.Background(), sellerAddr)
-	go u.persistScore(context.Background(), buyerAddr)
+	u.wg.Add(1)
+	go u.persistScoreTracked(sellerAddr)
+	u.wg.Add(1)
+	go u.persistScoreTracked(buyerAddr)
 }
 
 // OnTransactionFailed is called when a service delivery fails.
@@ -78,7 +105,8 @@ func (u *RealtimeUpdater) OnTransactionFailed(ctx context.Context, sellerAddr, a
 	vol := parseFloat(amountUSD)
 	u.applyDelta(sellerAddr, 1, vol, 0, 1, 0)
 
-	go u.persistScore(context.Background(), sellerAddr)
+	u.wg.Add(1)
+	go u.persistScoreTracked(sellerAddr)
 }
 
 // OnDisputeResolved is called when an escrow dispute is resolved.
@@ -93,11 +121,13 @@ func (u *RealtimeUpdater) OnDisputeResolved(ctx context.Context, sellerAddr, buy
 	if buyerWon {
 		// Seller loses reputation for dispute loss
 		u.applyDelta(sellerAddr, 0, 0, 0, 0, 1)
-		go u.persistScore(context.Background(), sellerAddr)
+		u.wg.Add(1)
+		go u.persistScoreTracked(sellerAddr)
 	} else {
 		// Buyer loses reputation for frivolous dispute
 		u.applyDelta(buyerAddr, 0, 0, 0, 0, 1)
-		go u.persistScore(context.Background(), buyerAddr)
+		u.wg.Add(1)
+		go u.persistScoreTracked(buyerAddr)
 	}
 }
 
@@ -182,6 +212,13 @@ func (u *RealtimeUpdater) applyDelta(addr string, txns int, volume float64, succ
 	d.successDelta += success
 	d.failedDelta += failed
 	d.disputedDelta += disputed
+}
+
+func (u *RealtimeUpdater) persistScoreTracked(addr string) {
+	defer u.wg.Done()
+	ctx, cancel := context.WithTimeout(u.shutdownCtx, 5*time.Second)
+	defer cancel()
+	u.persistScore(ctx, addr)
 }
 
 func (u *RealtimeUpdater) persistScore(ctx context.Context, addr string) {

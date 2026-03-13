@@ -439,7 +439,13 @@ func TestNodeInfo(t *testing.T) {
 		"0xc": 0.1,
 	}
 
-	engine := NewEngine(source, seeds(seedMap), DefaultConfig())
+	// Use a config with no decay/penalty so raw volumes are preserved.
+	cfg := DefaultConfig()
+	cfg.TemporalDecayRate = 0
+	cfg.CyclePenalty = 0
+	cfg.MaxSourceInfluence = 0
+
+	engine := NewEngine(source, seeds(seedMap), cfg)
 	result, err := engine.Compute(context.Background(), "nodeinfo-test")
 	if err != nil {
 		t.Fatalf("Compute failed: %v", err)
@@ -703,6 +709,183 @@ func TestMixedNetworkSybilResistance(t *testing.T) {
 	if maxSybil >= minLegit {
 		t.Errorf("Sybil agents (max %.1f) should rank below all legitimate agents (min %.1f)",
 			maxSybil, minLegit)
+	}
+}
+
+// --- Sybil Hardening Tests ---
+
+func TestCyclePenalty(t *testing.T) {
+	// Sybil ring (zero seeds) forms a cycle. One seeded node pays into the ring.
+	// With cycle penalty, the Sybil nodes' scores should decrease.
+	source := edgesFrom(
+		// Seeded node pays into the ring
+		edge("0xlegit", "0xs1", 10, 1),
+		// Sybil ring: high volume cycle
+		edge("0xs1", "0xs2", 5000, 40),
+		edge("0xs2", "0xs3", 5000, 40),
+		edge("0xs3", "0xs1", 5000, 40),
+	)
+	seedMap := map[string]float64{
+		"0xlegit": 1.0,
+		"0xs1":    0,
+		"0xs2":    0,
+		"0xs3":    0,
+	}
+
+	// Without cycle penalty
+	noPenalty := DefaultConfig()
+	noPenalty.CyclePenalty = 0
+	noPenalty.TemporalDecayRate = 0
+	noPenalty.MaxSourceInfluence = 0
+	engineNoPenalty := NewEngine(source, seeds(seedMap), noPenalty)
+	resultNP, err := engineNoPenalty.Compute(context.Background(), "no-penalty")
+	if err != nil {
+		t.Fatalf("Compute failed: %v", err)
+	}
+
+	// With cycle penalty
+	withPenalty := DefaultConfig()
+	withPenalty.CyclePenalty = 0.8
+	withPenalty.TemporalDecayRate = 0
+	withPenalty.MaxSourceInfluence = 0
+	enginePenalty := NewEngine(source, seeds(seedMap), withPenalty)
+	resultP, err := enginePenalty.Compute(context.Background(), "with-penalty")
+	if err != nil {
+		t.Fatalf("Compute failed: %v", err)
+	}
+
+	// With penalty, Sybil nodes should have lower raw ranks
+	for _, addr := range []string{"0xs1", "0xs2", "0xs3"} {
+		npRaw := resultNP.Scores[addr].RawRank
+		pRaw := resultP.Scores[addr].RawRank
+		if pRaw >= npRaw {
+			t.Errorf("Cycle penalty should reduce %s raw rank. Without: %f, With: %f", addr, npRaw, pRaw)
+		}
+	}
+}
+
+func TestTemporalDecay(t *testing.T) {
+	now := time.Now()
+	// Recent edge vs old edge, same volume
+	source := edgesFrom(
+		PaymentEdge{From: "0xa", To: "0xb", Volume: 100, TxCount: 5, LastTxAt: now.Add(-1 * 24 * time.Hour)},  // 1 day ago
+		PaymentEdge{From: "0xa", To: "0xc", Volume: 100, TxCount: 5, LastTxAt: now.Add(-90 * 24 * time.Hour)}, // 90 days ago
+	)
+	seedMap := map[string]float64{
+		"0xa": 1.0,
+		"0xb": 0.0,
+		"0xc": 0.0,
+	}
+
+	cfg := DefaultConfig()
+	cfg.TemporalDecayRate = 0.03
+	cfg.CyclePenalty = 0
+	cfg.MaxSourceInfluence = 0
+
+	engine := NewEngine(source, seeds(seedMap), cfg)
+	result, err := engine.Compute(context.Background(), "temporal-decay-test")
+	if err != nil {
+		t.Fatalf("Compute failed: %v", err)
+	}
+
+	// B (recent) should outrank C (old) even though raw volume is identical
+	bScore := result.Scores["0xb"].GraphScore
+	cScore := result.Scores["0xc"].GraphScore
+	if bScore <= cScore {
+		t.Errorf("Recent edge B (%.1f) should outrank old edge C (%.1f)", bScore, cScore)
+	}
+}
+
+func TestMaxSourceInfluence(t *testing.T) {
+	// Whale dominates B's incoming volume. The whale also pays E (so the cap
+	// on raw volume changes the whale's normalized outgoing distribution).
+	source := edgesFrom(
+		edge("0xwhale", "0xb", 10000, 40), // whale dominates B's incoming
+		edge("0xwhale", "0xe", 100, 5),    // whale also pays E
+		edge("0xc", "0xb", 10, 2),         // tiny legitimate payer
+		edge("0xd", "0xb", 10, 2),         // another tiny payer
+	)
+	seedMap := map[string]float64{
+		"0xwhale": 0.5,
+		"0xb":     0.0,
+		"0xc":     0.3,
+		"0xd":     0.3,
+		"0xe":     0.1,
+	}
+
+	// Without cap
+	noCap := DefaultConfig()
+	noCap.MaxSourceInfluence = 0
+	noCap.CyclePenalty = 0
+	noCap.TemporalDecayRate = 0
+	engineNoCap := NewEngine(source, seeds(seedMap), noCap)
+	resultNC, err := engineNoCap.Compute(context.Background(), "no-cap")
+	if err != nil {
+		t.Fatalf("Compute failed: %v", err)
+	}
+
+	// With cap
+	withCap := DefaultConfig()
+	withCap.MaxSourceInfluence = 0.5
+	withCap.CyclePenalty = 0
+	withCap.TemporalDecayRate = 0
+	engineCap := NewEngine(source, seeds(seedMap), withCap)
+	resultC, err := engineCap.Compute(context.Background(), "with-cap")
+	if err != nil {
+		t.Fatalf("Compute failed: %v", err)
+	}
+
+	// With cap, whale's raw volume to B should be reduced from 10000 to ~5010
+	// (50% of total incoming = 50% of 10020). This changes whale's normalized
+	// outgoing distribution, redirecting proportionally more rank to E.
+	// B should get less rank, E should get more rank.
+	if resultC.Scores["0xb"].RawRank >= resultNC.Scores["0xb"].RawRank {
+		t.Errorf("Source influence cap should reduce B's raw rank. Without: %f, With: %f",
+			resultNC.Scores["0xb"].RawRank, resultC.Scores["0xb"].RawRank)
+	}
+	if resultC.Scores["0xe"].RawRank <= resultNC.Scores["0xe"].RawRank {
+		t.Errorf("Source influence cap should increase E's raw rank. Without: %f, With: %f",
+			resultNC.Scores["0xe"].RawRank, resultC.Scores["0xe"].RawRank)
+	}
+}
+
+func TestSybilRingWithDecays(t *testing.T) {
+	// Full Sybil ring attack with all three defenses enabled.
+	// This is the key test: Sybil nodes should have negligible scores.
+	now := time.Now()
+	source := edgesFrom(
+		// Sybil ring: high volume, cycling, old activity
+		PaymentEdge{From: "0xs1", To: "0xs2", Volume: 10000, TxCount: 40, LastTxAt: now.Add(-2 * 24 * time.Hour)},
+		PaymentEdge{From: "0xs2", To: "0xs3", Volume: 10000, TxCount: 40, LastTxAt: now.Add(-2 * 24 * time.Hour)},
+		PaymentEdge{From: "0xs3", To: "0xs1", Volume: 10000, TxCount: 40, LastTxAt: now.Add(-2 * 24 * time.Hour)},
+		// Legitimate agent: modest recent activity
+		PaymentEdge{From: "0xl", To: "0xm", Volume: 50, TxCount: 5, LastTxAt: now.Add(-1 * time.Hour)},
+	)
+	seedMap := map[string]float64{
+		"0xl":  0.5,
+		"0xm":  0.1,
+		"0xs1": 0,
+		"0xs2": 0,
+		"0xs3": 0,
+	}
+
+	engine := NewEngine(source, seeds(seedMap), DefaultConfig())
+	result, err := engine.Compute(context.Background(), "sybil-full-defense")
+	if err != nil {
+		t.Fatalf("Compute failed: %v", err)
+	}
+
+	// Legitimate agents MUST outrank all Sybil agents
+	lScore := result.Scores["0xl"].GraphScore
+	mScore := result.Scores["0xm"].GraphScore
+	for _, addr := range []string{"0xs1", "0xs2", "0xs3"} {
+		sScore := result.Scores[addr].GraphScore
+		if sScore >= lScore {
+			t.Errorf("Sybil %s (%.1f) should rank below legitimate 0xl (%.1f)", addr, sScore, lScore)
+		}
+		if sScore >= mScore {
+			t.Errorf("Sybil %s (%.1f) should rank below merchant 0xm (%.1f)", addr, sScore, mScore)
+		}
 	}
 }
 
