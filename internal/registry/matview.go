@@ -54,10 +54,12 @@ func (r *MatviewRefresher) Stop() {
 }
 
 func (r *MatviewRefresher) refresh(ctx context.Context) {
-	_, err := r.db.ExecContext(ctx, "REFRESH MATERIALIZED VIEW CONCURRENTLY service_listings_mv")
-	if err != nil {
-		r.logger.Warn("matview refresh failed", "error", err)
-		return
+	for _, mv := range []string{"service_listings_mv", "network_stats"} {
+		_, err := r.db.ExecContext(ctx, "REFRESH MATERIALIZED VIEW CONCURRENTLY "+mv)
+		if err != nil {
+			r.logger.Warn("matview refresh failed", "view", mv, "error", err)
+			continue
+		}
+		r.logger.Debug("refreshed matview", "view", mv)
 	}
-	r.logger.Debug("refreshed service_listings_mv")
 }

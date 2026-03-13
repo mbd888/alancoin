@@ -3,16 +3,18 @@ package flywheel
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"time"
 )
 
 // Worker periodically computes flywheel state metrics.
 type Worker struct {
-	engine   *Engine
-	store    SnapshotStore
-	interval time.Duration
-	logger   *slog.Logger
-	stop     chan struct{}
+	engine             *Engine
+	store              SnapshotStore
+	revenueAccumulator *RevenueAccumulator
+	interval           time.Duration
+	logger             *slog.Logger
+	stop               chan struct{}
 }
 
 // NewWorker creates a flywheel metrics worker.
@@ -29,6 +31,13 @@ func NewWorker(engine *Engine, interval time.Duration, logger *slog.Logger) *Wor
 // WithStore adds snapshot persistence so flywheel history survives restarts.
 func (w *Worker) WithStore(store SnapshotStore) *Worker {
 	w.store = store
+	return w
+}
+
+// WithRevenueAccumulator connects the revenue accumulator so the worker
+// drains buffered revenue entries each cycle, preventing unbounded memory growth.
+func (w *Worker) WithRevenueAccumulator(ra *RevenueAccumulator) *Worker {
+	w.revenueAccumulator = ra
 	return w
 }
 
@@ -71,6 +80,25 @@ func (w *Worker) compute(ctx context.Context) {
 	if w.store != nil {
 		if err := w.store.Save(ctx, state); err != nil {
 			w.logger.Warn("flywheel snapshot persistence failed", "error", err)
+		}
+	}
+
+	// Drain buffered revenue entries to prevent unbounded memory growth.
+	// Currently logs aggregate stats; in the future this feeds the
+	// staking/shareholder distribution system.
+	if w.revenueAccumulator != nil {
+		entries := w.revenueAccumulator.DrainPending()
+		if len(entries) > 0 {
+			var total float64
+			for _, e := range entries {
+				if f, err := strconv.ParseFloat(e.Amount, 64); err == nil {
+					total += f
+				}
+			}
+			w.logger.Info("revenue drained",
+				"entries", len(entries),
+				"totalUSD", total,
+			)
 		}
 	}
 

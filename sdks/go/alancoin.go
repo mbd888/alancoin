@@ -28,6 +28,9 @@ type Client struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
+	maxRetries int           // 0 = no retries (default)
+	retryBase  time.Duration // base delay for exponential backoff
+	retryMax   time.Duration // max delay cap
 }
 
 // Option configures a [Client].
@@ -51,6 +54,33 @@ func WithTimeout(d time.Duration) Option {
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) {
 		c.httpClient = hc
+	}
+}
+
+// WithRetry enables automatic retry with exponential backoff for transient
+// errors (429, 502, 503, 504, and network errors). Only idempotent methods
+// (GET, PUT, DELETE, HEAD) are retried by default.
+//
+// maxRetries is the number of retry attempts (not including the initial request).
+// A value of 3 means up to 4 total attempts.
+func WithRetry(maxRetries int) Option {
+	return func(c *Client) {
+		c.maxRetries = maxRetries
+		if c.retryBase == 0 {
+			c.retryBase = 500 * time.Millisecond
+		}
+		if c.retryMax == 0 {
+			c.retryMax = 30 * time.Second
+		}
+	}
+}
+
+// WithRetryBackoff configures the base and maximum delays for retry backoff.
+// The actual delay is base * 2^attempt with jitter, capped at max.
+func WithRetryBackoff(base, max time.Duration) Option {
+	return func(c *Client) {
+		c.retryBase = base
+		c.retryMax = max
 	}
 }
 

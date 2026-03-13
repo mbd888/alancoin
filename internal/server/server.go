@@ -993,7 +993,8 @@ func (s *Server) setupRoutes() {
 			fwInterval = 30 * time.Second // Fast in demo mode
 		}
 		s.flywheelWorker = flywheel.NewWorker(s.flywheelEngine, fwInterval, s.logger).
-			WithStore(s.flywheelStore)
+			WithStore(s.flywheelStore).
+			WithRevenueAccumulator(s.revenueAccumulator)
 	}
 
 	// Create matview refresher for service discovery (Postgres only)

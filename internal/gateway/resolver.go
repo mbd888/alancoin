@@ -92,7 +92,7 @@ func sortCandidates(candidates []ServiceCandidate, strategy string) {
 		})
 	case "tracerank":
 		sort.Slice(candidates, func(i, j int) bool {
-			return candidates[i].ReputationScore > candidates[j].ReputationScore
+			return candidates[i].TraceRankScore > candidates[j].TraceRankScore
 		})
 	case "best_value":
 		sort.Slice(candidates, func(i, j int) bool {

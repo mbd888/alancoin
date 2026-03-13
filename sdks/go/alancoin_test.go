@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -690,5 +691,180 @@ func TestFlywheelIncentives(t *testing.T) {
 	}
 	if incentives["feeDiscounts"] == nil {
 		t.Error("expected feeDiscounts")
+	}
+}
+
+func TestRetry_TransientServerError(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		if n <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"error":"temporarily unavailable"}`))
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, WithRetry(3), WithRetryBackoff(1*time.Millisecond, 10*time.Millisecond))
+	var out map[string]any
+	err := c.doJSON(context.Background(), http.MethodGet, "/test", nil, &out)
+	if err != nil {
+		t.Fatalf("expected success after retries, got %v", err)
+	}
+	if out["status"] != "ok" {
+		t.Errorf("status = %v", out["status"])
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Errorf("attempts = %d, want 3", got)
+	}
+}
+
+func TestRetry_ExhaustedReturnsLastError(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(`{"error":"bad gateway"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, WithRetry(2), WithRetryBackoff(1*time.Millisecond, 10*time.Millisecond))
+	err := c.doJSON(context.Background(), http.MethodGet, "/test", nil, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrServer) {
+		t.Errorf("expected ErrServer, got %v", err)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Errorf("attempts = %d, want 3 (1 initial + 2 retries)", got)
+	}
+}
+
+func TestRetry_NoRetryOnPost(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"unavailable"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, WithRetry(3), WithRetryBackoff(1*time.Millisecond, 10*time.Millisecond))
+	err := c.doJSON(context.Background(), http.MethodPost, "/test", map[string]string{"a": "b"}, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1 (POST should not retry)", got)
+	}
+}
+
+func TestRetry_NoRetryOn4xx(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"bad request"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, WithRetry(3), WithRetryBackoff(1*time.Millisecond, 10*time.Millisecond))
+	err := c.doJSON(context.Background(), http.MethodGet, "/test", nil, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1 (4xx should not retry)", got)
+	}
+}
+
+func TestRetry_RespectsRetryAfterHeader(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		if n == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"rate limited"}`))
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, WithRetry(1), WithRetryBackoff(1*time.Millisecond, 5*time.Second))
+	start := time.Now()
+	var out map[string]any
+	err := c.doJSON(context.Background(), http.MethodGet, "/test", nil, &out)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	// Retry-After: 1 means at least ~750ms delay (with jitter ±25%)
+	if elapsed < 700*time.Millisecond {
+		t.Errorf("expected at least 700ms delay from Retry-After, got %v", elapsed)
+	}
+}
+
+func TestRetry_ContextCancellation(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"unavailable"}`))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	c := NewClient(srv.URL, WithRetry(10), WithRetryBackoff(100*time.Millisecond, 1*time.Second))
+	err := c.doJSON(ctx, http.MethodGet, "/test", nil, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	// Should have stopped retrying after context deadline
+	if got := attempts.Load(); got > 3 {
+		t.Errorf("too many attempts = %d, context should have stopped retries", got)
+	}
+}
+
+func TestRetry_429Retried(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		if n == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"rate limited"}`))
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, WithRetry(2), WithRetryBackoff(1*time.Millisecond, 10*time.Millisecond))
+	var out map[string]any
+	err := c.doJSON(context.Background(), http.MethodGet, "/test", nil, &out)
+	if err != nil {
+		t.Fatalf("expected success after 429 retry, got %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("attempts = %d, want 2", got)
+	}
+}
+
+func TestWithRetry_DefaultBackoff(t *testing.T) {
+	c := NewClient("https://example.com", WithRetry(3))
+	if c.maxRetries != 3 {
+		t.Errorf("maxRetries = %d, want 3", c.maxRetries)
+	}
+	if c.retryBase != 500*time.Millisecond {
+		t.Errorf("retryBase = %v, want 500ms", c.retryBase)
+	}
+	if c.retryMax != 30*time.Second {
+		t.Errorf("retryMax = %v, want 30s", c.retryMax)
 	}
 }
