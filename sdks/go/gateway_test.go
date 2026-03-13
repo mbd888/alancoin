@@ -95,6 +95,26 @@ func newTestGatewayServer(t *testing.T) *httptest.Server {
 		})
 	})
 
+	mux.HandleFunc("POST /v1/gateway/sessions/sess_test/dry-run", func(w http.ResponseWriter, r *http.Request) {
+		var req DryRunRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		json.NewEncoder(w).Encode(dryRunResponse{
+			Result: DryRunResult{
+				Allowed:      true,
+				BudgetOk:     true,
+				Remaining:    "4.50",
+				ServiceFound: true,
+				BestPrice:    "0.25",
+				BestService:  "0xSELLER",
+				PolicyResult: &PolicyDecision{
+					Evaluated: 2,
+					Allowed:   true,
+					LatencyUs: 150,
+				},
+			},
+		})
+	})
+
 	mux.HandleFunc("GET /v1/gateway/sessions/sess_test/logs", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(listLogsResponse{
 			Logs: []RequestLog{
@@ -269,6 +289,45 @@ func TestGateway_Refresh(t *testing.T) {
 	}
 	if gw.TotalSpent() != "0.50" {
 		t.Errorf("session TotalSpent = %q", gw.TotalSpent())
+	}
+}
+
+func TestGateway_DryRun(t *testing.T) {
+	srv := newTestGatewayServer(t)
+	defer srv.Close()
+
+	c := NewClient(srv.URL, WithAPIKey("ak_test"))
+	ctx := context.Background()
+
+	gw, err := c.Gateway(ctx, GatewayConfig{MaxTotal: "5.00"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := gw.DryRun(ctx, DryRunRequest{
+		ServiceType: "inference",
+		Params:      map[string]any{"prompt": "test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Allowed {
+		t.Error("expected allowed")
+	}
+	if !result.BudgetOk {
+		t.Error("expected budgetOk")
+	}
+	if !result.ServiceFound {
+		t.Error("expected serviceFound")
+	}
+	if result.BestPrice != "0.25" {
+		t.Errorf("BestPrice = %q", result.BestPrice)
+	}
+	if result.PolicyResult == nil {
+		t.Fatal("expected PolicyResult")
+	}
+	if result.PolicyResult.Evaluated != 2 {
+		t.Errorf("Evaluated = %d", result.PolicyResult.Evaluated)
 	}
 }
 

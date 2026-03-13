@@ -410,6 +410,154 @@ type listWebhooksResponse struct {
 	Webhooks []Webhook `json:"webhooks"`
 }
 
+// --- TraceRank ---
+
+// TraceRankScore holds an agent's graph-based reputation score.
+type TraceRankScore struct {
+	Address      string    `json:"address"`
+	GraphScore   float64   `json:"graphScore"`
+	RawRank      float64   `json:"rawRank"`
+	SeedSignal   float64   `json:"seedSignal"`
+	InDegree     int       `json:"inDegree"`
+	OutDegree    int       `json:"outDegree"`
+	InVolume     float64   `json:"inVolume"`
+	OutVolume    float64   `json:"outVolume"`
+	Iterations   int       `json:"iterations"`
+	ComputedAt   time.Time `json:"computedAt"`
+	ComputeRunID string    `json:"computeRunId"`
+}
+
+// traceRankLeaderboardResponse wraps GET /v1/tracerank/leaderboard.
+type traceRankLeaderboardResponse struct {
+	Agents []TraceRankScore `json:"agents"`
+	Count  int              `json:"count"`
+}
+
+// TraceRankRun holds metadata about a TraceRank computation run.
+type TraceRankRun struct {
+	RunID      string  `json:"runId"`
+	NodeCount  int     `json:"nodeCount"`
+	EdgeCount  int     `json:"edgeCount"`
+	Iterations int     `json:"iterations"`
+	Converged  bool    `json:"converged"`
+	DurationMs int64   `json:"durationMs"`
+	MaxScore   float64 `json:"maxScore"`
+	MeanScore  float64 `json:"meanScore"`
+	ComputedAt string  `json:"computedAt"`
+}
+
+// traceRankRunsResponse wraps GET /v1/tracerank/runs.
+type traceRankRunsResponse struct {
+	Runs  []TraceRankRun `json:"runs"`
+	Count int            `json:"count"`
+}
+
+// --- Flywheel ---
+
+// FlywheelHealth is the condensed health response.
+type FlywheelHealth struct {
+	HealthScore        float64 `json:"healthScore"`
+	HealthTier         string  `json:"healthTier"`
+	VelocityScore      float64 `json:"velocityScore"`
+	GrowthScore        float64 `json:"growthScore"`
+	DensityScore       float64 `json:"densityScore"`
+	EffectivenessScore float64 `json:"effectivenessScore"`
+	RetentionScore     float64 `json:"retentionScore"`
+}
+
+// FlywheelState is the full flywheel state snapshot.
+type FlywheelState struct {
+	// Velocity
+	TransactionsPerHour float64 `json:"transactionsPerHour"`
+	VolumePerHourUSD    float64 `json:"volumePerHourUsd"`
+	// Growth
+	TxGrowthRatePct     float64 `json:"txGrowthRatePct"`
+	VolumeGrowthRatePct float64 `json:"volumeGrowthRatePct"`
+	NewAgents7d         int     `json:"newAgents7d"`
+	AgentGrowthRatePct  float64 `json:"agentGrowthRatePct"`
+	// Density
+	TotalAgents  int     `json:"totalAgents"`
+	ActiveAgents int     `json:"activeAgents7d"`
+	TotalEdges   int     `json:"totalEdges"`
+	GraphDensity float64 `json:"graphDensity"`
+	AvgDegree    float64 `json:"avgDegree"`
+	Reciprocity  float64 `json:"reciprocity"`
+	// Effectiveness
+	TierDistribution      map[string]int `json:"tierDistribution"`
+	TopTierTrafficShare   float64        `json:"topTierTrafficShare"`
+	ReputationCorrelation float64        `json:"reputationCorrelation"`
+	// Retention
+	RetentionRate7d float64 `json:"retentionRate7d"`
+	ChurnRate7d     float64 `json:"churnRate7d"`
+	// Scores
+	HealthScore        float64   `json:"healthScore"`
+	HealthTier         string    `json:"healthTier"`
+	VelocityScore      float64   `json:"velocityScore"`
+	GrowthScore        float64   `json:"growthScore"`
+	DensityScore       float64   `json:"densityScore"`
+	EffectivenessScore float64   `json:"effectivenessScore"`
+	RetentionScore     float64   `json:"retentionScore"`
+	ComputedAt         time.Time `json:"computedAt"`
+}
+
+// FlywheelHistoryEntry is a condensed history point.
+type FlywheelHistoryEntry struct {
+	HealthScore float64   `json:"healthScore"`
+	HealthTier  string    `json:"healthTier"`
+	TxPerHour   float64   `json:"txPerHour"`
+	Agents      int       `json:"agents"`
+	ComputedAt  time.Time `json:"computedAt"`
+}
+
+// flywheelHistoryResponse wraps GET /v1/flywheel/history.
+type flywheelHistoryResponse struct {
+	History []FlywheelHistoryEntry `json:"history"`
+}
+
+// --- Gateway Extensions ---
+
+// PolicyDecision holds the result of a spend policy evaluation.
+type PolicyDecision struct {
+	Evaluated  int    `json:"evaluated"`
+	Allowed    bool   `json:"allowed"`
+	DeniedBy   string `json:"deniedBy,omitempty"`
+	DeniedRule string `json:"deniedRule,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Shadow     bool   `json:"shadow,omitempty"`
+	LatencyUs  int64  `json:"latencyUs"`
+}
+
+// DryRunRequest is the body for POST /v1/gateway/sessions/:id/dry-run.
+type DryRunRequest struct {
+	ServiceType string         `json:"serviceType"`
+	Params      map[string]any `json:"params,omitempty"`
+	MaxPrice    string         `json:"maxPrice,omitempty"`
+	PreferAgent string         `json:"preferAgent,omitempty"`
+}
+
+// DryRunResult is the response from a dry-run check.
+type DryRunResult struct {
+	Allowed      bool            `json:"allowed"`
+	PolicyResult *PolicyDecision `json:"policyResult,omitempty"`
+	BudgetOk     bool            `json:"budgetOk"`
+	Remaining    string          `json:"remaining"`
+	ServiceFound bool            `json:"serviceFound"`
+	BestPrice    string          `json:"bestPrice,omitempty"`
+	BestService  string          `json:"bestService,omitempty"`
+	DenyReason   string          `json:"denyReason,omitempty"`
+}
+
+// dryRunResponse wraps the dry-run endpoint response.
+type dryRunResponse struct {
+	Result DryRunResult `json:"result"`
+}
+
+// listTransactionsResponse wraps GET /v1/agents/:addr/transactions.
+type listTransactionsResponse struct {
+	Transactions []Transaction `json:"transactions"`
+	Count        int           `json:"count"`
+}
+
 // --- Service Type Constants ---
 
 const (

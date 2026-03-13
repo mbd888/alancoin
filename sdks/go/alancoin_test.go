@@ -449,3 +449,246 @@ func TestWebhookCRUD(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestListTransactions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/agents/0xABC/transactions" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(listTransactionsResponse{
+			Transactions: []Transaction{
+				{ID: "tx_1", From: "0xABC", To: "0xDEF", Amount: "1.00", Status: "confirmed"},
+				{ID: "tx_2", From: "0xDEF", To: "0xABC", Amount: "0.50", Status: "confirmed"},
+			},
+			Count: 2,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, WithAPIKey("ak_test"))
+	txns, err := c.ListTransactions(context.Background(), "0xABC", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(txns) != 2 {
+		t.Errorf("len = %d", len(txns))
+	}
+	if txns[0].ID != "tx_1" || txns[0].Amount != "1.00" {
+		t.Errorf("tx[0] = %+v", txns[0])
+	}
+}
+
+func TestListGatewaySessions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/gateway/sessions" || r.Method != http.MethodGet {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(listSessionsResponse{
+			Sessions: []GatewaySessionInfo{
+				{ID: "sess_1", Status: "active", MaxTotal: "10.00", TotalSpent: "3.00"},
+				{ID: "sess_2", Status: "closed", MaxTotal: "5.00", TotalSpent: "5.00"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, WithAPIKey("ak_test"))
+	sessions, err := c.ListGatewaySessions(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 2 {
+		t.Errorf("len = %d", len(sessions))
+	}
+	if sessions[0].ID != "sess_1" || sessions[0].Status != "active" {
+		t.Errorf("session[0] = %+v", sessions[0])
+	}
+}
+
+func TestTraceRankScore(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/tracerank/0xABC" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(TraceRankScore{
+			Address:    "0xABC",
+			GraphScore: 72.5,
+			InDegree:   15,
+			OutDegree:  8,
+			InVolume:   500.0,
+			OutVolume:  200.0,
+			Iterations: 42,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	score, err := c.TraceRankScore(context.Background(), "0xABC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if score.GraphScore != 72.5 {
+		t.Errorf("GraphScore = %f", score.GraphScore)
+	}
+	if score.InDegree != 15 {
+		t.Errorf("InDegree = %d", score.InDegree)
+	}
+}
+
+func TestTraceRankLeaderboard(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/tracerank/leaderboard" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(traceRankLeaderboardResponse{
+			Agents: []TraceRankScore{
+				{Address: "0xA", GraphScore: 95.0},
+				{Address: "0xB", GraphScore: 88.0},
+			},
+			Count: 2,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	agents, err := c.TraceRankLeaderboard(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 2 {
+		t.Errorf("len = %d", len(agents))
+	}
+	if agents[0].GraphScore != 95.0 {
+		t.Errorf("agents[0].GraphScore = %f", agents[0].GraphScore)
+	}
+}
+
+func TestTraceRankRuns(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(traceRankRunsResponse{
+			Runs: []TraceRankRun{
+				{RunID: "run_1", NodeCount: 100, EdgeCount: 500, Converged: true, DurationMs: 250},
+			},
+			Count: 1,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	runs, err := c.TraceRankRuns(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].RunID != "run_1" {
+		t.Errorf("runs = %+v", runs)
+	}
+	if !runs[0].Converged {
+		t.Error("expected converged")
+	}
+}
+
+func TestFlywheelHealth(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/flywheel/health" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(FlywheelHealth{
+			HealthScore:        65.0,
+			HealthTier:         "accelerating",
+			VelocityScore:      80.0,
+			GrowthScore:        60.0,
+			DensityScore:       50.0,
+			EffectivenessScore: 70.0,
+			RetentionScore:     55.0,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	health, err := c.FlywheelHealth(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.HealthScore != 65.0 {
+		t.Errorf("HealthScore = %f", health.HealthScore)
+	}
+	if health.HealthTier != "accelerating" {
+		t.Errorf("HealthTier = %q", health.HealthTier)
+	}
+}
+
+func TestFlywheelState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/flywheel/state" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(FlywheelState{
+			TotalAgents:     50,
+			ActiveAgents:    30,
+			TotalEdges:      120,
+			GraphDensity:    0.15,
+			HealthScore:     65.0,
+			HealthTier:      "accelerating",
+			RetentionRate7d: 0.85,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	state, err := c.FlywheelState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.TotalAgents != 50 {
+		t.Errorf("TotalAgents = %d", state.TotalAgents)
+	}
+	if state.GraphDensity != 0.15 {
+		t.Errorf("GraphDensity = %f", state.GraphDensity)
+	}
+}
+
+func TestFlywheelHistory(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(flywheelHistoryResponse{
+			History: []FlywheelHistoryEntry{
+				{HealthScore: 65.0, HealthTier: "accelerating", TxPerHour: 42.0, Agents: 50},
+				{HealthScore: 60.0, HealthTier: "spinning", TxPerHour: 35.0, Agents: 45},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	history, err := c.FlywheelHistory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("len = %d", len(history))
+	}
+	if history[0].HealthScore != 65.0 {
+		t.Errorf("history[0].HealthScore = %f", history[0].HealthScore)
+	}
+}
+
+func TestFlywheelIncentives(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/flywheel/incentives" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"feeDiscounts":    map[string]any{"elite": 125, "trusted": 87},
+			"discoveryBoosts": map[string]any{"elite": 1.5, "trusted": 1.3},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	incentives, err := c.FlywheelIncentives(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if incentives["feeDiscounts"] == nil {
+		t.Error("expected feeDiscounts")
+	}
+}

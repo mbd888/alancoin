@@ -111,6 +111,16 @@ func (gs *GatewaySession) Refresh(ctx context.Context) (*GatewaySessionInfo, err
 	return &gs.info, nil
 }
 
+// DryRun pre-checks whether a proxy request would succeed without spending any budget.
+func (gs *GatewaySession) DryRun(ctx context.Context, req DryRunRequest) (*DryRunResult, error) {
+	path := fmt.Sprintf("/v1/gateway/sessions/%s/dry-run", gs.info.ID)
+	var resp dryRunResponse
+	if err := gs.client.doJSON(ctx, http.MethodPost, path, &req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Result, nil
+}
+
 // headers returns the extra headers required for gateway proxy requests.
 func (gs *GatewaySession) headers() map[string]string {
 	return map[string]string{

@@ -18,6 +18,7 @@ package alancoin
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -113,6 +114,20 @@ func (c *Client) SingleCall(ctx context.Context, serviceType, maxPrice string, p
 		return nil, err
 	}
 	return &out, nil
+}
+
+// ListGatewaySessions lists all gateway sessions for the authenticated agent.
+func (c *Client) ListGatewaySessions(ctx context.Context, limit int) ([]GatewaySessionInfo, error) {
+	l := "50"
+	if limit > 0 {
+		l = fmt.Sprintf("%d", limit)
+	}
+	path := "/v1/gateway/sessions" + buildQuery("limit", l)
+	var out listSessionsResponse
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Sessions, nil
 }
 
 // Connect is a convenience function that creates a client and opens a gateway session.

@@ -46,3 +46,17 @@ func (c *Client) ListAgents(ctx context.Context, limit, offset int, serviceType 
 func (c *Client) DeleteAgent(ctx context.Context, address string) error {
 	return c.doJSON(ctx, http.MethodDelete, fmt.Sprintf("/v1/agents/%s", address), nil, nil)
 }
+
+// ListTransactions retrieves transaction history for an agent.
+func (c *Client) ListTransactions(ctx context.Context, agentAddr string, limit int) ([]Transaction, error) {
+	l := "100"
+	if limit > 0 {
+		l = fmt.Sprintf("%d", limit)
+	}
+	path := fmt.Sprintf("/v1/agents/%s/transactions", agentAddr) + buildQuery("limit", l)
+	var out listTransactionsResponse
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Transactions, nil
+}
