@@ -201,6 +201,10 @@ sdk-test: ## Run Python SDK tests
 	@echo "$(GREEN)Running SDK tests...$(NC)"
 	cd sdks/python && pip install -e ".[dev]" -q && pytest tests/ -v
 
+go-sdk-test: ## Run Go SDK tests
+	@echo "$(GREEN)Running Go SDK tests...$(NC)"
+	cd sdks/go && go build ./... && go vet ./... && go test -race -count=1 -v ./...
+
 test-harness: ## Run research harness unit tests
 	@echo "$(GREEN)Running harness unit tests...$(NC)"
 	cd experiments && python3 -m pytest tests/ -v

@@ -558,6 +558,282 @@ type listTransactionsResponse struct {
 	Count        int           `json:"count"`
 }
 
+// --- Streaming Micropayments ---
+
+// Stream represents a streaming micropayment channel.
+type Stream struct {
+	ID              string     `json:"id"`
+	BuyerAddr       string     `json:"buyerAddr"`
+	SellerAddr      string     `json:"sellerAddr"`
+	ServiceID       string     `json:"serviceId,omitempty"`
+	SessionKeyID    string     `json:"sessionKeyId,omitempty"`
+	HoldAmount      string     `json:"holdAmount"`
+	SpentAmount     string     `json:"spentAmount"`
+	PricePerTick    string     `json:"pricePerTick"`
+	TickCount       int        `json:"tickCount"`
+	Status          string     `json:"status"`
+	StaleTimeoutSec int        `json:"staleTimeoutSecs"`
+	LastTickAt      *time.Time `json:"lastTickAt,omitempty"`
+	ClosedAt        *time.Time `json:"closedAt,omitempty"`
+	CloseReason     string     `json:"closeReason,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+}
+
+// StreamTick represents a single micropayment tick.
+type StreamTick struct {
+	ID         string    `json:"id"`
+	StreamID   string    `json:"streamId"`
+	Seq        int       `json:"seq"`
+	Amount     string    `json:"amount"`
+	Cumulative string    `json:"cumulative"`
+	Metadata   string    `json:"metadata,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// OpenStreamRequest is the body for POST /v1/streams.
+type OpenStreamRequest struct {
+	BuyerAddr       string `json:"buyerAddr"`
+	SellerAddr      string `json:"sellerAddr"`
+	HoldAmount      string `json:"holdAmount"`
+	PricePerTick    string `json:"pricePerTick"`
+	ServiceID       string `json:"serviceId,omitempty"`
+	SessionKeyID    string `json:"sessionKeyId,omitempty"`
+	StaleTimeoutSec int    `json:"staleTimeoutSecs,omitempty"`
+}
+
+// TickStreamRequest is the body for POST /v1/streams/:id/tick.
+type TickStreamRequest struct {
+	Seq      int    `json:"seq,omitempty"`
+	Amount   string `json:"amount,omitempty"`
+	Metadata string `json:"metadata,omitempty"`
+}
+
+// streamResponse wraps stream endpoint responses.
+type streamResponse struct {
+	Stream Stream `json:"stream"`
+}
+
+// tickResponse wraps POST /v1/streams/:id/tick.
+type tickResponse struct {
+	Tick   StreamTick `json:"tick"`
+	Stream Stream     `json:"stream"`
+}
+
+// listTicksResponse wraps GET /v1/streams/:id/ticks.
+type listTicksResponse struct {
+	Ticks []StreamTick `json:"ticks"`
+}
+
+// listStreamsResponse wraps GET /v1/agents/:addr/streams.
+type listStreamsResponse struct {
+	Streams []Stream `json:"streams"`
+}
+
+// --- Escrow (Buyer Protection) ---
+
+// Escrow represents a buyer-protection escrow record.
+type Escrow struct {
+	ID                   string          `json:"id"`
+	BuyerAddr            string          `json:"buyerAddr"`
+	SellerAddr           string          `json:"sellerAddr"`
+	Amount               string          `json:"amount"`
+	ServiceID            string          `json:"serviceId,omitempty"`
+	SessionKeyID         string          `json:"sessionKeyId,omitempty"`
+	Status               string          `json:"status"`
+	AutoReleaseAt        time.Time       `json:"autoReleaseAt"`
+	DeliveredAt          *time.Time      `json:"deliveredAt,omitempty"`
+	ResolvedAt           *time.Time      `json:"resolvedAt,omitempty"`
+	DisputeReason        string          `json:"disputeReason,omitempty"`
+	Resolution           string          `json:"resolution,omitempty"`
+	CreatedAt            time.Time       `json:"createdAt"`
+	UpdatedAt            time.Time       `json:"updatedAt"`
+	DisputeEvidence      []EvidenceEntry `json:"disputeEvidence,omitempty"`
+	ArbitratorAddr       string          `json:"arbitratorAddr,omitempty"`
+	ArbitrationDeadline  *time.Time      `json:"arbitrationDeadline,omitempty"`
+	PartialReleaseAmount string          `json:"partialReleaseAmount,omitempty"`
+}
+
+// EvidenceEntry is a piece of dispute evidence.
+type EvidenceEntry struct {
+	SubmittedBy string    `json:"submittedBy"`
+	Content     string    `json:"content"`
+	SubmittedAt time.Time `json:"submittedAt"`
+}
+
+// CreateEscrowRequest is the body for POST /v1/escrow.
+type CreateEscrowRequest struct {
+	BuyerAddr    string `json:"buyerAddr"`
+	SellerAddr   string `json:"sellerAddr"`
+	Amount       string `json:"amount"`
+	ServiceID    string `json:"serviceId,omitempty"`
+	SessionKeyID string `json:"sessionKeyId,omitempty"`
+	AutoRelease  string `json:"autoRelease,omitempty"`
+}
+
+// escrowResponse wraps escrow endpoint responses.
+type escrowResponse struct {
+	Escrow Escrow `json:"escrow"`
+}
+
+// listEscrowsResponse wraps GET /v1/agents/:addr/escrows.
+type listEscrowsResponse struct {
+	Escrows []Escrow `json:"escrows"`
+}
+
+// --- Session Keys (Bounded Autonomy) ---
+
+// SessionKeyPermission defines the spending constraints for a session key.
+type SessionKeyPermission struct {
+	MaxPerTransaction    string    `json:"maxPerTransaction,omitempty"`
+	MaxPerDay            string    `json:"maxPerDay,omitempty"`
+	MaxTotal             string    `json:"maxTotal,omitempty"`
+	ValidAfter           time.Time `json:"validAfter,omitempty"`
+	ExpiresAt            time.Time `json:"expiresAt"`
+	AllowedRecipients    []string  `json:"allowedRecipients,omitempty"`
+	AllowedServiceTypes  []string  `json:"allowedServiceTypes,omitempty"`
+	AllowedServiceAgents []string  `json:"allowedServiceAgents,omitempty"`
+	AllowAny             bool      `json:"allowAny,omitempty"`
+	Scopes               []string  `json:"scopes,omitempty"`
+	Label                string    `json:"label,omitempty"`
+}
+
+// SessionKeyUsage tracks how a session key has been used.
+type SessionKeyUsage struct {
+	TransactionCount int       `json:"transactionCount"`
+	TotalSpent       string    `json:"totalSpent"`
+	SpentToday       string    `json:"spentToday"`
+	LastUsed         time.Time `json:"lastUsed,omitempty"`
+	LastResetDay     string    `json:"lastResetDay,omitempty"`
+	LastNonce        uint64    `json:"lastNonce"`
+}
+
+// SessionKey represents a bounded-autonomy session key.
+type SessionKey struct {
+	ID               string               `json:"id"`
+	OwnerAddr        string               `json:"ownerAddr"`
+	PublicKey        string               `json:"publicKey"`
+	CreatedAt        time.Time            `json:"createdAt"`
+	RevokedAt        *time.Time           `json:"revokedAt,omitempty"`
+	Permission       SessionKeyPermission `json:"permission"`
+	Usage            SessionKeyUsage      `json:"usage"`
+	ParentKeyID      string               `json:"parentKeyId,omitempty"`
+	Depth            int                  `json:"depth"`
+	RootKeyID        string               `json:"rootKeyId,omitempty"`
+	DelegationLabel  string               `json:"delegationLabel,omitempty"`
+	RotatedFromID    string               `json:"rotatedFromId,omitempty"`
+	RotatedToID      string               `json:"rotatedToId,omitempty"`
+	RotationGraceEnd *time.Time           `json:"rotationGraceEnd,omitempty"`
+}
+
+// CreateSessionKeyRequest is the body for POST /v1/agents/:addr/sessions.
+type CreateSessionKeyRequest struct {
+	PublicKey           string   `json:"publicKey"`
+	MaxPerTransaction   string   `json:"maxPerTransaction,omitempty"`
+	MaxPerDay           string   `json:"maxPerDay,omitempty"`
+	MaxTotal            string   `json:"maxTotal,omitempty"`
+	ExpiresIn           string   `json:"expiresIn,omitempty"`
+	ExpiresAt           string   `json:"expiresAt,omitempty"`
+	AllowedRecipients   []string `json:"allowedRecipients,omitempty"`
+	AllowedServiceTypes []string `json:"allowedServiceTypes,omitempty"`
+	AllowAny            bool     `json:"allowAny,omitempty"`
+	Scopes              []string `json:"scopes,omitempty"`
+	Label               string   `json:"label,omitempty"`
+}
+
+// createSessionKeyResponse wraps POST /v1/agents/:addr/sessions.
+type createSessionKeyResponse struct {
+	ID         string               `json:"id"`
+	Permission SessionKeyPermission `json:"permissions"`
+	Usage      SessionKeyUsage      `json:"usage"`
+}
+
+// listSessionKeysResponse wraps GET /v1/agents/:addr/sessions.
+type listSessionKeysResponse struct {
+	Sessions []SessionKey `json:"sessions"`
+}
+
+// getSessionKeyResponse wraps GET /v1/agents/:addr/sessions/:keyId.
+type getSessionKeyResponse struct {
+	Session SessionKey `json:"session"`
+}
+
+// TransactRequest is the body for POST /v1/agents/:addr/sessions/:keyId/transact.
+type TransactRequest struct {
+	To        string `json:"to"`
+	Amount    string `json:"amount"`
+	ServiceID string `json:"serviceId,omitempty"`
+	Nonce     uint64 `json:"nonce"`
+	Timestamp int64  `json:"timestamp"`
+	Signature string `json:"signature"`
+}
+
+// TransactResponse wraps the response from a session key transaction.
+type TransactResponse struct {
+	TxHash       string    `json:"txHash"`
+	From         string    `json:"from"`
+	To           string    `json:"to"`
+	Amount       string    `json:"amount"`
+	SessionKeyID string    `json:"sessionKeyId"`
+	Timestamp    time.Time `json:"timestamp"`
+}
+
+// DelegateRequest is the body for POST /v1/sessions/:keyId/delegate.
+type DelegateRequest struct {
+	PublicKey           string   `json:"publicKey"`
+	MaxTotal            string   `json:"maxTotal"`
+	MaxPerTransaction   string   `json:"maxPerTransaction,omitempty"`
+	MaxPerDay           string   `json:"maxPerDay,omitempty"`
+	ExpiresIn           string   `json:"expiresIn,omitempty"`
+	AllowedRecipients   []string `json:"allowedRecipients,omitempty"`
+	AllowedServiceTypes []string `json:"allowedServiceTypes,omitempty"`
+	AllowAny            bool     `json:"allowAny,omitempty"`
+	Scopes              []string `json:"scopes,omitempty"`
+	DelegationLabel     string   `json:"delegationLabel,omitempty"`
+	Nonce               uint64   `json:"nonce"`
+	Timestamp           int64    `json:"timestamp"`
+	Signature           string   `json:"signature"`
+}
+
+// DelegationTreeNode represents a node in a delegation hierarchy.
+type DelegationTreeNode struct {
+	KeyID            string                `json:"keyId"`
+	PublicKey        string                `json:"publicKey"`
+	Label            string                `json:"label,omitempty"`
+	Depth            int                   `json:"depth"`
+	MaxTotal         string                `json:"maxTotal,omitempty"`
+	TotalSpent       string                `json:"totalSpent"`
+	Remaining        string                `json:"remaining"`
+	TransactionCount int                   `json:"transactionCount"`
+	Active           bool                  `json:"active"`
+	Children         []*DelegationTreeNode `json:"children,omitempty"`
+}
+
+// delegationTreeResponse wraps GET /v1/sessions/:keyId/tree.
+type delegationTreeResponse struct {
+	Tree DelegationTreeNode `json:"tree"`
+}
+
+// DelegationLogEntry is an audit record for delegation events.
+type DelegationLogEntry struct {
+	ID            int       `json:"id"`
+	ParentKeyID   string    `json:"parentKeyId"`
+	ChildKeyID    string    `json:"childKeyId"`
+	RootKeyID     string    `json:"rootKeyId"`
+	RootOwnerAddr string    `json:"rootOwnerAddr"`
+	Depth         int       `json:"depth"`
+	MaxTotal      string    `json:"maxTotal,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	EventType     string    `json:"eventType"`
+	AncestorChain []string  `json:"ancestorChain,omitempty"`
+	Metadata      string    `json:"metadata,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+}
+
+// delegationLogResponse wraps GET /v1/sessions/:keyId/delegation-log.
+type delegationLogResponse struct {
+	Log []DelegationLogEntry `json:"log"`
+}
+
 // --- Service Type Constants ---
 
 const (
