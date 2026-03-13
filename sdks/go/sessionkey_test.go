@@ -103,6 +103,22 @@ func newSessionKeyServer(t *testing.T) *httptest.Server {
 		})
 	})
 
+	mux.HandleFunc("POST /v1/agents/0xABC/sessions/sk_1/rotate", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(getSessionKeyResponse{
+			Session: SessionKey{
+				ID:            "sk_rotated",
+				OwnerAddr:     "0xABC",
+				PublicKey:     "0x04new...",
+				RotatedFromID: "sk_1",
+				Permission: SessionKeyPermission{
+					MaxTotal:  "6.50",
+					ExpiresAt: time.Now().Add(time.Hour),
+				},
+				Usage: SessionKeyUsage{TotalSpent: "0.00"},
+			},
+		})
+	})
+
 	mux.HandleFunc("GET /v1/sessions/sk_1/delegation-log", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(delegationLogResponse{
 			Log: []DelegationLogEntry{
@@ -221,6 +237,26 @@ func TestDelegationTree(t *testing.T) {
 	}
 	if tree.Children[0].KeyID != "sk_child_1" {
 		t.Errorf("child KeyID = %q", tree.Children[0].KeyID)
+	}
+}
+
+func TestRotateSessionKey(t *testing.T) {
+	srv := newSessionKeyServer(t)
+	defer srv.Close()
+
+	c := NewClient(srv.URL, WithAPIKey("ak_test"))
+	key, err := c.RotateSessionKey(context.Background(), "0xABC", "sk_1", "0x04new...")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key.ID != "sk_rotated" {
+		t.Errorf("ID = %q", key.ID)
+	}
+	if key.RotatedFromID != "sk_1" {
+		t.Errorf("RotatedFromID = %q", key.RotatedFromID)
+	}
+	if key.Permission.MaxTotal != "6.50" {
+		t.Errorf("MaxTotal = %q", key.Permission.MaxTotal)
 	}
 }
 

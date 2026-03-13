@@ -86,3 +86,17 @@ func (c *Client) DelegationLog(ctx context.Context, keyID string) ([]DelegationL
 	}
 	return out.Log, nil
 }
+
+// RotateSessionKey replaces a session key with a new one, inheriting remaining
+// budget and permissions. The old key enters a grace period before full revocation.
+func (c *Client) RotateSessionKey(ctx context.Context, agentAddr, keyID string, newPublicKey string) (*SessionKey, error) {
+	req := struct {
+		NewPublicKey string `json:"newPublicKey"`
+	}{NewPublicKey: newPublicKey}
+	path := fmt.Sprintf("/v1/agents/%s/sessions/%s/rotate", agentAddr, keyID)
+	var out getSessionKeyResponse
+	if err := c.doJSON(ctx, http.MethodPost, path, &req, &out); err != nil {
+		return nil, err
+	}
+	return &out.Session, nil
+}

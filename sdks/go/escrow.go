@@ -67,3 +67,43 @@ func (c *Client) ListEscrows(ctx context.Context, agentAddr string, limit int) (
 	}
 	return out.Escrows, nil
 }
+
+// SubmitEvidence submits a piece of evidence to an escrow dispute.
+func (c *Client) SubmitEvidence(ctx context.Context, escrowID, content string) (*Escrow, error) {
+	req := struct {
+		Content string `json:"content"`
+	}{Content: content}
+	var out escrowResponse
+	path := fmt.Sprintf("/v1/escrow/%s/evidence", escrowID)
+	if err := c.doJSON(ctx, http.MethodPost, path, &req, &out); err != nil {
+		return nil, err
+	}
+	return &out.Escrow, nil
+}
+
+// AssignArbitrator assigns an arbitrator to a disputed escrow.
+func (c *Client) AssignArbitrator(ctx context.Context, escrowID, arbitratorAddr string) (*Escrow, error) {
+	req := struct {
+		ArbitratorAddr string `json:"arbitratorAddr"`
+	}{ArbitratorAddr: arbitratorAddr}
+	var out escrowResponse
+	path := fmt.Sprintf("/v1/escrow/%s/arbitrate", escrowID)
+	if err := c.doJSON(ctx, http.MethodPost, path, &req, &out); err != nil {
+		return nil, err
+	}
+	return &out.Escrow, nil
+}
+
+// ResolveArbitration resolves a disputed escrow with an arbitrator decision.
+func (c *Client) ResolveArbitration(ctx context.Context, escrowID, resolution string, partialAmount string) (*Escrow, error) {
+	req := struct {
+		Resolution    string `json:"resolution"`
+		PartialAmount string `json:"partialAmount,omitempty"`
+	}{Resolution: resolution, PartialAmount: partialAmount}
+	var out escrowResponse
+	path := fmt.Sprintf("/v1/escrow/%s/resolve", escrowID)
+	if err := c.doJSON(ctx, http.MethodPost, path, &req, &out); err != nil {
+		return nil, err
+	}
+	return &out.Escrow, nil
+}

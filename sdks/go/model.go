@@ -834,6 +834,395 @@ type delegationLogResponse struct {
 	Log []DelegationLogEntry `json:"log"`
 }
 
+// --- MultiStep Escrow ---
+
+// PlannedStep is a single step in a multistep escrow plan.
+type PlannedStep struct {
+	SellerAddr string `json:"sellerAddr"`
+	Amount     string `json:"amount"`
+}
+
+// MultiStepEscrow holds funds for an N-step pipeline with per-step release.
+type MultiStepEscrow struct {
+	ID             string        `json:"id"`
+	BuyerAddr      string        `json:"buyerAddr"`
+	TotalAmount    string        `json:"totalAmount"`
+	SpentAmount    string        `json:"spentAmount"`
+	TotalSteps     int           `json:"totalSteps"`
+	ConfirmedSteps int           `json:"confirmedSteps"`
+	PlannedSteps   []PlannedStep `json:"plannedSteps"`
+	Status         string        `json:"status"`
+	CreatedAt      time.Time     `json:"createdAt"`
+	UpdatedAt      time.Time     `json:"updatedAt"`
+}
+
+// CreateMultiStepEscrowRequest is the body for POST /v1/escrow/multistep.
+type CreateMultiStepEscrowRequest struct {
+	TotalAmount  string        `json:"totalAmount"`
+	TotalSteps   int           `json:"totalSteps"`
+	PlannedSteps []PlannedStep `json:"plannedSteps"`
+}
+
+// ConfirmStepRequest is the body for POST /v1/escrow/multistep/:id/confirm-step.
+type ConfirmStepRequest struct {
+	StepIndex  int    `json:"stepIndex"`
+	SellerAddr string `json:"sellerAddr"`
+	Amount     string `json:"amount"`
+}
+
+// multiStepEscrowResponse wraps multistep escrow endpoint responses.
+type multiStepEscrowResponse struct {
+	Escrow MultiStepEscrow `json:"escrow"`
+}
+
+// --- Receipts ---
+
+// Receipt is an HMAC-signed payment proof.
+type Receipt struct {
+	ID          string    `json:"id"`
+	PaymentPath string    `json:"paymentPath"`
+	Reference   string    `json:"reference"`
+	From        string    `json:"from"`
+	To          string    `json:"to"`
+	Amount      string    `json:"amount"`
+	ServiceID   string    `json:"serviceId,omitempty"`
+	Status      string    `json:"status"`
+	PayloadHash string    `json:"payloadHash"`
+	Signature   string    `json:"signature"`
+	IssuedAt    time.Time `json:"issuedAt"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+	Metadata    string    `json:"metadata,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// ReceiptVerifyRequest is the body for POST /v1/receipts/verify.
+type ReceiptVerifyRequest struct {
+	ReceiptID string `json:"receiptId"`
+}
+
+// ReceiptVerifyResponse is the result of receipt verification.
+type ReceiptVerifyResponse struct {
+	Valid     bool   `json:"valid"`
+	ReceiptID string `json:"receiptId"`
+	Expired   bool   `json:"expired,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// listReceiptsResponse wraps GET /v1/agents/:addr/receipts.
+type listReceiptsResponse struct {
+	Receipts []Receipt `json:"receipts"`
+}
+
+// --- Spend Policies ---
+
+// PolicyRule is a single constraint within a spend policy.
+type PolicyRule struct {
+	Type   string         `json:"type"`
+	Params map[string]any `json:"params"`
+}
+
+// SpendPolicy defines a set of spend rules for a tenant.
+type SpendPolicy struct {
+	ID              string       `json:"id"`
+	TenantID        string       `json:"tenantId"`
+	Name            string       `json:"name"`
+	Rules           []PolicyRule `json:"rules"`
+	Priority        int          `json:"priority"`
+	Enabled         bool         `json:"enabled"`
+	EnforcementMode string       `json:"enforcementMode"`
+	ShadowExpiresAt time.Time    `json:"shadowExpiresAt,omitempty"`
+	CreatedAt       time.Time    `json:"createdAt"`
+	UpdatedAt       time.Time    `json:"updatedAt"`
+}
+
+// CreatePolicyRequest is the body for POST /v1/agents/:addr/policies.
+type CreatePolicyRequest struct {
+	Name            string       `json:"name"`
+	Rules           []PolicyRule `json:"rules"`
+	Priority        int          `json:"priority,omitempty"`
+	Enabled         *bool        `json:"enabled,omitempty"`
+	EnforcementMode string       `json:"enforcementMode,omitempty"`
+}
+
+// UpdatePolicyRequest is the body for PUT /v1/agents/:addr/policies/:id.
+type UpdatePolicyRequest struct {
+	Name            string       `json:"name,omitempty"`
+	Rules           []PolicyRule `json:"rules,omitempty"`
+	Priority        *int         `json:"priority,omitempty"`
+	Enabled         *bool        `json:"enabled,omitempty"`
+	EnforcementMode string       `json:"enforcementMode,omitempty"`
+}
+
+// listPoliciesResponse wraps GET /v1/tenants/:id/policies.
+type listPoliciesResponse struct {
+	Policies []SpendPolicy `json:"policies"`
+}
+
+// --- Auth / API Keys ---
+
+// APIKeyInfo represents metadata about an API key (secret not included).
+type APIKeyInfo struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"createdAt"`
+	LastUsed  time.Time `json:"lastUsed,omitempty"`
+	Revoked   bool      `json:"revoked"`
+}
+
+// AuthMe is the response from GET /v1/auth/me.
+type AuthMe struct {
+	AgentAddress string    `json:"agentAddress"`
+	KeyID        string    `json:"keyId"`
+	KeyName      string    `json:"keyName"`
+	CreatedAt    time.Time `json:"createdAt"`
+	LastUsed     time.Time `json:"lastUsed,omitempty"`
+}
+
+// AuthInfo is the response from GET /v1/auth/info.
+type AuthInfo struct {
+	Type               string   `json:"type"`
+	Header             string   `json:"header"`
+	AltHeader          string   `json:"altHeader"`
+	Note               string   `json:"note"`
+	PublicEndpoints    []string `json:"publicEndpoints"`
+	ProtectedEndpoints []string `json:"protectedEndpoints"`
+}
+
+// CreateAPIKeyRequest is the body for POST /v1/auth/keys.
+type CreateAPIKeyRequest struct {
+	Name string `json:"name"`
+}
+
+// CreateAPIKeyResponse is the response from POST /v1/auth/keys.
+type CreateAPIKeyResponse struct {
+	APIKey  string `json:"apiKey"`
+	KeyID   string `json:"keyId"`
+	Name    string `json:"name"`
+	Warning string `json:"warning"`
+}
+
+// RegenerateKeyResponse is the response from POST /v1/auth/keys/:keyId/regenerate.
+type RegenerateKeyResponse struct {
+	APIKey   string `json:"apiKey"`
+	KeyID    string `json:"keyId"`
+	OldKeyID string `json:"oldKeyId"`
+	Warning  string `json:"warning"`
+}
+
+// listKeysResponse wraps GET /v1/auth/keys.
+type listKeysResponse struct {
+	Keys  []APIKeyInfo `json:"keys"`
+	Count int          `json:"count"`
+}
+
+// --- Tenants ---
+
+// TenantSettings holds tenant-level configuration.
+type TenantSettings struct {
+	RateLimitRpm     int      `json:"rateLimitRpm"`
+	MaxAgents        int      `json:"maxAgents"`
+	MaxSessionBudget string   `json:"maxSessionBudget"`
+	AllowedOrigins   []string `json:"allowedOrigins,omitempty"`
+	TakeRateBps      int      `json:"takeRateBps"`
+}
+
+// Tenant represents a multi-tenant account.
+type Tenant struct {
+	ID                   string         `json:"id"`
+	Name                 string         `json:"name"`
+	Slug                 string         `json:"slug"`
+	Plan                 string         `json:"plan"`
+	StripeCustomerID     string         `json:"stripeCustomerId,omitempty"`
+	StripeSubscriptionID string         `json:"stripeSubscriptionId,omitempty"`
+	Status               string         `json:"status"`
+	Settings             TenantSettings `json:"settings"`
+	CreatedAt            time.Time      `json:"createdAt"`
+	UpdatedAt            time.Time      `json:"updatedAt"`
+}
+
+// CreateTenantRequest is the body for POST /v1/tenants (admin).
+type CreateTenantRequest struct {
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+	Plan string `json:"plan,omitempty"`
+}
+
+// CreateTenantResponse wraps the response from POST /v1/tenants.
+type CreateTenantResponse struct {
+	Tenant  Tenant `json:"tenant"`
+	APIKey  string `json:"apiKey"`
+	KeyID   string `json:"keyId"`
+	Warning string `json:"warning"`
+}
+
+// UpdateTenantRequest is the body for PATCH /v1/tenants/:id.
+type UpdateTenantRequest struct {
+	Name     string          `json:"name,omitempty"`
+	Plan     string          `json:"plan,omitempty"`
+	Settings *TenantSettings `json:"settings,omitempty"`
+}
+
+// tenantResponse wraps GET/PATCH /v1/tenants/:id.
+type tenantResponse struct {
+	Tenant Tenant `json:"tenant"`
+}
+
+// TenantAgentRequest is the body for POST /v1/tenants/:id/agents.
+type TenantAgentRequest struct {
+	Address     string         `json:"address"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+}
+
+// TenantAgentResponse wraps POST /v1/tenants/:id/agents.
+type TenantAgentResponse struct {
+	Agent   map[string]any `json:"agent"`
+	APIKey  string         `json:"apiKey"`
+	KeyID   string         `json:"keyId"`
+	Warning string         `json:"warning"`
+}
+
+// listTenantAgentsResponse wraps GET /v1/tenants/:id/agents.
+type listTenantAgentsResponse struct {
+	Agents []string `json:"agents"`
+	Count  int      `json:"count"`
+}
+
+// TenantKeyRequest is the body for POST /v1/tenants/:id/keys.
+type TenantKeyRequest struct {
+	AgentAddr string `json:"agentAddr"`
+	Name      string `json:"name"`
+}
+
+// TenantKeyInfo represents a tenant-scoped API key.
+type TenantKeyInfo struct {
+	ID        string    `json:"id"`
+	AgentAddr string    `json:"agentAddr"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"createdAt"`
+	LastUsed  time.Time `json:"lastUsed,omitempty"`
+	Revoked   bool      `json:"revoked"`
+}
+
+// listTenantKeysResponse wraps GET /v1/tenants/:id/keys.
+type listTenantKeysResponse struct {
+	Keys  []TenantKeyInfo `json:"keys"`
+	Count int             `json:"count"`
+}
+
+// TenantBilling holds billing summary for a tenant.
+type TenantBilling struct {
+	TotalRequests   int    `json:"totalRequests"`
+	SettledRequests int    `json:"settledRequests"`
+	SettledVolume   string `json:"settledVolume"`
+	FeesCollected   string `json:"feesCollected"`
+	TakeRateBps     int    `json:"takeRateBps"`
+	Plan            string `json:"plan"`
+}
+
+// tenantBillingResponse wraps GET /v1/tenants/:id/billing.
+type tenantBillingResponse struct {
+	Billing TenantBilling `json:"billing"`
+}
+
+// --- Dashboard Analytics ---
+
+// DashboardOverview is the response from GET /v1/tenants/:id/dashboard/overview.
+type DashboardOverview struct {
+	Tenant         map[string]any `json:"tenant"`
+	Billing        TenantBilling  `json:"billing"`
+	ActiveSessions int            `json:"activeSessions"`
+	AgentCount     int            `json:"agentCount"`
+}
+
+// UsagePoint is a single data point in the usage time-series.
+type UsagePoint struct {
+	Timestamp time.Time `json:"timestamp"`
+	Requests  int       `json:"requests"`
+	Volume    string    `json:"volume"`
+}
+
+// DashboardUsage is the response from GET /v1/tenants/:id/dashboard/usage.
+type DashboardUsage struct {
+	Interval string       `json:"interval"`
+	From     time.Time    `json:"from"`
+	To       time.Time    `json:"to"`
+	Points   []UsagePoint `json:"points"`
+	Count    int          `json:"count"`
+}
+
+// TopService represents a service ranked by volume/usage.
+type TopService struct {
+	ServiceID   string `json:"serviceId"`
+	ServiceName string `json:"serviceName"`
+	ServiceType string `json:"serviceType"`
+	Requests    int    `json:"requests"`
+	Volume      string `json:"volume"`
+}
+
+// DashboardDenial represents a policy denial log entry.
+type DashboardDenial struct {
+	SessionID   string    `json:"sessionId"`
+	ServiceType string    `json:"serviceType"`
+	PolicyID    string    `json:"policyId"`
+	PolicyName  string    `json:"policyName"`
+	Rule        string    `json:"rule"`
+	Reason      string    `json:"reason"`
+	Shadow      bool      `json:"shadow"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// --- Feed ---
+
+// FeedEntry represents a single entry in the public timeline feed.
+type FeedEntry struct {
+	ID          string    `json:"id"`
+	FromName    string    `json:"fromName"`
+	FromAddress string    `json:"fromAddress"`
+	ToName      string    `json:"toName"`
+	ToAddress   string    `json:"toAddress"`
+	Amount      string    `json:"amount"`
+	ServiceName string    `json:"serviceName"`
+	ServiceType string    `json:"serviceType"`
+	TxHash      string    `json:"txHash"`
+	Timestamp   time.Time `json:"timestamp"`
+	TimeAgo     string    `json:"timeAgo"`
+}
+
+// FeedStats holds aggregate stats returned with the feed.
+type FeedStats struct {
+	TotalAgents       int    `json:"totalAgents"`
+	TotalTransactions int    `json:"totalTransactions"`
+	TotalVolume       string `json:"totalVolume"`
+}
+
+// FeedResponse is the response from GET /v1/feed.
+type FeedResponse struct {
+	Feed    []FeedEntry `json:"feed"`
+	Stats   FeedStats   `json:"stats"`
+	Message string      `json:"message"`
+}
+
+// --- Billing / Subscriptions ---
+
+// SubscribeRequest is the body for POST /v1/tenants/:id/billing/subscribe.
+type SubscribeRequest struct {
+	Plan          string `json:"plan"`
+	PaymentMethod string `json:"paymentMethod,omitempty"`
+	SuccessURL    string `json:"successUrl,omitempty"`
+	CancelURL     string `json:"cancelUrl,omitempty"`
+}
+
+// SubscriptionInfo represents a billing subscription.
+type SubscriptionInfo struct {
+	ID                string `json:"id"`
+	Plan              string `json:"plan"`
+	Status            string `json:"status"`
+	CurrentPeriodEnd  string `json:"currentPeriodEnd,omitempty"`
+	CancelAtPeriodEnd bool   `json:"cancelAtPeriodEnd"`
+}
+
 // --- Service Type Constants ---
 
 const (

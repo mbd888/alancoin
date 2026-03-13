@@ -52,6 +52,31 @@ func newEscrowServer(t *testing.T) *httptest.Server {
 		})
 	})
 
+	mux.HandleFunc("POST /v1/escrow/esc_1/evidence", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(escrowResponse{
+			Escrow: Escrow{
+				ID:     "esc_1",
+				Status: "disputed",
+				Amount: "5.00",
+				DisputeEvidence: []EvidenceEntry{
+					{SubmittedBy: "0xBUYER", Content: "screenshot of failure", SubmittedAt: now},
+				},
+			},
+		})
+	})
+
+	mux.HandleFunc("POST /v1/escrow/esc_1/arbitrate", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(escrowResponse{
+			Escrow: Escrow{ID: "esc_1", Status: "disputed", Amount: "5.00", ArbitratorAddr: "0xARB"},
+		})
+	})
+
+	mux.HandleFunc("POST /v1/escrow/esc_1/resolve", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(escrowResponse{
+			Escrow: Escrow{ID: "esc_1", Status: "resolved", Amount: "5.00", Resolution: "partial_refund", PartialReleaseAmount: "2.50"},
+		})
+	})
+
 	mux.HandleFunc("GET /v1/agents/0xBUYER/escrows", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(listEscrowsResponse{
 			Escrows: []Escrow{
@@ -149,5 +174,53 @@ func TestListEscrows(t *testing.T) {
 	}
 	if len(escrows) != 2 {
 		t.Errorf("len = %d", len(escrows))
+	}
+}
+
+func TestSubmitEvidence(t *testing.T) {
+	srv := newEscrowServer(t)
+	defer srv.Close()
+
+	c := NewClient(srv.URL, WithAPIKey("ak_test"))
+	esc, err := c.SubmitEvidence(context.Background(), "esc_1", "screenshot of failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(esc.DisputeEvidence) != 1 {
+		t.Errorf("evidence count = %d", len(esc.DisputeEvidence))
+	}
+	if esc.DisputeEvidence[0].Content != "screenshot of failure" {
+		t.Errorf("Content = %q", esc.DisputeEvidence[0].Content)
+	}
+}
+
+func TestAssignArbitrator(t *testing.T) {
+	srv := newEscrowServer(t)
+	defer srv.Close()
+
+	c := NewClient(srv.URL, WithAPIKey("ak_test"))
+	esc, err := c.AssignArbitrator(context.Background(), "esc_1", "0xARB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if esc.ArbitratorAddr != "0xARB" {
+		t.Errorf("ArbitratorAddr = %q", esc.ArbitratorAddr)
+	}
+}
+
+func TestResolveArbitration(t *testing.T) {
+	srv := newEscrowServer(t)
+	defer srv.Close()
+
+	c := NewClient(srv.URL, WithAPIKey("ak_test"))
+	esc, err := c.ResolveArbitration(context.Background(), "esc_1", "partial_refund", "2.50")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if esc.Status != "resolved" {
+		t.Errorf("Status = %q", esc.Status)
+	}
+	if esc.PartialReleaseAmount != "2.50" {
+		t.Errorf("PartialReleaseAmount = %q", esc.PartialReleaseAmount)
 	}
 }

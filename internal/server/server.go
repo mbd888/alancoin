@@ -89,6 +89,7 @@ type Server struct {
 	flywheelWorker         *flywheel.Worker
 	flywheelStore          flywheel.SnapshotStore
 	incentiveEngine        *flywheel.IncentiveEngine
+	revenueAccumulator     *flywheel.RevenueAccumulator
 	matviewRefresher       *registry.MatviewRefresher
 	partitionMaint         *registry.PartitionMaintainer
 	rateLimiter            *ratelimit.Limiter
@@ -276,6 +277,15 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			s.escrowService.WithReceiptIssuer(rcptAdapter)
 		}
 
+		// Wire revenue accumulator into all payment paths (GAP-1 fix).
+		// Records seller revenue from gateway, escrow, streams for flywheel
+		// velocity metrics and future staking/distribution.
+		s.revenueAccumulator = flywheel.NewRevenueAccumulator(s.logger)
+		s.gatewayService.WithRevenueAccumulator(s.revenueAccumulator)
+		s.escrowService.WithRevenueAccumulator(s.revenueAccumulator)
+		s.streamService.WithRevenueAccumulator(s.revenueAccumulator)
+		s.logger.Info("revenue accumulator wired into all payment paths")
+
 		// Tenant store (PostgreSQL)
 		tenantPgStore := tenant.NewPostgresStore(db)
 		if err := tenantPgStore.Migrate(ctx); err != nil {
@@ -400,6 +410,13 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			s.streamService.WithReceiptIssuer(rcptAdapter)
 			s.escrowService.WithReceiptIssuer(rcptAdapter)
 		}
+
+		// Wire revenue accumulator into all payment paths (in-memory mode).
+		s.revenueAccumulator = flywheel.NewRevenueAccumulator(s.logger)
+		s.gatewayService.WithRevenueAccumulator(s.revenueAccumulator)
+		s.escrowService.WithRevenueAccumulator(s.revenueAccumulator)
+		s.streamService.WithRevenueAccumulator(s.revenueAccumulator)
+		s.logger.Info("revenue accumulator wired into all payment paths")
 
 		// Tenant store (in-memory)
 		s.tenantStore = tenant.NewMemoryStore()
@@ -776,6 +793,11 @@ func (s *Server) setupRoutes() {
 	// Add receipt issuer for cryptographic payment proofs
 	if s.receiptService != nil {
 		sessionHandler = sessionHandler.WithReceiptIssuer(&receiptIssuerAdapter{s.receiptService})
+	}
+
+	// Wire revenue accumulator for session key transactions
+	if s.revenueAccumulator != nil {
+		sessionHandler = sessionHandler.WithRevenueAccumulator(s.revenueAccumulator)
 	}
 
 	protectedSessions := v1.Group("")
