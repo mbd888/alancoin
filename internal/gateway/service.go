@@ -189,7 +189,8 @@ type Service struct {
 	revenue         RevenueAccumulator
 	circuitBreaker  *circuitbreaker.Breaker
 	usageMeter      UsageMeter
-	platformAddr    string // ledger address collecting platform fees
+	incentives      IncentiveProvider // flywheel: reputation-based fee discounts
+	platformAddr    string            // ledger address collecting platform fees
 	logger          *slog.Logger
 	locks           syncutil.ShardedMutex
 	idemCache       *idempotencyCache
@@ -269,6 +270,12 @@ func (s *Service) WithUsageMeter(m UsageMeter) *Service {
 // WithRevenueAccumulator adds a revenue accumulator for stakes interception.
 func (s *Service) WithRevenueAccumulator(r RevenueAccumulator) *Service {
 	s.revenue = r
+	return s
+}
+
+// WithIncentives adds flywheel incentive support (fee discounts by reputation).
+func (s *Service) WithIncentives(ip IncentiveProvider) *Service {
+	s.incentives = ip
 	return s
 }
 
@@ -764,8 +771,10 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		// Update reference with authoritative request count.
 		ref = fmt.Sprintf("%s:req:%d:%s", session.ID, session.RequestCount+1, candidate.ServiceID)
 
-		// Compute platform fee based on tenant's take rate.
-		sellerAmountStr, feeAmountStr := s.computeFee(ctx, session.TenantID, priceBig)
+		// Compute platform fee with flywheel incentive discount.
+		// Higher-reputation sellers pay lower platform fees.
+		sellerTier := scoreTier(candidate.ReputationScore)
+		sellerAmountStr, feeAmountStr := s.computeFee(ctx, session.TenantID, priceBig, sellerTier)
 
 		// Settle payment with retry (handles transient DB errors).
 		// Unlock during sleep to avoid blocking other sessions on the same shard.
@@ -1195,7 +1204,12 @@ func (s *Service) ListLogs(ctx context.Context, sessionID string, limit int, opt
 // computeFee calculates the platform fee for a given price and tenant.
 // Returns the fee amount as a USDC string and the seller amount (price - fee).
 // If there's no tenant, no settings provider, or bps is 0, fee is "0.000000".
-func (s *Service) computeFee(ctx context.Context, tenantID string, priceBig *big.Int) (sellerAmount, feeAmount string) {
+//
+// When the flywheel IncentiveProvider is configured and a seller tier is
+// supplied, the take rate is discounted based on the seller's reputation.
+// This closes the flywheel: higher reputation → lower platform fees →
+// more competitive pricing → more transactions → better reputation.
+func (s *Service) computeFee(ctx context.Context, tenantID string, priceBig *big.Int, sellerTier ...string) (sellerAmount, feeAmount string) {
 	zero := "0.000000"
 	priceStr := usdc.Format(priceBig)
 
@@ -1205,6 +1219,17 @@ func (s *Service) computeFee(ctx context.Context, tenantID string, priceBig *big
 
 	bps, err := s.tenantSettings.GetTakeRateBPS(ctx, tenantID)
 	if err != nil || bps <= 0 {
+		return priceStr, zero
+	}
+
+	// Apply flywheel incentive discount if available
+	if s.incentives != nil && len(sellerTier) > 0 && sellerTier[0] != "" {
+		if adjusted, err := s.incentives.AdjustFeeBPS(ctx, sellerTier[0], bps); err == nil {
+			bps = adjusted
+		}
+	}
+
+	if bps <= 0 {
 		return priceStr, zero
 	}
 

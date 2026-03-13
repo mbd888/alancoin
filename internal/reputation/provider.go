@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mbd888/alancoin/internal/registry"
+	"github.com/mbd888/alancoin/internal/tracerank"
 )
 
 // disputeRecord tracks dispute/confirm outcomes for an agent.
@@ -19,13 +20,26 @@ type disputeRecord struct {
 // RegistryProvider implements MetricsProvider using the registry store.
 // It also implements escrow.ReputationImpactor for dispute tracking.
 type RegistryProvider struct {
-	store    registry.Store
-	disputes sync.Map // address → *disputeRecord
+	store           registry.Store
+	disputes        sync.Map                // address → *disputeRecord
+	traceRankScores tracerank.ScoreProvider // optional; nil if TraceRank not wired
 }
 
 // NewRegistryProvider creates a provider backed by the registry
 func NewRegistryProvider(store registry.Store) *RegistryProvider {
 	return &RegistryProvider{store: store}
+}
+
+// WithTraceRank attaches a TraceRank score provider for graph-based reputation.
+// When set, reputation calculations incorporate the agent's TraceRank GraphScore.
+func (p *RegistryProvider) WithTraceRank(provider tracerank.ScoreProvider) *RegistryProvider {
+	p.traceRankScores = provider
+	return p
+}
+
+// NewCalculatorWithTraceRank returns a calculator using TraceRankWeights.
+func NewCalculatorWithTraceRank() *Calculator {
+	return &Calculator{weights: TraceRankWeights}
 }
 
 // GetAgentMetrics fetches metrics for a single agent
@@ -44,10 +58,22 @@ func (p *RegistryProvider) GetAgentMetrics(ctx context.Context, address string) 
 		return nil, err
 	}
 
-	return p.calculateMetrics(agent, txns), nil
+	m := p.calculateMetrics(agent, txns)
+
+	// Enrich with TraceRank score if available
+	if p.traceRankScores != nil {
+		if trScore, err := p.traceRankScores.GetScore(ctx, address); err == nil && trScore != nil {
+			m.TraceRankInput = trScore.GraphScore
+		}
+	}
+
+	return m, nil
 }
 
-// GetAllAgentMetrics fetches metrics for all agents
+// GetAllAgentMetrics fetches metrics for all agents.
+// When TraceRank is configured, graph scores are batch-loaded and injected
+// into each agent's metrics. This ensures snapshots (which feed discovery)
+// include blended reputation scores — the flywheel's critical gear.
 func (p *RegistryProvider) GetAllAgentMetrics(ctx context.Context) (map[string]*Metrics, error) {
 	// Get all agents
 	agents, err := p.store.ListAgents(ctx, registry.AgentQuery{Limit: 1000})
@@ -56,12 +82,28 @@ func (p *RegistryProvider) GetAllAgentMetrics(ctx context.Context) (map[string]*
 	}
 
 	result := make(map[string]*Metrics)
+	addresses := make([]string, 0, len(agents))
 	for _, agent := range agents {
 		txns, err := p.store.ListTransactions(ctx, agent.Address, 1000)
 		if err != nil {
 			continue // Skip agents with errors
 		}
 		result[agent.Address] = p.calculateMetrics(agent, txns)
+		addresses = append(addresses, agent.Address)
+	}
+
+	// Batch-enrich with TraceRank graph scores if available.
+	// This is the flywheel integration: graph-based reputation feeds into
+	// every snapshot, which feeds discovery, which drives more transactions.
+	if p.traceRankScores != nil && len(addresses) > 0 {
+		graphScores, err := p.traceRankScores.GetScores(ctx, addresses)
+		if err == nil {
+			for addr, m := range result {
+				if gs, ok := graphScores[strings.ToLower(addr)]; ok && gs != nil {
+					m.TraceRankInput = gs.GraphScore
+				}
+			}
+		}
 	}
 
 	return result, nil
@@ -75,7 +117,14 @@ func (p *RegistryProvider) GetScore(ctx context.Context, address string) (float6
 	if err != nil {
 		return 0, string(TierNew), err
 	}
-	calc := NewCalculator()
+
+	// Use TraceRank-aware weights if TraceRank data is available
+	var calc *Calculator
+	if p.traceRankScores != nil && metrics.TraceRankInput > 0 {
+		calc = NewCalculatorWithTraceRank()
+	} else {
+		calc = NewCalculator()
+	}
 	score := calc.Calculate(address, *metrics)
 
 	// Apply dispute penalty: high dispute rates reduce the score.

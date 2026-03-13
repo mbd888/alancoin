@@ -13,6 +13,7 @@ type Snapshot struct {
 	SuccessScore   float64   `json:"successScore"`
 	AgeScore       float64   `json:"ageScore"`
 	DiversityScore float64   `json:"diversityScore"`
+	TraceRankScore float64   `json:"traceRankScore"`
 	TotalTxns      int       `json:"totalTransactions"`
 	TotalVolume    float64   `json:"totalVolume"`
 	SuccessRate    float64   `json:"successRate"`
@@ -35,6 +36,7 @@ func SnapshotFromScore(s *Score) *Snapshot {
 		SuccessScore:   s.Components.SuccessScore,
 		AgeScore:       s.Components.AgeScore,
 		DiversityScore: s.Components.DiversityScore,
+		TraceRankScore: s.Components.TraceRankScore,
 		TotalTxns:      s.Metrics.TotalTransactions,
 		TotalVolume:    s.Metrics.TotalVolumeUSD,
 		SuccessRate:    successRate,

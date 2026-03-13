@@ -12,11 +12,18 @@ import (
 // Resolver discovers and ranks service candidates.
 type Resolver struct {
 	registry RegistryProvider
+	booster  DiscoveryBooster // flywheel: reputation-based discovery boost
 }
 
 // NewResolver creates a new service resolver.
 func NewResolver(registry RegistryProvider) *Resolver {
 	return &Resolver{registry: registry}
+}
+
+// WithDiscoveryBooster adds flywheel-based discovery score boosting.
+func (r *Resolver) WithDiscoveryBooster(b DiscoveryBooster) *Resolver {
+	r.booster = b
+	return r
 }
 
 // Resolve finds and ranks services for a proxy request.
@@ -45,6 +52,16 @@ func (r *Resolver) Resolve(ctx context.Context, req ProxyRequest, strategy, maxP
 		return nil, ErrNoServiceAvailable
 	}
 
+	// Apply flywheel discovery boost: higher-reputation agents get a score
+	// multiplier that improves their ranking. This closes the flywheel loop:
+	// better reputation → higher discovery placement → more transactions.
+	if r.booster != nil {
+		for i := range filtered {
+			tier := scoreTier(filtered[i].ReputationScore)
+			filtered[i].ReputationScore = r.booster.BoostScore(ctx, tier, filtered[i].ReputationScore)
+		}
+	}
+
 	// Sort by strategy
 	sortCandidates(filtered, strategy)
 
@@ -70,6 +87,10 @@ func (r *Resolver) Resolve(ctx context.Context, req ProxyRequest, strategy, maxP
 func sortCandidates(candidates []ServiceCandidate, strategy string) {
 	switch strategy {
 	case "reputation":
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].ReputationScore > candidates[j].ReputationScore
+		})
+	case "tracerank":
 		sort.Slice(candidates, func(i, j int) bool {
 			return candidates[i].ReputationScore > candidates[j].ReputationScore
 		})
@@ -101,7 +122,29 @@ func valueScore(c ServiceCandidate) float64 {
 	if priceF == 0 {
 		return 0
 	}
-	// Reputation per unit cost (higher = better deal).
+	// Weighted reputation per unit cost (higher = better deal).
 	// price is in USDC base units (6 decimals), so divide by 1e6.
-	return c.ReputationScore / (priceF / 1e6)
+	// Reputation is weighted 70% and inverse-price 30% to favor trusted agents.
+	repWeight := 0.7
+	priceWeight := 0.3
+	repComponent := repWeight * c.ReputationScore
+	priceComponent := priceWeight * (100.0 / (priceF / 1e6)) // normalize: cheaper = higher score
+	return repComponent + priceComponent
+}
+
+// scoreTier converts a 0-100 reputation score to a tier string.
+// Mirrors reputation.getTier thresholds.
+func scoreTier(score float64) string {
+	switch {
+	case score >= 80:
+		return "elite"
+	case score >= 60:
+		return "trusted"
+	case score >= 40:
+		return "established"
+	case score >= 20:
+		return "emerging"
+	default:
+		return "new"
+	}
 }

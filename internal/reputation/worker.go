@@ -68,9 +68,23 @@ func (w *Worker) snapshot(ctx context.Context) {
 		return
 	}
 
+	// Pre-build both calculators to avoid allocation per agent.
+	calcDefault := NewCalculator()
+	calcTraceRank := NewCalculatorWithWeights(TraceRankWeights)
+
 	var snaps []*Snapshot
+	var withGraph int
 	for address, metrics := range allMetrics {
-		score := w.calculator.Calculate(address, *metrics)
+		// Dynamically select calculator: use TraceRank-aware weights when
+		// graph data is available. This ensures snapshots (which feed the
+		// discovery materialized view) carry blended reputation scores —
+		// closing the flywheel loop.
+		calc := calcDefault
+		if metrics.TraceRankInput > 0 {
+			calc = calcTraceRank
+			withGraph++
+		}
+		score := calc.Calculate(address, *metrics)
 		snaps = append(snaps, SnapshotFromScore(score))
 	}
 
@@ -79,5 +93,5 @@ func (w *Worker) snapshot(ctx context.Context) {
 		return
 	}
 
-	w.logger.Info("reputation snapshot completed", "agents", len(snaps))
+	w.logger.Info("reputation snapshot completed", "agents", len(snaps), "withGraphScore", withGraph)
 }

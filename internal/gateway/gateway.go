@@ -213,6 +213,21 @@ type UsageMeter interface {
 	RecordVolume(tenantID, customerID string, microUSDC int64)
 }
 
+// IncentiveProvider applies reputation-based fee adjustments.
+// Part of the flywheel: higher reputation → lower fees → more transactions.
+type IncentiveProvider interface {
+	// AdjustFeeBPS applies a reputation-based discount to the base take rate.
+	// Returns the effective take rate after discount (never below 0).
+	AdjustFeeBPS(ctx context.Context, tier string, baseBPS int) (int, error)
+}
+
+// DiscoveryBooster applies reputation-based score boosts to discovery ranking.
+// Part of the flywheel: higher reputation → better discovery placement → more traffic.
+type DiscoveryBooster interface {
+	// BoostScore applies a flywheel boost to a candidate's reputation score.
+	BoostScore(ctx context.Context, tier string, baseScore float64) float64
+}
+
 // MoneyError wraps an error with funds-state context so callers know
 // whether their money is safe and what to do next.
 type MoneyError struct {
@@ -272,4 +287,5 @@ type ServiceCandidate struct {
 	Price           string  `json:"price"`
 	Endpoint        string  `json:"endpoint"`
 	ReputationScore float64 `json:"reputationScore"`
+	TraceRankScore  float64 `json:"traceRankScore"`
 }

@@ -48,6 +48,7 @@ type Components struct {
 	SuccessScore   float64 `json:"successScore"`   // Based on success rate
 	AgeScore       float64 `json:"ageScore"`       // Based on time on network
 	DiversityScore float64 `json:"diversityScore"` // Based on unique counterparties
+	TraceRankScore float64 `json:"traceRankScore"` // Graph-based reputation from TraceRank (0-100)
 }
 
 // Metrics are the raw inputs to the score
@@ -60,10 +61,12 @@ type Metrics struct {
 	FirstSeen            time.Time `json:"firstSeen"`
 	LastActive           time.Time `json:"lastActive"`
 	DaysOnNetwork        int       `json:"daysOnNetwork"`
+	TraceRankInput       float64   `json:"traceRankInput"` // 0-100, GraphScore from TraceRank
 }
 
 // Weights for score components (must sum to 1.0)
 type Weights struct {
+	TraceRank float64
 	Volume    float64
 	Activity  float64
 	Success   float64
@@ -71,13 +74,26 @@ type Weights struct {
 	Diversity float64
 }
 
-// DefaultWeights balances all factors
+// DefaultWeights balances all factors (TraceRank zero by default until data is available)
 var DefaultWeights = Weights{
+	TraceRank: 0.00, // zero by default (no TraceRank data)
 	Volume:    0.25, // Transaction volume matters
 	Activity:  0.20, // But so does regular activity
 	Success:   0.25, // Success rate is critical
 	Age:       0.15, // Time builds trust
 	Diversity: 0.15, // Broad network is good
+}
+
+// TraceRankWeights rebalances when TraceRank graph data is available.
+// TraceRank subsumes volume, age, and diversity signals, so those weights
+// are reduced in favor of the graph-based score.
+var TraceRankWeights = Weights{
+	TraceRank: 0.35, // Graph-based reputation (primary signal)
+	Volume:    0.10, // Reduced - TraceRank subsumes volume signal
+	Activity:  0.15, // Activity still matters
+	Success:   0.25, // Success rate remains critical
+	Age:       0.05, // Reduced - TraceRank subsumes age via seed
+	Diversity: 0.10, // Reduced - TraceRank subsumes diversity
 }
 
 // Calculator computes reputation scores
@@ -132,8 +148,12 @@ func (c *Calculator) Calculate(address string, m Metrics) *Score {
 		comp.DiversityScore = math.Min(100, 50*math.Log10(float64(m.UniqueCounterparties)))
 	}
 
+	// TraceRank score: direct pass-through from graph-based computation (0-100)
+	comp.TraceRankScore = m.TraceRankInput
+
 	// Weighted average
-	score := c.weights.Volume*comp.VolumeScore +
+	score := c.weights.TraceRank*comp.TraceRankScore +
+		c.weights.Volume*comp.VolumeScore +
 		c.weights.Activity*comp.ActivityScore +
 		c.weights.Success*comp.SuccessScore +
 		c.weights.Age*comp.AgeScore +

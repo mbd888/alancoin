@@ -2245,8 +2245,8 @@ func TestValueScore_SmallPrice(t *testing.T) {
 	if score <= 0 {
 		t.Errorf("expected positive score, got %f", score)
 	}
-	// Reputation 80 / price $0.50 = 160
-	expected := 160.0
+	// Weighted formula: 0.7*80 + 0.3*(100/0.50) = 56 + 60 = 116
+	expected := 116.0
 	if score < expected*0.99 || score > expected*1.01 {
 		t.Errorf("expected ~%.1f, got %f", expected, score)
 	}

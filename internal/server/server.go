@@ -33,6 +33,7 @@ import (
 	"github.com/mbd888/alancoin/internal/config"
 	"github.com/mbd888/alancoin/internal/dashboard"
 	"github.com/mbd888/alancoin/internal/escrow"
+	"github.com/mbd888/alancoin/internal/flywheel"
 	"github.com/mbd888/alancoin/internal/gateway"
 	"github.com/mbd888/alancoin/internal/health"
 	"github.com/mbd888/alancoin/internal/ledger"
@@ -50,6 +51,7 @@ import (
 	"github.com/mbd888/alancoin/internal/streams"
 	"github.com/mbd888/alancoin/internal/supervisor"
 	"github.com/mbd888/alancoin/internal/tenant"
+	"github.com/mbd888/alancoin/internal/tracerank"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
 	"github.com/mbd888/alancoin/internal/validation"
@@ -81,6 +83,11 @@ type Server struct {
 	reputationStore        reputation.SnapshotStore
 	reputationWorker       *reputation.Worker
 	reputationSigner       *reputation.Signer
+	traceRankStore         tracerank.Store
+	traceRankWorker        *tracerank.Worker
+	flywheelEngine         *flywheel.Engine
+	flywheelWorker         *flywheel.Worker
+	incentiveEngine        *flywheel.IncentiveEngine
 	matviewRefresher       *registry.MatviewRefresher
 	partitionMaint         *registry.PartitionMaintainer
 	rateLimiter            *ratelimit.Limiter
@@ -238,7 +245,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Gateway with PostgreSQL store (transparent payment proxy)
 		gwStore := gateway.NewPostgresStore(db)
-		gwResolver := gateway.NewResolver(&gatewayRegistryAdapter{s.registry})
+		gwResolver := gateway.NewResolver(&gatewayRegistryAdapter{store: s.registry, traceRankStore: s.traceRankStore})
 		gwForwarder := gateway.NewForwarder(0)
 		gwLedger := &gatewayLedgerAdapter{s.ledgerService}
 		s.gatewayStore = gwStore
@@ -292,12 +299,22 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.reputationStore = reputation.NewPostgresSnapshotStore(db)
 		s.logger.Info("reputation snapshots enabled (postgres)")
 
+		// TraceRank graph-based reputation (PostgreSQL)
+		s.traceRankStore = tracerank.NewPostgresStore(db)
+		s.logger.Info("tracerank enabled (postgres)")
+
 		// Billing provider (Stripe if configured, noop otherwise)
 		s.billingProvider = initBillingProvider(cfg, s.logger)
 		s.billingMeter = billing.NewMeter(s.billingProvider, s.logger)
 		s.gatewayService.WithUsageMeter(s.billingMeter)
 		s.gatewayTimer.WithMeter(s.billingMeter)
 		s.logger.Info("billing enabled", "provider", billingProviderName(cfg))
+
+		// Flywheel incentives (fee discounts + discovery boosts by reputation tier)
+		s.incentiveEngine = flywheel.NewIncentiveEngine()
+		s.gatewayService.WithIncentives(s.incentiveEngine)
+		gwResolver.WithDiscoveryBooster(s.incentiveEngine)
+		s.logger.Info("flywheel incentives enabled (postgres)")
 
 		// Cross-subsystem reconciliation (PostgreSQL only)
 		s.reconcileRunner = reconciliation.NewRunner(s.logger).
@@ -356,7 +373,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Gateway with in-memory store (transparent payment proxy)
 		gwStore2 := gateway.NewMemoryStore()
-		gwResolver2 := gateway.NewResolver(&gatewayRegistryAdapter{s.registry})
+		gwResolver2 := gateway.NewResolver(&gatewayRegistryAdapter{store: s.registry, traceRankStore: s.traceRankStore})
 		gwForwarder2 := gateway.NewForwarder(0)
 		s.gatewayStore = gwStore2
 		gwCB2 := circuitbreaker.New(5, 30*time.Second)
@@ -399,12 +416,22 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.reputationStore = reputation.NewMemorySnapshotStore()
 		s.logger.Info("reputation snapshots enabled (in-memory)")
 
+		// TraceRank graph-based reputation (in-memory)
+		s.traceRankStore = tracerank.NewMemoryStore()
+		s.logger.Info("tracerank enabled (in-memory)")
+
 		// Billing provider (Stripe if configured, noop otherwise)
 		s.billingProvider = initBillingProvider(cfg, s.logger)
 		s.billingMeter = billing.NewMeter(s.billingProvider, s.logger)
 		s.gatewayService.WithUsageMeter(s.billingMeter)
 		s.gatewayTimer.WithMeter(s.billingMeter)
 		s.logger.Info("billing enabled", "provider", billingProviderName(cfg))
+
+		// Flywheel incentives (fee discounts + discovery boosts by reputation tier)
+		s.incentiveEngine = flywheel.NewIncentiveEngine()
+		s.gatewayService.WithIncentives(s.incentiveEngine)
+		gwResolver2.WithDiscoveryBooster(s.incentiveEngine)
+		s.logger.Info("flywheel incentives enabled (in-memory)")
 
 	}
 
@@ -664,6 +691,13 @@ func (s *Server) setupRoutes() {
 
 	// Wire reputation into discovery so agents see trust scores when searching
 	reputationProvider := reputation.NewRegistryProvider(s.registry)
+
+	// Wire TraceRank into reputation for graph-based scoring
+	if s.traceRankStore != nil {
+		traceRankScoreProvider := tracerank.NewStoreScoreProvider(s.traceRankStore)
+		reputationProvider.WithTraceRank(traceRankScoreProvider)
+	}
+
 	registryHandler.SetReputation(reputationProvider)
 
 	// Wire reputation into supervisor so spending rules are tier-aware
@@ -912,6 +946,30 @@ func (s *Server) setupRoutes() {
 		s.reputationWorker = reputation.NewWorker(reputationProvider, s.reputationStore, workerInterval, s.logger)
 	}
 
+	// Create TraceRank worker for periodic graph recomputation
+	if s.traceRankStore != nil {
+		txSource := tracerank.NewRegistryTransactionSource(s.registry)
+		agentInfoProvider := tracerank.NewRegistryAgentInfoProvider(s.registry)
+		seedProvider := tracerank.NewTimeSeedProvider(agentInfoProvider)
+		trEngine := tracerank.NewEngine(txSource, seedProvider, tracerank.DefaultConfig())
+
+		trInterval := 5 * time.Minute
+		if s.db == nil {
+			trInterval = 30 * time.Second // Fast in demo mode
+		}
+		s.traceRankWorker = tracerank.NewWorker(trEngine, s.traceRankStore, trInterval, s.logger)
+	}
+
+	// Flywheel engine and periodic worker
+	s.flywheelEngine = flywheel.NewEngine(s.registry)
+	{
+		fwInterval := 5 * time.Minute
+		if s.db == nil {
+			fwInterval = 30 * time.Second // Fast in demo mode
+		}
+		s.flywheelWorker = flywheel.NewWorker(s.flywheelEngine, fwInterval, s.logger)
+	}
+
 	// Create matview refresher for service discovery (Postgres only)
 	if s.db != nil {
 		s.matviewRefresher = registry.NewMatviewRefresher(s.db, 30*time.Second, s.logger)
@@ -920,6 +978,16 @@ func (s *Server) setupRoutes() {
 
 	reputationHandler := reputation.NewHandlerFull(reputationProvider, s.reputationStore, s.reputationSigner)
 	reputationHandler.RegisterRoutes(v1)
+
+	// TraceRank routes (graph-based reputation scoring)
+	if s.traceRankStore != nil {
+		trHandler := tracerank.NewHandler(s.traceRankStore)
+		trHandler.RegisterRoutes(v1)
+	}
+
+	// Flywheel routes (network health and incentive observability)
+	flywheelHandler := flywheel.NewHandler(s.flywheelEngine, s.incentiveEngine)
+	flywheelHandler.RegisterRoutes(v1)
 
 	// Webhook routes (event notifications to external services)
 	if s.webhooks != nil {
@@ -1331,6 +1399,16 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.reputationWorker.Start(runCtx)
 	}
 
+	// Start TraceRank computation worker
+	if s.traceRankWorker != nil {
+		go s.traceRankWorker.Start(runCtx)
+	}
+
+	// Start flywheel computation worker
+	if s.flywheelWorker != nil {
+		go s.flywheelWorker.Start(runCtx)
+	}
+
 	// Start materialized view refresher for service discovery
 	if s.matviewRefresher != nil {
 		go s.matviewRefresher.Start(runCtx)
@@ -1451,6 +1529,12 @@ drainLoop:
 	if s.reputationWorker != nil {
 		s.reputationWorker.Stop()
 		s.logger.Info("reputation worker stopped")
+	}
+
+	// Stop TraceRank worker
+	if s.traceRankWorker != nil {
+		s.traceRankWorker.Stop()
+		s.logger.Info("tracerank worker stopped")
 	}
 
 	// Stop matview refresher
@@ -1799,7 +1883,8 @@ func (a *gatewayTenantSettingsAdapter) GetStripeCustomerID(ctx context.Context, 
 
 // gatewayRegistryAdapter adapts registry.Store to gateway.RegistryProvider
 type gatewayRegistryAdapter struct {
-	store registry.Store
+	store          registry.Store
+	traceRankStore tracerank.Store
 }
 
 func (a *gatewayRegistryAdapter) ListServices(ctx context.Context, serviceType, maxPrice string) ([]gateway.ServiceCandidate, error) {
@@ -1816,10 +1901,20 @@ func (a *gatewayRegistryAdapter) ListServices(ctx context.Context, serviceType, 
 		return nil, err
 	}
 
+	// Batch-load TraceRank scores for all candidates
+	var trScores map[string]*tracerank.AgentScore
+	if a.traceRankStore != nil && len(listings) > 0 {
+		addrs := make([]string, 0, len(listings))
+		for _, l := range listings {
+			addrs = append(addrs, l.AgentAddress)
+		}
+		trScores, _ = a.traceRankStore.GetScores(ctx, addrs)
+	}
+
 	var candidates []gateway.ServiceCandidate
 	for _, l := range listings {
 		endpoint := l.Endpoint
-		candidates = append(candidates, gateway.ServiceCandidate{
+		c := gateway.ServiceCandidate{
 			AgentAddress:    l.AgentAddress,
 			AgentName:       l.AgentName,
 			ServiceID:       l.ID,
@@ -1827,7 +1922,13 @@ func (a *gatewayRegistryAdapter) ListServices(ctx context.Context, serviceType, 
 			Price:           l.Price,
 			Endpoint:        endpoint,
 			ReputationScore: l.ReputationScore,
-		})
+		}
+		if trScores != nil {
+			if s, ok := trScores[strings.ToLower(l.AgentAddress)]; ok && s != nil {
+				c.TraceRankScore = s.GraphScore
+			}
+		}
+		candidates = append(candidates, c)
 	}
 	return candidates, nil
 }

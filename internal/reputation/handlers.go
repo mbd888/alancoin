@@ -11,7 +11,8 @@ import (
 
 // Handler provides HTTP endpoints for reputation
 type Handler struct {
-	calculator    *Calculator
+	calcDefault   *Calculator
+	calcTraceRank *Calculator
 	provider      MetricsProvider
 	snapshotStore SnapshotStore
 	signer        *Signer
@@ -20,19 +21,30 @@ type Handler struct {
 // NewHandler creates a new reputation handler
 func NewHandler(provider MetricsProvider) *Handler {
 	return &Handler{
-		calculator: NewCalculator(),
-		provider:   provider,
+		calcDefault:   NewCalculator(),
+		calcTraceRank: NewCalculatorWithWeights(TraceRankWeights),
+		provider:      provider,
 	}
 }
 
 // NewHandlerFull creates a handler with snapshot store and signer.
 func NewHandlerFull(provider MetricsProvider, store SnapshotStore, signer *Signer) *Handler {
 	return &Handler{
-		calculator:    NewCalculator(),
+		calcDefault:   NewCalculator(),
+		calcTraceRank: NewCalculatorWithWeights(TraceRankWeights),
 		provider:      provider,
 		snapshotStore: store,
 		signer:        signer,
 	}
+}
+
+// calculatorFor returns the appropriate calculator based on whether
+// TraceRank graph data is available for the given metrics.
+func (h *Handler) calculatorFor(m *Metrics) *Calculator {
+	if m.TraceRankInput > 0 {
+		return h.calcTraceRank
+	}
+	return h.calcDefault
 }
 
 // RegisterRoutes sets up reputation endpoints
@@ -55,7 +67,7 @@ func (h *Handler) GetReputation(c *gin.Context) {
 		return
 	}
 
-	score := h.calculator.Calculate(address, *metrics)
+	score := h.calculatorFor(metrics).Calculate(address, *metrics)
 
 	resp := gin.H{"reputation": score}
 	if h.signer != nil {
@@ -107,7 +119,7 @@ func (h *Handler) GetBatchReputation(c *gin.Context) {
 			})
 			continue
 		}
-		score := h.calculator.Calculate(addr, *metrics)
+		score := h.calculatorFor(metrics).Calculate(addr, *metrics)
 		signed := &SignedScore{Reputation: score}
 		if h.signer != nil {
 			sig, issued, expires, err := h.signer.Sign(score)
