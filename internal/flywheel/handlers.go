@@ -10,6 +10,7 @@ import (
 type Handler struct {
 	engine     *Engine
 	incentives *IncentiveEngine
+	store      SnapshotStore
 }
 
 // NewHandler creates a new flywheel handler.
@@ -18,6 +19,12 @@ func NewHandler(engine *Engine, incentives *IncentiveEngine) *Handler {
 		engine:     engine,
 		incentives: incentives,
 	}
+}
+
+// WithStore enables persisted history in the history endpoint.
+func (h *Handler) WithStore(store SnapshotStore) *Handler {
+	h.store = store
+	return h
 }
 
 // RegisterRoutes sets up flywheel endpoints.
@@ -71,9 +78,20 @@ func (h *Handler) GetState(c *gin.Context) {
 }
 
 // GetHistory returns the flywheel state over time.
+// If a snapshot store is configured, serves persisted history (survives restarts).
+// Otherwise falls back to the in-memory rolling window.
 // GET /v1/flywheel/history
 func (h *Handler) GetHistory(c *gin.Context) {
-	history := h.engine.History()
+	var history []*State
+	if h.store != nil {
+		stored, err := h.store.Recent(c.Request.Context(), historySize)
+		if err == nil && len(stored) > 0 {
+			history = stored
+		}
+	}
+	if len(history) == 0 {
+		history = h.engine.History()
+	}
 
 	// Return condensed view: just health scores over time
 	type point struct {

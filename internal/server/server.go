@@ -87,6 +87,7 @@ type Server struct {
 	traceRankWorker        *tracerank.Worker
 	flywheelEngine         *flywheel.Engine
 	flywheelWorker         *flywheel.Worker
+	flywheelStore          flywheel.SnapshotStore
 	incentiveEngine        *flywheel.IncentiveEngine
 	matviewRefresher       *registry.MatviewRefresher
 	partitionMaint         *registry.PartitionMaintainer
@@ -314,7 +315,8 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.incentiveEngine = flywheel.NewIncentiveEngine()
 		s.gatewayService.WithIncentives(s.incentiveEngine)
 		gwResolver.WithDiscoveryBooster(s.incentiveEngine)
-		s.logger.Info("flywheel incentives enabled (postgres)")
+		s.flywheelStore = flywheel.NewPostgresStore(db)
+		s.logger.Info("flywheel enabled (postgres)")
 
 		// Cross-subsystem reconciliation (PostgreSQL only)
 		s.reconcileRunner = reconciliation.NewRunner(s.logger).
@@ -431,7 +433,8 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.incentiveEngine = flywheel.NewIncentiveEngine()
 		s.gatewayService.WithIncentives(s.incentiveEngine)
 		gwResolver2.WithDiscoveryBooster(s.incentiveEngine)
-		s.logger.Info("flywheel incentives enabled (in-memory)")
+		s.flywheelStore = flywheel.NewMemoryStore()
+		s.logger.Info("flywheel enabled (in-memory)")
 
 	}
 
@@ -967,7 +970,8 @@ func (s *Server) setupRoutes() {
 		if s.db == nil {
 			fwInterval = 30 * time.Second // Fast in demo mode
 		}
-		s.flywheelWorker = flywheel.NewWorker(s.flywheelEngine, fwInterval, s.logger)
+		s.flywheelWorker = flywheel.NewWorker(s.flywheelEngine, fwInterval, s.logger).
+			WithStore(s.flywheelStore)
 	}
 
 	// Create matview refresher for service discovery (Postgres only)
@@ -986,7 +990,8 @@ func (s *Server) setupRoutes() {
 	}
 
 	// Flywheel routes (network health and incentive observability)
-	flywheelHandler := flywheel.NewHandler(s.flywheelEngine, s.incentiveEngine)
+	flywheelHandler := flywheel.NewHandler(s.flywheelEngine, s.incentiveEngine).
+		WithStore(s.flywheelStore)
 	flywheelHandler.RegisterRoutes(v1)
 
 	// Webhook routes (event notifications to external services)

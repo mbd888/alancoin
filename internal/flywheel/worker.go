@@ -9,6 +9,7 @@ import (
 // Worker periodically computes flywheel state metrics.
 type Worker struct {
 	engine   *Engine
+	store    SnapshotStore
 	interval time.Duration
 	logger   *slog.Logger
 	stop     chan struct{}
@@ -23,6 +24,12 @@ func NewWorker(engine *Engine, interval time.Duration, logger *slog.Logger) *Wor
 		logger:   logger,
 		stop:     make(chan struct{}),
 	}
+}
+
+// WithStore adds snapshot persistence so flywheel history survives restarts.
+func (w *Worker) WithStore(store SnapshotStore) *Worker {
+	w.store = store
+	return w
 }
 
 // Start begins the periodic computation loop. Call in a goroutine.
@@ -58,6 +65,13 @@ func (w *Worker) compute(ctx context.Context) {
 	if err != nil {
 		w.logger.Warn("flywheel computation failed", "error", err)
 		return
+	}
+
+	// Persist snapshot if store is configured
+	if w.store != nil {
+		if err := w.store.Save(ctx, state); err != nil {
+			w.logger.Warn("flywheel snapshot persistence failed", "error", err)
+		}
 	}
 
 	w.logger.Info("flywheel state computed",
