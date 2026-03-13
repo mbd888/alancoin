@@ -100,6 +100,7 @@ type Server struct {
 	billingMeter           *billing.Meter
 	policyStore            policy.Store           // tenant-scoped spend policies
 	gatewayStore           gateway.Store          // for billing aggregation
+	webhookEmitter         *webhooks.Emitter      // tracked for graceful shutdown
 	denialExporter         admin.DenialExporter   // denial log exporter for admin API
 	reconcileRunner        *reconciliation.Runner // cross-subsystem reconciliation
 	reconcileTimer         *reconciliation.Timer  // periodic reconciliation
@@ -261,10 +262,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		gateway.ReconcileOrphanedHolds(ctx, db, gwLedger, s.logger)
 
 		// Wire webhook emitter into all payment subsystems.
-		webhookEmitter := webhooks.NewEmitter(s.webhooks, s.logger)
-		s.gatewayService.WithWebhookEmitter(webhookEmitter)
-		s.escrowService.WithWebhookEmitter(webhookEmitter)
-		s.streamService.WithWebhookEmitter(webhookEmitter)
+		s.webhookEmitter = webhooks.NewEmitter(s.webhooks, s.logger)
+		s.gatewayService.WithWebhookEmitter(s.webhookEmitter)
+		s.escrowService.WithWebhookEmitter(s.webhookEmitter)
+		s.streamService.WithWebhookEmitter(s.webhookEmitter)
 
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
 		s.gatewayService.WithPlatformAddress(cfg.PlatformAddress)
@@ -398,10 +399,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.gatewayService.WithPlatformAddress(cfg.PlatformAddress)
 
 		// Wire webhook emitter into all payment subsystems (in-memory mode).
-		webhookEmitter2 := webhooks.NewEmitter(s.webhooks, s.logger)
-		s.gatewayService.WithWebhookEmitter(webhookEmitter2)
-		s.escrowService.WithWebhookEmitter(webhookEmitter2)
-		s.streamService.WithWebhookEmitter(webhookEmitter2)
+		s.webhookEmitter = webhooks.NewEmitter(s.webhooks, s.logger)
+		s.gatewayService.WithWebhookEmitter(s.webhookEmitter)
+		s.escrowService.WithWebhookEmitter(s.webhookEmitter)
+		s.streamService.WithWebhookEmitter(s.webhookEmitter)
 
 		// Wire receipt issuer into all payment paths
 		if s.receiptService != nil {
@@ -1581,6 +1582,12 @@ drainLoop:
 	if s.rateLimiter != nil {
 		s.rateLimiter.Stop()
 		s.logger.Info("rate limiter stopped")
+	}
+
+	// Drain in-flight webhook deliveries
+	if s.webhookEmitter != nil {
+		s.webhookEmitter.Shutdown(10 * time.Second)
+		s.logger.Info("webhook emitter stopped")
 	}
 
 	// Flush tracing spans

@@ -116,6 +116,49 @@ func (e *Escrow) IsTerminal() bool {
 	return false
 }
 
+// validTransitions defines the escrow state machine.
+// Terminal states (released, refunded, expired) have no outgoing transitions.
+var validTransitions = map[Status]map[Status]bool{
+	StatusPending: {
+		StatusDelivered: true,
+		StatusReleased:  true,
+		StatusDisputed:  true,
+		StatusExpired:   true,
+	},
+	StatusDelivered: {
+		StatusReleased: true,
+		StatusDisputed: true,
+		StatusExpired:  true,
+	},
+	StatusDisputed: {
+		StatusArbitrating: true,
+		StatusReleased:    true,
+		StatusRefunded:    true,
+	},
+	StatusArbitrating: {
+		StatusReleased: true,
+		StatusRefunded: true,
+	},
+}
+
+// ValidTransition returns true if the state machine allows from → to.
+func ValidTransition(from, to Status) bool {
+	return validTransitions[from][to]
+}
+
+// checkTransition validates a state transition. Returns ErrAlreadyResolved for
+// terminal states, ErrInvalidStatus for non-terminal invalid transitions.
+func checkTransition(from, to Status) error {
+	if ValidTransition(from, to) {
+		return nil
+	}
+	switch from {
+	case StatusReleased, StatusRefunded, StatusExpired:
+		return ErrAlreadyResolved
+	}
+	return ErrInvalidStatus
+}
+
 // ListOption configures optional parameters for list queries.
 type ListOption func(*listOpts)
 
@@ -426,12 +469,8 @@ func (s *Service) MarkDelivered(ctx context.Context, id, callerAddr string) (*Es
 		return nil, ErrUnauthorized
 	}
 
-	if escrow.IsTerminal() {
-		return nil, ErrAlreadyResolved
-	}
-
-	if escrow.Status != StatusPending {
-		return nil, ErrInvalidStatus
+	if err := checkTransition(escrow.Status, StatusDelivered); err != nil {
+		return nil, err
 	}
 
 	now := time.Now()
@@ -478,16 +517,10 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 		return nil, ErrUnauthorized
 	}
 
-	if escrow.IsTerminal() {
-		span.RecordError(ErrAlreadyResolved)
-		span.SetStatus(codes.Error, "already resolved")
-		return nil, ErrAlreadyResolved
-	}
-
-	if escrow.Status != StatusPending && escrow.Status != StatusDelivered {
-		span.RecordError(ErrInvalidStatus)
-		span.SetStatus(codes.Error, "invalid status")
-		return nil, ErrInvalidStatus
+	if err := checkTransition(escrow.Status, StatusReleased); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
 	// Release funds to seller
@@ -587,16 +620,10 @@ func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*
 		return nil, ErrUnauthorized
 	}
 
-	if escrow.IsTerminal() {
-		span.RecordError(ErrAlreadyResolved)
-		span.SetStatus(codes.Error, "already resolved")
-		return nil, ErrAlreadyResolved
-	}
-
-	if escrow.Status != StatusPending && escrow.Status != StatusDelivered {
-		span.RecordError(ErrInvalidStatus)
-		span.SetStatus(codes.Error, "invalid status")
-		return nil, ErrInvalidStatus
+	if err := checkTransition(escrow.Status, StatusDisputed); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
 	now := time.Now()
@@ -658,17 +685,10 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 	}
 	escrow = fresh
 
-	if escrow.IsTerminal() {
-		span.RecordError(ErrAlreadyResolved)
-		span.SetStatus(codes.Error, "already resolved")
-		return ErrAlreadyResolved
-	}
-
-	// Don't auto-release escrows in dispute/arbitration
-	if escrow.Status == StatusDisputed || escrow.Status == StatusArbitrating {
-		span.RecordError(ErrInvalidStatus)
-		span.SetStatus(codes.Error, "escrow is in dispute")
-		return ErrInvalidStatus
+	if err := checkTransition(escrow.Status, StatusExpired); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
 	}
 
 	// Release funds to seller
@@ -803,8 +823,8 @@ func (s *Service) AssignArbitrator(ctx context.Context, id, callerAddr, arbitrat
 		return nil, ErrUnauthorized
 	}
 
-	if escrow.Status != StatusDisputed {
-		return nil, ErrInvalidStatus
+	if err := checkTransition(escrow.Status, StatusArbitrating); err != nil {
+		return nil, err
 	}
 
 	now := time.Now()
@@ -839,7 +859,11 @@ func (s *Service) ResolveArbitration(ctx context.Context, id, callerAddr string,
 		return nil, err
 	}
 
-	if escrow.Status != StatusArbitrating && escrow.Status != StatusDisputed {
+	// ResolveArbitration is only valid from disputed/arbitrating states.
+	if escrow.Status != StatusDisputed && escrow.Status != StatusArbitrating {
+		if escrow.IsTerminal() {
+			return nil, ErrAlreadyResolved
+		}
 		return nil, ErrInvalidStatus
 	}
 

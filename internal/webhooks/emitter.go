@@ -3,6 +3,7 @@ package webhooks
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/mbd888/alancoin/internal/idgen"
@@ -32,19 +33,41 @@ func init() {
 // Emitter wraps a Dispatcher to emit lifecycle events across subsystems.
 // All methods are fire-and-forget: errors are logged but never returned.
 type Emitter struct {
-	d      *Dispatcher
-	logger *slog.Logger
+	d              *Dispatcher
+	logger         *slog.Logger
+	wg             sync.WaitGroup
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 // NewEmitter creates a new webhook emitter.
 func NewEmitter(d *Dispatcher, logger *slog.Logger) *Emitter {
-	return &Emitter{d: d, logger: logger}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Emitter{d: d, logger: logger, shutdownCtx: ctx, shutdownCancel: cancel}
+}
+
+// Shutdown cancels in-flight webhook deliveries and waits for them to complete.
+func (e *Emitter) Shutdown(timeout time.Duration) {
+	e.shutdownCancel()
+	done := make(chan struct{})
+	go func() {
+		e.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		e.logger.Warn("webhook emitter: shutdown timed out waiting for in-flight deliveries")
+	}
 }
 
 func (e *Emitter) emit(agentAddr string, eventType EventType, data map[string]interface{}) {
 	if e == nil || e.d == nil {
 		return
 	}
+	e.wg.Add(1)
+	defer e.wg.Done()
+
 	webhookEmitTotal.WithLabelValues(string(eventType)).Inc()
 	event := &Event{
 		ID:        idgen.WithPrefix("evt_"),
@@ -52,7 +75,7 @@ func (e *Emitter) emit(agentAddr string, eventType EventType, data map[string]in
 		Timestamp: time.Now(),
 		Data:      data,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(e.shutdownCtx, 30*time.Second)
 	defer cancel()
 	if err := e.d.DispatchToAgent(ctx, agentAddr, event); err != nil {
 		webhookEmitErrors.WithLabelValues(string(eventType)).Inc()
