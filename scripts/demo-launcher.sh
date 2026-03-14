@@ -64,9 +64,10 @@ echo ""
 # Check if server is already running
 if curl -s "http://localhost:8080/health/live" > /dev/null 2>&1; then
     warn "Server already running at localhost:8080"
+    warn "Ensure server was started with ALLOW_LOCAL_ENDPOINTS=true for gateway proxy demo"
     log "Starting demo against existing server..."
     cd "$PROJECT_DIR"
-    python3 scripts/demo.py --speed "$SPEED"
+    python3 scripts/demo.py --speed "$SPEED" --demo
     exit 0
 fi
 
@@ -87,8 +88,10 @@ log "Building Alancoin server..."
 cd "$PROJECT_DIR"
 make build --silent
 
-# Start the server in background
-log "Starting server..."
+# Start the server in background with local endpoint support for the stub provider
+log "Starting server (with ALLOW_LOCAL_ENDPOINTS for stub provider)..."
+export ALLOW_LOCAL_ENDPOINTS=true
+export DEMO_MODE=true
 ./bin/alancoin &
 SERVER_PID=$!
 
@@ -120,7 +123,7 @@ echo ""
 log "Starting live demo (speed: $SPEED)..."
 echo ""
 
-python3 scripts/demo.py --speed "$SPEED"
+python3 scripts/demo.py --speed "$SPEED" --demo
 
 # Keep server running after demo for exploration
 echo ""

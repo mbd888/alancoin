@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
@@ -436,5 +435,4 @@ func TestIntegration_ProviderFailureAutoReroute(t *testing.T) {
 
 	_ = candidate
 	_ = outcome
-	_ = fmt.Sprintf("test complete")
 }

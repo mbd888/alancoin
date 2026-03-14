@@ -30,11 +30,17 @@ type WithdrawalExecutor interface {
 	Transfer(ctx context.Context, to common.Address, amount *big.Int) (txHash string, err error)
 }
 
+// ReputationScorer provides reputation scores for credit decisions.
+type ReputationScorer interface {
+	GetScore(ctx context.Context, address string) (float64, string, error)
+}
+
 // Handler provides HTTP endpoints for ledger operations
 type Handler struct {
-	ledger   *Ledger
-	executor WithdrawalExecutor // nil = withdrawals are pending only
-	logger   *slog.Logger
+	ledger     *Ledger
+	executor   WithdrawalExecutor // nil = withdrawals are pending only
+	reputation ReputationScorer   // nil = credit applications denied
+	logger     *slog.Logger
 }
 
 // NewHandler creates a new ledger handler
@@ -47,10 +53,23 @@ func NewHandlerWithWithdrawals(ledger *Ledger, executor WithdrawalExecutor, logg
 	return &Handler{ledger: ledger, executor: executor, logger: logger}
 }
 
+// WithReputation sets the reputation scorer for credit decisions.
+func (h *Handler) WithReputation(r ReputationScorer) *Handler {
+	h.reputation = r
+	return h
+}
+
 // RegisterRoutes sets up ledger routes
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/agents/:address/balance", h.GetBalance)
 	r.GET("/agents/:address/ledger", h.GetHistory)
+}
+
+// RegisterCreditRoutes sets up credit-related routes.
+func (h *Handler) RegisterCreditRoutes(r *gin.RouterGroup) {
+	r.GET("/agents/:address/credit", h.GetCreditInfo)
+	r.POST("/agents/:address/credit/apply", h.ApplyForCredit)
+	r.GET("/credit/active", h.ListActiveCredit)
 }
 
 // RegisterAdminRoutes sets up admin-only ledger routes.
@@ -448,5 +467,123 @@ func (h *Handler) Reverse(c *gin.Context) {
 		"status":  "reversed",
 		"message": "Entry reversed successfully",
 		"entryId": req.EntryID,
+	})
+}
+
+// GetCreditInfo handles GET /agents/:address/credit
+func (h *Handler) GetCreditInfo(c *gin.Context) {
+	address := c.Param("address")
+
+	creditLimit, creditUsed, err := h.ledger.StoreRef().GetCreditInfo(c.Request.Context(), address)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "credit_error",
+			"message": "Failed to retrieve credit info",
+		})
+		return
+	}
+
+	// Compute available credit
+	limitBig, _ := usdc.Parse(creditLimit)
+	usedBig, _ := usdc.Parse(creditUsed)
+	availableBig := new(big.Int).Sub(limitBig, usedBig)
+	if availableBig.Sign() < 0 {
+		availableBig.SetInt64(0)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"address":   address,
+		"limit":     creditLimit,
+		"used":      creditUsed,
+		"available": usdc.Format(availableBig),
+	})
+}
+
+// ApplyForCredit handles POST /agents/:address/credit/apply
+// Simple rule: if reputation score > 50, auto-approve with limit proportional to score.
+func (h *Handler) ApplyForCredit(c *gin.Context) {
+	address := c.Param("address")
+
+	if h.reputation == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "not_configured",
+			"message": "Credit scoring is not available",
+		})
+		return
+	}
+
+	score, tier, err := h.reputation.GetScore(c.Request.Context(), address)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "reputation_error",
+			"message": "Failed to retrieve reputation score",
+		})
+		return
+	}
+
+	const minScore = 50.0
+	if score < minScore {
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "denied",
+			"score":   score,
+			"tier":    tier,
+			"message": "Reputation score below minimum threshold (50)",
+		})
+		return
+	}
+
+	// Credit limit proportional to score: score 50 -> 10 USDC, score 100 -> 100 USDC
+	// Linear scale: limit = (score - 50) * 1.8 + 10
+	limitFloat := (score-50)*1.8 + 10
+	// Convert to USDC micro-units (6 decimals) then format
+	limitMicro := int64(limitFloat * 1_000_000)
+	limitBig := big.NewInt(limitMicro)
+	limitStr := usdc.Format(limitBig)
+
+	if err := h.ledger.StoreRef().SetCreditLimit(c.Request.Context(), address, limitStr); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "credit_error",
+			"message": "Failed to set credit limit",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": "approved",
+		"score":  score,
+		"tier":   tier,
+		"limit":  limitStr,
+	})
+}
+
+// ListActiveCredit handles GET /credit/active
+func (h *Handler) ListActiveCredit(c *gin.Context) {
+	ctx := c.Request.Context()
+	store := h.ledger.StoreRef()
+
+	// Use the ActiveCreditLister interface if the store supports it,
+	// otherwise return an empty list.
+	type activeCreditLister interface {
+		ListActiveCredits(ctx context.Context) ([]ActiveCredit, error)
+	}
+
+	lister, ok := store.(activeCreditLister)
+	if !ok {
+		c.JSON(http.StatusOK, gin.H{"credits": []interface{}{}, "count": 0})
+		return
+	}
+
+	credits, err := lister.ListActiveCredits(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "credit_error",
+			"message": "Failed to list active credits",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"credits": credits,
+		"count":   len(credits),
 	})
 }

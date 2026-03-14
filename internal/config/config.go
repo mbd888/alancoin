@@ -29,6 +29,10 @@ type Config struct {
 	USDCContract  string
 	PaymasterURL  string // Circle Paymaster (future)
 
+	// Deposit watcher
+	DepositWatcherEnabled bool   // Enable on-chain deposit watcher (requires RPC_URL)
+	DepositWatcherStart   uint64 // Start block for deposit scanning (0 = latest)
+
 	// Payment settings
 	DefaultPrice string // Default price in USDC (e.g., "0.001")
 	MinPayment   string
@@ -46,8 +50,14 @@ type Config struct {
 	// Platform fee
 	PlatformAddress string // Ledger address for collecting basis-point fees (from PLATFORM_ADDRESS env var)
 
+	// Session key mode
+	SessionKeyMode string // "demo" (ledger-only, default) or "production" (on-chain transfers)
+
 	// Receipt signing
 	ReceiptHMACSecret string // HMAC secret for signing payment receipts (optional)
+
+	// Gateway proxy settings
+	AllowLocalEndpoints bool // Allow localhost/private endpoints (for demos and local development)
 
 	// Database pool settings
 	DBMaxOpenConns     int
@@ -129,10 +139,13 @@ func Load() (*Config, error) {
 			}
 			return int(rpm)
 		}(),
-		PlatformAddress:      getEnv("PLATFORM_ADDRESS", "0x0000000000000000000000000000000000000001"),
-		ReputationHMACSecret: os.Getenv("REPUTATION_HMAC_SECRET"),
-		AdminSecret:          os.Getenv("ADMIN_SECRET"),
-		ReceiptHMACSecret:    os.Getenv("RECEIPT_HMAC_SECRET"),
+		PlatformAddress:       getEnv("PLATFORM_ADDRESS", "0x0000000000000000000000000000000000000001"),
+		ReputationHMACSecret:  os.Getenv("REPUTATION_HMAC_SECRET"),
+		AdminSecret:           os.Getenv("ADMIN_SECRET"),
+		DepositWatcherEnabled: os.Getenv("DEPOSIT_WATCHER_ENABLED") == "true",
+		DepositWatcherStart:   getEnvUint64("DEPOSIT_WATCHER_START_BLOCK", 0),
+		SessionKeyMode:        getEnv("SESSION_KEY_MODE", "demo"),
+		ReceiptHMACSecret:     os.Getenv("RECEIPT_HMAC_SECRET"),
 
 		DBMaxOpenConns:     int(getEnvInt64("POSTGRES_MAX_OPEN_CONNS", int64(DefaultDBMaxOpenConns))),
 		DBMaxIdleConns:     int(getEnvInt64("POSTGRES_MAX_IDLE_CONNS", int64(DefaultDBMaxIdleConns))),
@@ -147,6 +160,8 @@ func Load() (*Config, error) {
 		RequestTimeout:   getEnvDuration("REQUEST_TIMEOUT", DefaultRequestTimeout),
 
 		OTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+
+		AllowLocalEndpoints: os.Getenv("ALLOW_LOCAL_ENDPOINTS") == "true",
 
 		StripeSecretKey:         os.Getenv("STRIPE_SECRET_KEY"),
 		StripeWebhookSecret:     os.Getenv("STRIPE_WEBHOOK_SECRET"),
@@ -233,6 +248,15 @@ func getEnvInt64(key string, defaultValue int64) int64 {
 	if value := os.Getenv(key); value != "" {
 		if i, err := strconv.ParseInt(value, 10, 64); err == nil {
 			return i
+		}
+	}
+	return defaultValue
+}
+
+func getEnvUint64(key string, defaultValue uint64) uint64 {
+	if value := os.Getenv(key); value != "" {
+		if u, err := strconv.ParseUint(value, 10, 64); err == nil {
+			return u
 		}
 	}
 	return defaultValue

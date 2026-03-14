@@ -26,6 +26,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/mbd888/alancoin/internal/admin"
 	"github.com/mbd888/alancoin/internal/auth"
 	"github.com/mbd888/alancoin/internal/billing"
@@ -55,6 +57,7 @@ import (
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
 	"github.com/mbd888/alancoin/internal/validation"
+	"github.com/mbd888/alancoin/internal/watcher"
 	"github.com/mbd888/alancoin/internal/webhooks"
 )
 
@@ -104,6 +107,7 @@ type Server struct {
 	denialExporter         admin.DenialExporter   // denial log exporter for admin API
 	reconcileRunner        *reconciliation.Runner // cross-subsystem reconciliation
 	reconcileTimer         *reconciliation.Timer  // periodic reconciliation
+	depositWatcher         *watcher.Watcher       // on-chain USDC deposit watcher (optional)
 	db                     *sql.DB                // nil if using in-memory
 	router                 *gin.Engine
 	httpSrv                *http.Server
@@ -250,6 +254,9 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		gwStore := gateway.NewPostgresStore(db)
 		gwResolver := gateway.NewResolver(&gatewayRegistryAdapter{store: s.registry, traceRankStore: s.traceRankStore})
 		gwForwarder := gateway.NewForwarder(0)
+		if cfg.AllowLocalEndpoints {
+			gwForwarder = gwForwarder.WithAllowLocalEndpoints()
+		}
 		gwLedger := &gatewayLedgerAdapter{s.ledgerService}
 		s.gatewayStore = gwStore
 		gwCB := circuitbreaker.New(5, 30*time.Second)
@@ -388,6 +395,9 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		gwStore2 := gateway.NewMemoryStore()
 		gwResolver2 := gateway.NewResolver(&gatewayRegistryAdapter{store: s.registry, traceRankStore: s.traceRankStore})
 		gwForwarder2 := gateway.NewForwarder(0)
+		if cfg.AllowLocalEndpoints {
+			gwForwarder2 = gwForwarder2.WithAllowLocalEndpoints()
+		}
 		s.gatewayStore = gwStore2
 		gwCB2 := circuitbreaker.New(5, 30*time.Second)
 		s.gatewayService = gateway.NewService(gwStore2, gwResolver2, gwForwarder2, &gatewayLedgerAdapter{s.ledgerService}, s.logger).
@@ -505,6 +515,34 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 	}
 
 	s.logger.Info("API authentication enabled")
+
+	// Initialize deposit watcher (optional — only if explicitly enabled)
+	if cfg.DepositWatcherEnabled {
+		var checkpoint watcher.CheckpointStore
+		if s.db != nil {
+			checkpoint = watcher.NewPostgresCheckpoint(s.db, "deposit_watcher")
+		} else {
+			checkpoint = watcher.NewMemoryCheckpoint()
+		}
+		watcherCfg := watcher.Config{
+			RPCURL:          cfg.RPCURL,
+			USDCContract:    common.HexToAddress(cfg.USDCContract),
+			PlatformAddress: common.HexToAddress(cfg.WalletAddress),
+			StartBlock:      cfg.DepositWatcherStart,
+		}
+		s.depositWatcher = watcher.New(
+			watcherCfg,
+			&watcherCreditorAdapter{store: s.ledger.StoreRef()},
+			&watcherAgentResolverAdapter{reg: s.registry},
+			checkpoint,
+			s.logger,
+		)
+		s.logger.Info("deposit watcher configured",
+			"rpc_url", cfg.RPCURL,
+			"usdc_contract", cfg.USDCContract)
+	} else {
+		s.logger.Warn("deposit watcher not enabled (set DEPOSIT_WATCHER_ENABLED=true to enable)")
+	}
 
 	// Create realtime hub for WebSocket streaming
 	s.realtimeHub = realtime.NewHub(s.logger)
@@ -709,6 +747,10 @@ func (s *Server) setupRoutes() {
 	// Validate :address URL params on all v1 routes (no-op when param absent)
 	v1.Use(validation.AddressParamMiddleware())
 	registryHandler := registry.NewHandler(s.registry)
+	if s.cfg.AllowLocalEndpoints {
+		registryHandler.SetAllowLocalEndpoints(true)
+		s.logger.Info("SSRF checks disabled for service endpoint registration (ALLOW_LOCAL_ENDPOINTS=true)")
+	}
 
 	// Wire reputation into discovery so agents see trust scores when searching
 	reputationProvider := reputation.NewRegistryProvider(s.registry)
@@ -777,8 +819,10 @@ func (s *Server) setupRoutes() {
 	// Session key creation requires auth, but using a session key doesn't
 	sessionHandler := sessionkeys.NewHandler(s.sessionMgr, s.logger)
 
-	// Always use demo mode (ledger-only accounting, no on-chain transfers)
-	sessionHandler = sessionHandler.WithDemoMode()
+	// Use demo mode (ledger-only accounting) unless SESSION_KEY_MODE=production
+	if s.cfg.SessionKeyMode != "production" {
+		sessionHandler = sessionHandler.WithDemoMode()
+	}
 
 	// Add real-time event emitter
 	if s.realtimeHub != nil {
@@ -908,8 +952,17 @@ func (s *Server) setupRoutes() {
 	// Ledger routes (agent balances)
 	if s.ledger != nil {
 		ledgerHandler := ledger.NewHandler(s.ledger, s.logger)
+		ledgerHandler.WithReputation(reputationProvider)
 		v1.GET("/agents/:address/balance", ledgerHandler.GetBalance)
 		v1.GET("/agents/:address/ledger", ledgerHandler.GetHistory)
+
+		// Credit routes (public read, protected apply)
+		v1.GET("/agents/:address/credit", ledgerHandler.GetCreditInfo)
+		v1.GET("/credit/active", ledgerHandler.ListActiveCredit)
+
+		protectedCredit := v1.Group("")
+		protectedCredit.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		protectedCredit.POST("/agents/:address/credit/apply", ledgerHandler.ApplyForCredit)
 
 		// Protected ledger routes
 		protectedLedger := v1.Group("")
@@ -1402,6 +1455,15 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.realtimeHub.Run(runCtx)
 	}
 
+	// Start deposit watcher
+	if s.depositWatcher != nil {
+		go func() {
+			if err := s.depositWatcher.Start(runCtx); err != nil && runCtx.Err() == nil {
+				s.logger.Error("deposit watcher stopped with error", "error", err)
+			}
+		}()
+	}
+
 	// Start escrow auto-release timer
 	if s.escrowTimer != nil {
 		go s.escrowTimer.Start(runCtx)
@@ -1528,6 +1590,12 @@ drainLoop:
 	if err := s.httpSrv.Shutdown(ctx); err != nil {
 		s.logger.Error("shutdown error", "error", err)
 		return err
+	}
+
+	// Stop deposit watcher
+	if s.depositWatcher != nil {
+		s.depositWatcher.Stop()
+		s.logger.Info("deposit watcher stopped")
 	}
 
 	// Stop escrow timer
@@ -2291,4 +2359,30 @@ func billingProviderName(cfg *config.Config) string {
 		return "stripe"
 	}
 	return "noop"
+}
+
+// watcherCreditorAdapter adapts ledger.Store to watcher.Creditor
+type watcherCreditorAdapter struct {
+	store ledger.Store
+}
+
+func (a *watcherCreditorAdapter) Credit(ctx context.Context, agentAddr, amount, txHash, description string) error {
+	return a.store.Credit(ctx, agentAddr, amount, txHash, description)
+}
+
+func (a *watcherCreditorAdapter) HasDeposit(ctx context.Context, txHash string) (bool, error) {
+	return a.store.HasDeposit(ctx, txHash)
+}
+
+// watcherAgentResolverAdapter adapts registry.Store to watcher.AgentResolver
+type watcherAgentResolverAdapter struct {
+	reg registry.Store
+}
+
+func (a *watcherAgentResolverAdapter) IsRegisteredAgent(ctx context.Context, addr string) (bool, error) {
+	agent, err := a.reg.GetAgent(ctx, addr)
+	if err != nil {
+		return false, nil // treat errors as "not found"
+	}
+	return agent != nil, nil
 }

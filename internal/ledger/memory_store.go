@@ -959,6 +959,35 @@ func (m *MemoryStore) GetCreditInfo(ctx context.Context, agentAddr string) (stri
 	return bal.CreditLimit, bal.CreditUsed, nil
 }
 
+// ListActiveCredits returns all agents with a non-zero credit limit.
+func (m *MemoryStore) ListActiveCredits(_ context.Context) ([]ActiveCredit, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var credits []ActiveCredit
+	for _, bal := range m.balances {
+		limitBig, _ := usdc.Parse(bal.CreditLimit)
+		if limitBig == nil || limitBig.Sign() == 0 {
+			continue
+		}
+		usedBig, _ := usdc.Parse(bal.CreditUsed)
+		if usedBig == nil {
+			usedBig = big.NewInt(0)
+		}
+		availBig := new(big.Int).Sub(limitBig, usedBig)
+		if availBig.Sign() < 0 {
+			availBig.SetInt64(0)
+		}
+		credits = append(credits, ActiveCredit{
+			Address:   bal.AgentAddr,
+			Limit:     bal.CreditLimit,
+			Used:      bal.CreditUsed,
+			Available: usdc.Format(availBig),
+		})
+	}
+	return credits, nil
+}
+
 // SumAllBalances returns the sum of all agent balances.
 func (m *MemoryStore) SumAllBalances(_ context.Context) (string, string, string, error) {
 	m.mu.RLock()

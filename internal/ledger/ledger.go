@@ -61,6 +61,14 @@ type Balance struct {
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
+// ActiveCredit represents an agent with an active credit line.
+type ActiveCredit struct {
+	Address   string `json:"address"`
+	Limit     string `json:"limit"`
+	Used      string `json:"used"`
+	Available string `json:"available"`
+}
+
 // Service is the high-level interface that all payment-path adapters use.
 // It captures every money-moving and read-only operation on the ledger.
 // The Supervisor decorator implements this interface to evaluate spending

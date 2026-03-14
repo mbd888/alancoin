@@ -1170,6 +1170,44 @@ func (p *PostgresStore) GetCreditInfo(ctx context.Context, agentAddr string) (st
 	return creditLimit, creditUsed, nil
 }
 
+// ListActiveCredits returns all agents with a non-zero credit limit.
+func (p *PostgresStore) ListActiveCredits(ctx context.Context) ([]ActiveCredit, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT agent_address, credit_limit, credit_used
+		FROM agent_balances
+		WHERE credit_limit > 0
+		ORDER BY agent_address
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var credits []ActiveCredit
+	for rows.Next() {
+		var addr, limit, used string
+		if err := rows.Scan(&addr, &limit, &used); err != nil {
+			return nil, err
+		}
+		limitBig, _ := usdc.Parse(limit)
+		usedBig, _ := usdc.Parse(used)
+		if usedBig == nil {
+			usedBig = big.NewInt(0)
+		}
+		availBig := new(big.Int).Sub(limitBig, usedBig)
+		if availBig.Sign() < 0 {
+			availBig.SetInt64(0)
+		}
+		credits = append(credits, ActiveCredit{
+			Address:   addr,
+			Limit:     limit,
+			Used:      used,
+			Available: usdc.Format(availBig),
+		})
+	}
+	return credits, rows.Err()
+}
+
 // SumAllBalances returns the sum of all agent balances.
 func (p *PostgresStore) SumAllBalances(ctx context.Context) (string, string, string, error) {
 	var available, pending, escrowed string

@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
 """
-Alancoin Investor Demo Script
+Alancoin Gateway Demo Script
 
-Creates a living network demonstration showing:
-1. Agent registration and service discovery
-2. Reputation building with tier differentiation
-3. Session keys with bounded autonomy
-4. Credit system (apply, spend on credit, auto-repay)
-5. Multi-agent pipeline (summarize -> translate -> extract)
-6. Escrow protection (buyer-protected payments)
-7. Live simulation with dashboard streaming
+Demonstrates the complete AI agent payment flow end-to-end:
+1. Agent registration with real service endpoints
+2. Gateway session management (budgeted payment sessions)
+3. Gateway proxy calls (discover -> hold -> forward -> settle)
+4. Multi-agent pipeline via gateway
+5. Escrow protection for high-value transactions
+6. Reputation building through real service interactions
+7. Session keys for bounded autonomy
+
+The stub service provider (scripts/stub_provider.py) runs as a subprocess,
+providing real HTTP endpoints that the gateway proxy forwards requests to.
 
 Usage:
-    python scripts/demo.py [--url http://localhost:8080] [--speed fast|normal|slow] [--demo]
+    python3 scripts/demo.py [--url http://localhost:8080] [--speed fast|normal|slow] [--demo]
+    python3 scripts/demo.py --speed fast --demo   # Quick automated run
 """
 
 import argparse
+import atexit
+import os
 import random
 import secrets
+import signal
+import subprocess
+import sys
 import time
 from datetime import datetime
 from typing import Optional
@@ -26,80 +35,88 @@ import requests
 
 # Demo configuration
 BASE_URL = "http://localhost:8080"
+STUB_PROVIDER_PORT = 9090
+STUB_PROVIDER_BASE = f"http://localhost:{STUB_PROVIDER_PORT}"
 
-# Agent personas for the demo
+# Agent personas for the demo — each registers services WITH endpoint URLs
+# pointing to the stub provider, so the gateway proxy can forward real requests.
 AGENTS = [
     {
         "name": "TranslatorBot",
         "description": "High-quality language translation powered by GPT-4",
         "services": [
-            {"type": "translation", "name": "English to Spanish", "price": "0.001"},
-            {"type": "translation", "name": "English to French", "price": "0.0015"},
-            {"type": "translation", "name": "English to German", "price": "0.002"},
+            {"type": "translation", "name": "English to Spanish", "price": "0.001",
+             "endpoint": f"{STUB_PROVIDER_BASE}/translation"},
+            {"type": "translation", "name": "English to French", "price": "0.0015",
+             "endpoint": f"{STUB_PROVIDER_BASE}/translation"},
+            {"type": "translation", "name": "English to German", "price": "0.002",
+             "endpoint": f"{STUB_PROVIDER_BASE}/translation"},
         ],
     },
     {
         "name": "ResearchAgent",
         "description": "Deep web research and comprehensive summarization",
         "services": [
-            {"type": "data", "name": "Web Research", "price": "0.05"},
-            {"type": "data", "name": "SEC Filing Summary", "price": "0.10"},
-            {"type": "data", "name": "Competitive Analysis", "price": "0.15"},
+            {"type": "inference", "name": "Web Research", "price": "0.05",
+             "endpoint": f"{STUB_PROVIDER_BASE}/inference"},
+            {"type": "inference", "name": "SEC Filing Summary", "price": "0.10",
+             "endpoint": f"{STUB_PROVIDER_BASE}/inference"},
+            {"type": "inference", "name": "Competitive Analysis", "price": "0.15",
+             "endpoint": f"{STUB_PROVIDER_BASE}/inference"},
         ],
     },
     {
         "name": "CodeReviewBot",
         "description": "Automated code review with security analysis",
         "services": [
-            {"type": "code", "name": "Code Review", "price": "0.02"},
-            {"type": "code", "name": "Test Generation", "price": "0.03"},
-            {"type": "code", "name": "Security Audit", "price": "0.05"},
+            {"type": "code-review", "name": "Code Review", "price": "0.02",
+             "endpoint": f"{STUB_PROVIDER_BASE}/code-review"},
+            {"type": "code-review", "name": "Test Generation", "price": "0.03",
+             "endpoint": f"{STUB_PROVIDER_BASE}/code-review"},
+            {"type": "code-review", "name": "Security Audit", "price": "0.05",
+             "endpoint": f"{STUB_PROVIDER_BASE}/code-review"},
         ],
     },
     {
         "name": "DataScraper",
         "description": "Real-time data extraction and monitoring",
         "services": [
-            {"type": "data", "name": "Price Feed", "price": "0.002"},
-            {"type": "data", "name": "Social Sentiment", "price": "0.01"},
+            {"type": "inference", "name": "Price Feed", "price": "0.002",
+             "endpoint": f"{STUB_PROVIDER_BASE}/inference"},
+            {"type": "inference", "name": "Social Sentiment", "price": "0.01",
+             "endpoint": f"{STUB_PROVIDER_BASE}/inference"},
         ],
     },
     {
         "name": "TradingAgent",
         "description": "DeFi analytics and yield optimization",
         "services": [
-            {"type": "compute", "name": "Yield Analysis", "price": "0.08"},
-            {"type": "compute", "name": "Risk Assessment", "price": "0.12"},
+            {"type": "inference", "name": "Yield Analysis", "price": "0.08",
+             "endpoint": f"{STUB_PROVIDER_BASE}/inference"},
+            {"type": "inference", "name": "Risk Assessment", "price": "0.12",
+             "endpoint": f"{STUB_PROVIDER_BASE}/inference"},
         ],
     },
     {
         "name": "ContentWriter",
         "description": "AI-powered content generation and editing",
         "services": [
-            {"type": "content", "name": "Blog Post", "price": "0.04"},
-            {"type": "content", "name": "Tweet Thread", "price": "0.01"},
+            {"type": "inference", "name": "Blog Post", "price": "0.04",
+             "endpoint": f"{STUB_PROVIDER_BASE}/inference"},
+            {"type": "inference", "name": "Tweet Thread", "price": "0.01",
+             "endpoint": f"{STUB_PROVIDER_BASE}/inference"},
         ],
     },
     {
-        "name": "ImageProcessor",
-        "description": "Image analysis and generation",
+        "name": "EmbeddingService",
+        "description": "Text embedding and vector generation",
         "services": [
-            {"type": "media", "name": "Image Caption", "price": "0.005"},
-            {"type": "media", "name": "Style Transfer", "price": "0.02"},
+            {"type": "embedding", "name": "Text Embedding", "price": "0.005",
+             "endpoint": f"{STUB_PROVIDER_BASE}/embedding"},
+            {"type": "embedding", "name": "Batch Embedding", "price": "0.02",
+             "endpoint": f"{STUB_PROVIDER_BASE}/embedding"},
         ],
     },
-]
-
-# Transaction scenarios showing real agent-to-agent commerce
-TRANSACTION_SCENARIOS = [
-    ("TradingAgent", "DataScraper", "0.002", "Price Feed"),
-    ("TradingAgent", "ResearchAgent", "0.10", "SEC Filing Summary"),
-    ("ContentWriter", "TranslatorBot", "0.001", "English to Spanish"),
-    ("CodeReviewBot", "ResearchAgent", "0.05", "Web Research"),
-    ("ImageProcessor", "ContentWriter", "0.04", "Blog Post"),
-    ("DataScraper", "CodeReviewBot", "0.02", "Code Review"),
-    ("ResearchAgent", "TranslatorBot", "0.002", "English to German"),
-    ("TradingAgent", "CodeReviewBot", "0.05", "Security Audit"),
 ]
 
 
@@ -113,6 +130,62 @@ def random_tx_hash() -> str:
     return "0x" + secrets.token_hex(32)
 
 
+class StubProviderProcess:
+    """Manages the stub provider subprocess lifecycle."""
+
+    def __init__(self, port: int = STUB_PROVIDER_PORT):
+        self.port = port
+        self.process = None
+
+    def start(self):
+        """Start the stub provider as a subprocess."""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        stub_script = os.path.join(script_dir, "stub_provider.py")
+
+        if not os.path.exists(stub_script):
+            raise FileNotFoundError(f"Stub provider not found at {stub_script}")
+
+        self.process = subprocess.Popen(
+            [sys.executable, stub_script, "--port", str(self.port)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        # Wait briefly for the server to start
+        time.sleep(0.5)
+
+        # Check it's alive
+        if self.process.poll() is not None:
+            stderr = self.process.stderr.read().decode() if self.process.stderr else ""
+            raise RuntimeError(f"Stub provider failed to start: {stderr}")
+
+        # Verify it responds
+        for _ in range(10):
+            try:
+                resp = requests.post(
+                    f"http://localhost:{self.port}/inference",
+                    json={"text": "test", "task": "classify"},
+                    timeout=2,
+                )
+                if resp.status_code == 200:
+                    return
+            except requests.ConnectionError:
+                time.sleep(0.3)
+
+        raise RuntimeError("Stub provider started but not responding")
+
+    def stop(self):
+        """Stop the stub provider subprocess."""
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+            self.process = None
+
+
 class DemoRunner:
     def __init__(self, base_url: str, speed: str = "normal", demo_mode: bool = False):
         self.base_url = base_url.rstrip("/")
@@ -120,12 +193,13 @@ class DemoRunner:
         self.demo_mode = demo_mode
         self.agents = {}  # name -> {address, api_key, services}
         self.running = True
+        self.stub_provider = StubProviderProcess()
 
         # Speed settings (seconds between actions)
         self.delays = {
-            "fast": {"tx": 0.3, "session": 1, "phase": 1},
-            "normal": {"tx": 2, "session": 5, "phase": 2},
-            "slow": {"tx": 5, "session": 15, "phase": 5},
+            "fast": {"tx": 0.2, "session": 0.5, "phase": 0.5},
+            "normal": {"tx": 1.5, "session": 3, "phase": 2},
+            "slow": {"tx": 4, "session": 10, "phase": 5},
         }[speed]
 
     def log(self, emoji: str, message: str):
@@ -134,21 +208,24 @@ class DemoRunner:
         print(f"[{timestamp}] {emoji} {message}")
 
     def api_call(self, method: str, endpoint: str, json_data: dict = None,
-                 api_key: str = None, retries: int = 2) -> Optional[dict]:
+                 api_key: str = None, extra_headers: dict = None,
+                 retries: int = 2) -> Optional[dict]:
         """Make an API call with error handling and retry on rate limit."""
         url = f"{self.base_url}{endpoint}"
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+        if extra_headers:
+            headers.update(extra_headers)
 
         for attempt in range(retries + 1):
             try:
                 if method == "GET":
-                    resp = requests.get(url, headers=headers, timeout=10)
+                    resp = requests.get(url, headers=headers, timeout=15)
                 elif method == "POST":
-                    resp = requests.post(url, json=json_data, headers=headers, timeout=10)
+                    resp = requests.post(url, json=json_data, headers=headers, timeout=15)
                 elif method == "DELETE":
-                    resp = requests.delete(url, headers=headers, timeout=10)
+                    resp = requests.delete(url, headers=headers, timeout=15)
                 else:
                     raise ValueError(f"Unknown method: {method}")
 
@@ -160,23 +237,28 @@ class DemoRunner:
                     return None
                 return resp.json() if resp.text else {}
             except Exception as e:
-                self.log("!", f"API error: {e}")
+                if attempt == retries:
+                    self.log("!", f"API error: {e}")
                 return None
         return None
 
     def api_call_raw(self, method: str, endpoint: str, json_data: dict = None,
-                     api_key: str = None):
+                     api_key: str = None, extra_headers: dict = None):
         """Make an API call returning the raw response (for checking status codes)."""
         url = f"{self.base_url}{endpoint}"
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+        if extra_headers:
+            headers.update(extra_headers)
 
         try:
             if method == "GET":
-                return requests.get(url, headers=headers, timeout=10)
+                return requests.get(url, headers=headers, timeout=15)
             elif method == "POST":
-                return requests.post(url, json=json_data, headers=headers, timeout=10)
+                return requests.post(url, json=json_data, headers=headers, timeout=15)
+            elif method == "DELETE":
+                return requests.delete(url, headers=headers, timeout=15)
             else:
                 return None
         except Exception:
@@ -185,8 +267,8 @@ class DemoRunner:
     # ── Phase 1: Agent Registration ──────────────────────────────────────
 
     def setup_agents(self):
-        """Register all demo agents."""
-        self.log("🤖", "Registering AI agents with services...")
+        """Register all demo agents with service endpoints pointing to stub provider."""
+        self.log("  ", "Registering AI agents with service endpoints...")
 
         total_services = 0
         for agent_config in AGENTS:
@@ -218,6 +300,7 @@ class DemoRunner:
                         "name": service["name"],
                         "description": f"{service['name']} service",
                         "price": service["price"],
+                        "endpoint": service["endpoint"],
                     },
                     api_key=api_key,
                 )
@@ -226,13 +309,13 @@ class DemoRunner:
                     total_services += 1
 
             svc_count = len(self.agents[agent_config["name"]]["services"])
-            self.log("  ", f"  {agent_config['name']} ({svc_count} services)")
+            self.log("  ", f"  {agent_config['name']:<20s} {svc_count} services (endpoints live)")
 
-        self.log("✓", f"Registered {len(self.agents)} agents with {total_services} services")
+        self.log("[ok]", f"Registered {len(self.agents)} agents with {total_services} service endpoints")
 
     def fund_agents(self):
         """Fund all agents with initial USDC deposits."""
-        self.log("💰", "Funding agents with initial USDC deposits...")
+        self.log("  ", "Funding agents with initial USDC deposits...")
 
         funded = 0
         for name, agent in self.agents.items():
@@ -245,131 +328,288 @@ class DemoRunner:
             if result:
                 funded += 1
 
-        self.log("✓", f"Funded {funded} agents with $10.00 USDC each")
+        self.log("[ok]", f"Funded {funded} agents with $10.00 USDC each")
 
-    # ── Phase 2: Reputation Building ─────────────────────────────────────
+    # ── Phase 2: Gateway Proxy (the core product flow) ───────────────────
 
-    def build_reputation(self):
-        """Build visible reputation via transaction burst."""
-        self.log("⭐", "Building agent reputation...")
-
-        reputation_txns = [
-            # TradingAgent buys heavily (20+ txns -> trusted)
-            ("TradingAgent", "DataScraper", "0.002", "Price Feed"),
-            ("TradingAgent", "DataScraper", "0.002", "Price Feed"),
-            ("TradingAgent", "DataScraper", "0.002", "Price Feed"),
-            ("TradingAgent", "DataScraper", "0.010", "Social Sentiment"),
-            ("TradingAgent", "DataScraper", "0.010", "Social Sentiment"),
-            ("TradingAgent", "ResearchAgent", "0.10", "SEC Filing Summary"),
-            ("TradingAgent", "ResearchAgent", "0.10", "SEC Filing Summary"),
-            ("TradingAgent", "ResearchAgent", "0.05", "Web Research"),
-            ("TradingAgent", "ResearchAgent", "0.05", "Web Research"),
-            ("TradingAgent", "ResearchAgent", "0.15", "Competitive Analysis"),
-            ("TradingAgent", "CodeReviewBot", "0.05", "Security Audit"),
-            ("TradingAgent", "CodeReviewBot", "0.05", "Security Audit"),
-            ("TradingAgent", "CodeReviewBot", "0.02", "Code Review"),
-            ("TradingAgent", "TranslatorBot", "0.001", "English to Spanish"),
-            ("TradingAgent", "TranslatorBot", "0.002", "English to German"),
-            ("TradingAgent", "ContentWriter", "0.04", "Blog Post"),
-            ("TradingAgent", "ContentWriter", "0.01", "Tweet Thread"),
-            ("TradingAgent", "ImageProcessor", "0.005", "Image Caption"),
-            ("TradingAgent", "ImageProcessor", "0.020", "Style Transfer"),
-            ("TradingAgent", "DataScraper", "0.002", "Price Feed"),
-            # TranslatorBot (10+ txns -> established)
-            ("TranslatorBot", "ResearchAgent", "0.05", "Web Research"),
-            ("TranslatorBot", "ResearchAgent", "0.05", "Web Research"),
-            ("TranslatorBot", "ContentWriter", "0.04", "Blog Post"),
-            ("TranslatorBot", "ContentWriter", "0.01", "Tweet Thread"),
-            ("TranslatorBot", "CodeReviewBot", "0.02", "Code Review"),
-            ("TranslatorBot", "CodeReviewBot", "0.03", "Test Generation"),
-            ("TranslatorBot", "DataScraper", "0.002", "Price Feed"),
-            ("TranslatorBot", "DataScraper", "0.010", "Social Sentiment"),
-            ("TranslatorBot", "ImageProcessor", "0.005", "Image Caption"),
-            ("TranslatorBot", "TradingAgent", "0.08", "Yield Analysis"),
-            ("TranslatorBot", "TradingAgent", "0.12", "Risk Assessment"),
-            # CodeReviewBot (5+ txns -> emerging)
-            ("CodeReviewBot", "ResearchAgent", "0.05", "Web Research"),
-            ("CodeReviewBot", "TranslatorBot", "0.001", "English to Spanish"),
-            ("CodeReviewBot", "TranslatorBot", "0.0015", "English to French"),
-            ("CodeReviewBot", "DataScraper", "0.002", "Price Feed"),
-            ("CodeReviewBot", "ContentWriter", "0.04", "Blog Post"),
-            # ResearchAgent buys a few
-            ("ResearchAgent", "TranslatorBot", "0.001", "English to Spanish"),
-            ("ResearchAgent", "TranslatorBot", "0.002", "English to German"),
-            ("ResearchAgent", "DataScraper", "0.002", "Price Feed"),
-            # Cross-agent traffic
-            ("DataScraper", "CodeReviewBot", "0.02", "Code Review"),
-            ("DataScraper", "TradingAgent", "0.08", "Yield Analysis"),
-            ("ContentWriter", "TranslatorBot", "0.001", "English to Spanish"),
-            ("ContentWriter", "ResearchAgent", "0.05", "Web Research"),
-            ("ImageProcessor", "ContentWriter", "0.04", "Blog Post"),
-            ("ImageProcessor", "CodeReviewBot", "0.02", "Code Review"),
-        ]
-
-        success = 0
-        for from_name, to_name, amount, service in reputation_txns:
-            if from_name not in self.agents or to_name not in self.agents:
-                continue
-            from_agent = self.agents[from_name]
-            to_agent = self.agents[to_name]
-            tx_hash = random_tx_hash()
-            result = self.api_call("POST", "/v1/transactions", {
-                "txHash": tx_hash,
-                "from": from_agent["address"],
-                "to": to_agent["address"],
-                "amount": amount,
-            }, api_key=from_agent["api_key"])
-            if result:
-                success += 1
-            time.sleep(0.15)
-
-        self.log("✓", f"Executed {success} reputation-building transactions")
-
-    def show_reputation_summary(self):
-        """Print the reputation leaderboard."""
-        self.log("🏆", "Reputation Leaderboard")
+    def demonstrate_gateway_proxy(self):
+        """Demonstrate the full gateway proxy flow: session -> proxy -> settle."""
+        self.log("  ", "GATEWAY PROXY FLOW")
         self.log("  ", "-" * 55)
+        self.log("  ", "  The gateway handles: discover -> hold -> forward -> settle")
+        self.log("  ", "")
 
-        data = self.api_call("GET", "/v1/reputation?limit=20")
-        if not data or "leaderboard" not in data:
-            self.log("!", "Could not fetch leaderboard")
+        buyer_name = "TradingAgent"
+        if buyer_name not in self.agents:
+            self.log("!", "TradingAgent not found, skipping gateway demo")
             return
 
+        buyer = self.agents[buyer_name]
+
+        # Step 1: Create a gateway session with a budget
+        self.log("  ", "  Step 1: Creating gateway session (budget: $1.00)")
+        session_result = self.api_call(
+            "POST",
+            "/v1/gateway/sessions",
+            {
+                "maxTotal": "1.00",
+                "maxPerRequest": "0.20",
+                "strategy": "cheapest",
+                "allowedTypes": ["inference", "translation", "code-review", "embedding"],
+            },
+            api_key=buyer["api_key"],
+        )
+
+        if not session_result:
+            self.log("!", "Failed to create gateway session")
+            self.log("  ", "  (Agent may need sufficient balance)")
+            return
+
+        session = session_result.get("session", {})
+        token = session_result.get("token", session.get("id", ""))
+        session_id = session.get("id", "")
+
+        self.log("[ok]", f"Session created: {session_id[:16]}...")
+        self.log("  ", f"  Budget: $1.00 | Per-request max: $0.20 | Strategy: cheapest")
+        time.sleep(self.delays["phase"])
+
+        # Step 2: Make gateway proxy calls (real HTTP forwarding!)
+        self.log("  ", "")
+        self.log("  ", "  Step 2: Making gateway proxy calls (real HTTP forwarding)")
+
+        proxy_calls = [
+            {
+                "serviceType": "inference",
+                "params": {"text": "Quarterly earnings show 15% revenue growth", "task": "summarize"},
+                "label": "Summarize earnings report",
+            },
+            {
+                "serviceType": "translation",
+                "params": {"text": "AI agents can now transact autonomously", "target": "es"},
+                "label": "Translate to Spanish",
+            },
+            {
+                "serviceType": "code-review",
+                "params": {"code": "def pay(amount):\n  return transfer(amount)\n"},
+                "label": "Review payment code",
+            },
+            {
+                "serviceType": "embedding",
+                "params": {"text": "Machine learning payment infrastructure"},
+                "label": "Generate embedding",
+            },
+        ]
+
+        total_spent = 0.0
+        successful_calls = 0
+
+        for i, call in enumerate(proxy_calls, 1):
+            result = self.api_call(
+                "POST",
+                "/v1/gateway/proxy",
+                {
+                    "serviceType": call["serviceType"],
+                    "params": call["params"],
+                },
+                api_key=buyer["api_key"],
+                extra_headers={"X-Gateway-Token": token},
+            )
+
+            if result:
+                proxy_result = result.get("result", {})
+                amount_paid = proxy_result.get("amountPaid", "0")
+                service_name = proxy_result.get("serviceName", "unknown")
+                remaining = result.get("remaining", "?")
+                response = proxy_result.get("response", {})
+                output_preview = str(response.get("output", ""))[:60]
+
+                total_spent += float(amount_paid)
+                successful_calls += 1
+
+                self.log("  ", f"  [{i}/4] {call['label']:<28s} ${amount_paid} -> {service_name}")
+                self.log("  ", f"         Response: {output_preview}...")
+            else:
+                self.log("  ", f"  [{i}/4] {call['label']:<28s} FAILED")
+
+            time.sleep(self.delays["tx"])
+
+        self.log("  ", "")
+        self.log("[ok]", f"  {successful_calls} proxy calls completed | Spent: ${total_spent:.4f}")
+
+        time.sleep(self.delays["phase"])
+
+        # Step 3: Check session state
+        self.log("  ", "")
+        self.log("  ", "  Step 3: Checking session state")
+        session_state = self.api_call(
+            "GET",
+            f"/v1/gateway/sessions/{session_id}",
+            api_key=buyer["api_key"],
+        )
+
+        if session_state:
+            s = session_state.get("session", {})
+            self.log("  ", f"  Total spent: ${s.get('totalSpent', '?')} | "
+                          f"Remaining: {s.get('id', '?')[:8]}... | "
+                          f"Requests: {s.get('requestCount', 0)}")
+
+        time.sleep(self.delays["phase"])
+
+        # Step 4: Close the session (refund remaining budget)
+        self.log("  ", "")
+        self.log("  ", "  Step 4: Closing session (refund unspent budget)")
+        close_result = self.api_call(
+            "DELETE",
+            f"/v1/gateway/sessions/{session_id}",
+            api_key=buyer["api_key"],
+        )
+
+        if close_result:
+            refunded = close_result.get("totalRefunded", "0")
+            total = close_result.get("totalSpent", "0")
+            count = close_result.get("requestCount", 0)
+            self.log("[ok]", f"Session closed | Spent: ${total} | Refunded: ${refunded} | Requests: {count}")
+        else:
+            self.log("!", "Session close failed")
+
+        self.log("  ", "")
+        self.log("[ok]", "Gateway flow: session -> proxy -> settle -> close (complete)")
+
+    # ── Phase 3: Reputation Building via Gateway ─────────────────────────
+
+    def build_reputation(self):
+        """Build reputation by running proxy calls through the gateway."""
+        self.log("  ", "Building agent reputation via gateway proxy calls...")
+
+        # Define reputation-building scenarios
+        # Each tuple: (buyer_name, service_type, params, count)
+        scenarios = [
+            # TradingAgent buys a lot (-> trusted/elite tier)
+            ("TradingAgent", "inference", {"text": "market data", "task": "analyze"}, 8),
+            ("TradingAgent", "translation", {"text": "report", "target": "es"}, 3),
+            ("TradingAgent", "code-review", {"code": "x = 1"}, 3),
+            ("TradingAgent", "embedding", {"text": "vectors"}, 2),
+            # TranslatorBot buys some (-> established tier)
+            ("TranslatorBot", "inference", {"text": "research topic", "task": "summarize"}, 5),
+            ("TranslatorBot", "code-review", {"code": "pass"}, 3),
+            ("TranslatorBot", "embedding", {"text": "embed this"}, 2),
+            # CodeReviewBot buys a few (-> emerging tier)
+            ("CodeReviewBot", "inference", {"text": "analyze code quality", "task": "analyze"}, 3),
+            ("CodeReviewBot", "translation", {"text": "docs", "target": "fr"}, 2),
+            # Cross-agent traffic
+            ("ResearchAgent", "translation", {"text": "findings", "target": "de"}, 2),
+            ("DataScraper", "code-review", {"code": "scrape()"}, 2),
+            ("ContentWriter", "translation", {"text": "article", "target": "ja"}, 2),
+            ("EmbeddingService", "inference", {"text": "compare embeddings", "task": "classify"}, 2),
+        ]
+
+        total_calls = 0
+        success = 0
+
+        for buyer_name, svc_type, params, count in scenarios:
+            if buyer_name not in self.agents:
+                continue
+
+            buyer = self.agents[buyer_name]
+
+            # Create a session for this burst
+            session_result = self.api_call(
+                "POST",
+                "/v1/gateway/sessions",
+                {
+                    "maxTotal": "5.00",
+                    "maxPerRequest": "0.50",
+                    "strategy": "cheapest",
+                },
+                api_key=buyer["api_key"],
+            )
+
+            if not session_result:
+                continue
+
+            token = session_result.get("token", session_result.get("session", {}).get("id", ""))
+            session_id = session_result.get("session", {}).get("id", "")
+
+            for _ in range(count):
+                result = self.api_call(
+                    "POST",
+                    "/v1/gateway/proxy",
+                    {"serviceType": svc_type, "params": params},
+                    api_key=buyer["api_key"],
+                    extra_headers={"X-Gateway-Token": token},
+                )
+                total_calls += 1
+                if result:
+                    success += 1
+                time.sleep(0.1)
+
+            # Close session
+            self.api_call("DELETE", f"/v1/gateway/sessions/{session_id}", api_key=buyer["api_key"])
+
+        self.log("[ok]", f"Completed {success}/{total_calls} reputation-building proxy calls")
+
+    def show_reputation_summary(self):
+        """Print agent reputation scores using per-agent reputation lookups."""
+        self.log("  ", "Reputation Summary")
+        self.log("  ", "-" * 55)
+
         tier_emoji = {
-            "elite": "★",
-            "trusted": "◆",
-            "established": "●",
-            "emerging": "○",
-            "new": " ",
+            "elite": "[*]",
+            "trusted": "[+]",
+            "established": "[o]",
+            "emerging": "[-]",
+            "new": "[ ]",
         }
 
-        for entry in data["leaderboard"]:
-            emoji = tier_emoji.get(entry.get("tier", "new"), " ")
-            addr = entry.get("address", "")
-            name = addr[:10] + "..."
+        # Use batch reputation endpoint
+        addresses = [info["address"] for info in self.agents.values()]
+        batch_data = self.api_call("POST", "/v1/reputation/batch", {"addresses": addresses})
+
+        entries = []
+        if batch_data and "results" in batch_data:
+            for result in batch_data["results"]:
+                addr = result.get("address", "")
+                name = addr[:10] + "..."
+                for aname, ainfo in self.agents.items():
+                    if ainfo["address"].lower() == addr.lower():
+                        name = aname
+                        break
+                score = result.get("score", 0)
+                tier = result.get("tier", "new")
+                txns = result.get("totalTransactions", 0)
+                entries.append((score, name, tier, txns))
+        else:
+            # Fallback: query individually
             for aname, ainfo in self.agents.items():
-                if ainfo["address"].lower() == addr.lower():
-                    name = aname
-                    break
-            score = entry.get("score", 0)
-            tier = entry.get("tier", "new")
-            txns = entry.get("totalTransactions", 0)
+                data = self.api_call("GET", f"/v1/reputation/{ainfo['address']}")
+                if data:
+                    score = data.get("score", 0)
+                    tier = data.get("tier", "new")
+                    txns = data.get("totalTransactions", 0)
+                    entries.append((score, aname, tier, txns))
+
+        # Sort by score descending
+        entries.sort(key=lambda x: x[0], reverse=True)
+
+        tier_counts = {"elite": 0, "trusted": 0, "established": 0, "emerging": 0, "new": 0}
+        for score, name, tier, txns in entries:
+            emoji = tier_emoji.get(tier, "[ ]")
             self.log("  ", f"  {emoji} {name:<20s}  {score:5.1f}  {tier:<12s}  {txns} txns")
+            tier_counts[tier] = tier_counts.get(tier, 0) + 1
 
-        tiers = data.get("tiers", {})
         self.log("  ", "")
-        self.log("📊", "Tier Distribution:")
-        self.log("  ", f"  ★ Elite:       {tiers.get('elite', 0)}")
-        self.log("  ", f"  ◆ Trusted:     {tiers.get('trusted', 0)}")
-        self.log("  ", f"  ● Established: {tiers.get('established', 0)}")
-        self.log("  ", f"  ○ Emerging:    {tiers.get('emerging', 0)}")
-        self.log("  ", f"    New:         {tiers.get('new', 0)}")
+        self.log("  ", "Tier Distribution:")
+        self.log("  ", f"  [*] Elite:       {tier_counts.get('elite', 0)}")
+        self.log("  ", f"  [+] Trusted:     {tier_counts.get('trusted', 0)}")
+        self.log("  ", f"  [o] Established: {tier_counts.get('established', 0)}")
+        self.log("  ", f"  [-] Emerging:    {tier_counts.get('emerging', 0)}")
+        self.log("  ", f"  [ ] New:         {tier_counts.get('new', 0)}")
 
-    # ── Phase 3: Bounded Autonomy ────────────────────────────────────────
+    # ── Phase 4: Bounded Autonomy (Session Keys) ────────────────────────
 
     def demonstrate_session_keys(self):
         """Show bounded autonomy via session keys."""
-        self.log("🔑", "BOUNDED AUTONOMY (Session Keys)")
+        self.log("  ", "BOUNDED AUTONOMY (Session Keys)")
         self.log("  ", "-" * 55)
 
         if "TradingAgent" not in self.agents:
@@ -384,7 +624,7 @@ class DemoRunner:
         self.log("  ", f"  Agent: TradingAgent ({address[:10]}...)")
         self.log("  ", f"  Max per transaction: $0.50")
         self.log("  ", f"  Max per day: $5.00")
-        self.log("  ", f"  Allowed services: data, compute only")
+        self.log("  ", f"  Allowed services: inference, embedding only")
         self.log("  ", f"  Expires: 24 hours")
 
         result = self.api_call(
@@ -395,7 +635,7 @@ class DemoRunner:
                 "maxPerTransaction": "0.50",
                 "maxPerDay": "5.00",
                 "maxTotal": "50.00",
-                "allowedServiceTypes": ["data", "compute"],
+                "allowedServiceTypes": ["inference", "embedding"],
                 "expiresIn": "24h",
                 "label": "demo-trading-key",
             },
@@ -404,216 +644,111 @@ class DemoRunner:
 
         if result:
             key_id = result.get("id", "unknown")
-            self.log("✅", f"Session key created: {key_id}")
+            self.log("[ok]", f"Session key created: {key_id}")
             self.log("  ", "")
-            self.log("🛡️", "This is BOUNDED AUTONOMY:")
-            self.log("  ", "  Agent CAN spend up to $0.50/tx on data & compute")
+            self.log("  ", "This is BOUNDED AUTONOMY:")
+            self.log("  ", "  Agent CAN spend up to $0.50/tx on inference & embedding")
             self.log("  ", "  Agent CANNOT exceed $5/day")
-            self.log("  ", "  Agent CANNOT pay for translation or code services")
+            self.log("  ", "  Agent CANNOT pay for translation or code-review services")
             self.log("  ", "  Owner CAN revoke instantly if needed")
         else:
             self.log("!", "Session key creation failed")
 
         time.sleep(self.delays["phase"])
 
-    # ── Phase 4: Credit System ───────────────────────────────────────────
-
-    def demonstrate_credit(self):
-        """Demonstrate the credit system lifecycle."""
-        self.log("💳", "CREDIT SYSTEM")
-        self.log("  ", "-" * 55)
-
-        if "TradingAgent" not in self.agents:
-            self.log("!", "TradingAgent not found, skipping credit demo")
-            return
-
-        agent = self.agents["TradingAgent"]
-        address = agent["address"]
-        api_key = agent["api_key"]
-
-        # Step 1: Check current credit status (should be none)
-        self.log("  ", "  Checking TradingAgent credit status...")
-        credit_resp = self.api_call_raw("GET", f"/v1/agents/{address}/credit")
-        if credit_resp and credit_resp.status_code == 404:
-            self.log("  ", "  No credit line yet (as expected for a new agent)")
-        elif credit_resp and credit_resp.status_code == 200:
-            self.log("  ", "  Credit line already exists")
-
-        time.sleep(self.delays["phase"])
-
-        # Step 2: Apply for credit
-        self.log("  ", "")
-        self.log("  ", "  TradingAgent applies for credit...")
-        apply_result = self.api_call(
-            "POST",
-            f"/v1/agents/{address}/credit/apply",
-            {},
-            api_key=api_key,
-        )
-
-        if apply_result:
-            credit_line = apply_result.get("credit_line", {})
-            evaluation = apply_result.get("evaluation", {})
-            limit = credit_line.get("creditLimit", "0")
-            rate = evaluation.get("interestRate", 0)
-            tier = credit_line.get("reputationTier", "unknown")
-
-            self.log("✅", f"APPROVED: ${float(limit):.2f} credit line at {rate*100:.0f}% ({tier} tier)")
-
-            # Step 3: Show effective balance
-            balance_data = self.api_call("GET", f"/v1/agents/{address}/balance")
-            if balance_data and "balance" in balance_data:
-                bal = balance_data["balance"]
-                available = float(bal.get("available", "0"))
-                credit_limit = float(bal.get("creditLimit", "0"))
-                effective = available + credit_limit
-                self.log("  ", f"  Balance: ${available:.2f} available + ${credit_limit:.2f} credit = ${effective:.2f} effective")
-
-            time.sleep(self.delays["phase"])
-
-            # Step 4: Simulate spending that draws on credit
-            # First drain some of the available balance via transactions
-            self.log("  ", "")
-            self.log("  ", "  Simulating heavy spending to draw on credit...")
-
-            # Run several high-value transactions to spend down available balance
-            spend_targets = [
-                ("ResearchAgent", "0.15", "Competitive Analysis"),
-                ("CodeReviewBot", "0.05", "Security Audit"),
-                ("ResearchAgent", "0.10", "SEC Filing Summary"),
-                ("DataScraper", "0.01", "Social Sentiment"),
-            ]
-            total_spent = 0.0
-            for to_name, amount, service in spend_targets:
-                if to_name in self.agents:
-                    to_agent = self.agents[to_name]
-                    tx_hash = random_tx_hash()
-                    result = self.api_call("POST", "/v1/transactions", {
-                        "txHash": tx_hash,
-                        "from": address,
-                        "to": to_agent["address"],
-                        "amount": amount,
-                    }, api_key=api_key)
-                    if result:
-                        total_spent += float(amount)
-                    time.sleep(0.15)
-
-            self.log("💸", f"  Spent ${total_spent:.2f} on services")
-
-            # Show updated balance
-            balance_data = self.api_call("GET", f"/v1/agents/{address}/balance")
-            if balance_data and "balance" in balance_data:
-                bal = balance_data["balance"]
-                available = float(bal.get("available", "0"))
-                credit_used = float(bal.get("creditUsed", "0"))
-                credit_limit = float(bal.get("creditLimit", "0"))
-                self.log("  ", f"  Available: ${available:.2f} | Credit used: ${credit_used:.2f} of ${credit_limit:.2f}")
-
-            time.sleep(self.delays["phase"])
-
-            # Step 5: Earn income -> auto-repayment
-            self.log("  ", "")
-            self.log("  ", "  TradingAgent earning from services...")
-
-            # Simulate income: other agents buying from TradingAgent
-            income_txns = [
-                ("TranslatorBot", "0.08", "Yield Analysis"),
-                ("CodeReviewBot", "0.12", "Risk Assessment"),
-                ("DataScraper", "0.08", "Yield Analysis"),
-            ]
-            total_earned = 0.0
-            for from_name, amount, service in income_txns:
-                if from_name in self.agents:
-                    from_agent = self.agents[from_name]
-                    tx_hash = random_tx_hash()
-                    result = self.api_call("POST", "/v1/transactions", {
-                        "txHash": tx_hash,
-                        "from": from_agent["address"],
-                        "to": address,
-                        "amount": amount,
-                    }, api_key=from_agent["api_key"])
-                    if result:
-                        total_earned += float(amount)
-                    time.sleep(0.15)
-
-            self.log("💰", f"  Earned ${total_earned:.2f} from services")
-
-            # Show final balance
-            balance_data = self.api_call("GET", f"/v1/agents/{address}/balance")
-            if balance_data and "balance" in balance_data:
-                bal = balance_data["balance"]
-                available = float(bal.get("available", "0"))
-                credit_used = float(bal.get("creditUsed", "0"))
-                self.log("  ", f"  Final: ${available:.2f} available, ${credit_used:.2f} credit outstanding")
-
-            self.log("  ", "")
-            self.log("✅", "Credit lifecycle complete: apply -> spend -> earn -> balance restored")
-        else:
-            self.log("!", "Credit application was not approved")
-            self.log("  ", "  (Agent may need more transaction history or higher reputation)")
-
-    # ── Phase 5: Multi-Agent Pipeline ────────────────────────────────────
+    # ── Phase 5: Multi-Agent Pipeline via Gateway ────────────────────────
 
     def demonstrate_pipeline(self):
-        """Demonstrate a 3-step agent pipeline."""
-        self.log("🔗", "MULTI-AGENT PIPELINE")
+        """Demonstrate a multi-step agent pipeline using gateway proxy."""
+        self.log("  ", "MULTI-AGENT PIPELINE (via Gateway)")
         self.log("  ", "-" * 55)
-        self.log("  ", "  Pipeline: Summarize -> Translate -> Extract Entities")
+        self.log("  ", "  Pipeline: Summarize -> Translate -> Generate Embedding")
         self.log("  ", "")
 
-        # Use existing agents for the pipeline
-        pipeline_agents = {
-            "SummarizerBot": ("ResearchAgent", "0.008", "Web Research"),
-            "TranslatorBot": ("TranslatorBot", "0.005", "English to Spanish"),
-            "EntityExtractor": ("CodeReviewBot", "0.010", "Code Review"),
-        }
-
-        steps = [
-            ("SummarizerBot", "Summarize source document", "0.008"),
-            ("TranslatorBot", "Translate summary to Spanish", "0.005"),
-            ("EntityExtractor", "Extract key entities", "0.010"),
-        ]
-
-        total_cost = 0.0
         buyer_name = "TradingAgent"
-
         if buyer_name not in self.agents:
             self.log("!", "TradingAgent not found, skipping pipeline demo")
             return
 
         buyer = self.agents[buyer_name]
 
-        for i, (step_name, description, price) in enumerate(steps, 1):
-            agent_name = pipeline_agents[step_name][0]
-            if agent_name not in self.agents:
-                self.log("!", f"  [{i}/3] {step_name} ({agent_name}) not found")
-                continue
+        # Create a session for the pipeline
+        session_result = self.api_call(
+            "POST",
+            "/v1/gateway/sessions",
+            {
+                "maxTotal": "1.00",
+                "maxPerRequest": "0.20",
+                "strategy": "cheapest",
+            },
+            api_key=buyer["api_key"],
+        )
 
-            seller = self.agents[agent_name]
-            tx_hash = random_tx_hash()
-            result = self.api_call("POST", "/v1/transactions", {
-                "txHash": tx_hash,
-                "from": buyer["address"],
-                "to": seller["address"],
-                "amount": price,
-            }, api_key=buyer["api_key"])
+        if not session_result:
+            self.log("!", "Failed to create pipeline session")
+            return
+
+        token = session_result.get("token", session_result.get("session", {}).get("id", ""))
+        session_id = session_result.get("session", {}).get("id", "")
+
+        steps = [
+            {
+                "name": "Summarize",
+                "serviceType": "inference",
+                "params": {"text": "The quarterly report shows strong growth in AI agent adoption, "
+                                   "with transaction volumes up 340% quarter over quarter.", "task": "summarize"},
+            },
+            {
+                "name": "Translate",
+                "serviceType": "translation",
+                "params": {"text": "AI agent payments grew 340% this quarter", "target": "es"},
+            },
+            {
+                "name": "Embed",
+                "serviceType": "embedding",
+                "params": {"text": "AI agent payment growth quarterly report analysis"},
+            },
+        ]
+
+        total_cost = 0.0
+
+        for i, step in enumerate(steps, 1):
+            result = self.api_call(
+                "POST",
+                "/v1/gateway/proxy",
+                {
+                    "serviceType": step["serviceType"],
+                    "params": step["params"],
+                },
+                api_key=buyer["api_key"],
+                extra_headers={"X-Gateway-Token": token},
+            )
 
             if result:
-                total_cost += float(price)
-                self.log("  ", f"  [{i}/3] {step_name:<20s} ${price} ✓  ({description})")
+                proxy_result = result.get("result", {})
+                amount = proxy_result.get("amountPaid", "0")
+                service = proxy_result.get("serviceName", "?")
+                response = proxy_result.get("response", {})
+                output = str(response.get("output", ""))[:55]
+                total_cost += float(amount)
+                self.log("  ", f"  [{i}/3] {step['name']:<12s} ${amount} via {service}")
+                self.log("  ", f"         -> {output}...")
             else:
-                self.log("  ", f"  [{i}/3] {step_name:<20s} ${price} ✗  (failed)")
+                self.log("  ", f"  [{i}/3] {step['name']:<12s} FAILED")
 
             time.sleep(self.delays["tx"])
 
+        # Close session
+        self.api_call("DELETE", f"/v1/gateway/sessions/{session_id}", api_key=buyer["api_key"])
+
         self.log("  ", "")
-        self.log("✅", f"Pipeline complete. Total cost: ${total_cost:.3f}")
+        self.log("[ok]", f"Pipeline complete. Total cost: ${total_cost:.4f}")
 
     # ── Phase 6: Escrow Protection ───────────────────────────────────────
 
     def demonstrate_escrow(self):
         """Demonstrate buyer-protected escrow payments."""
-        self.log("🔒", "ESCROW PROTECTION")
+        self.log("  ", "ESCROW PROTECTION")
         self.log("  ", "-" * 55)
 
         buyer_name = "TradingAgent"
@@ -651,15 +786,15 @@ class DemoRunner:
             self.log("  ", f"  -> Escrow created: ${amount} held")
             self.log("  ", f"  -> Seller delivers research report")
             self.log("  ", f"  -> Buyer confirms quality")
-            self.log("  ", f"  -> Funds released to {seller_name} ✅")
+            self.log("  ", f"  -> Funds released to {seller_name}")
             self.log("  ", "")
-            self.log("✅", "Escrow protects both parties in high-value transactions")
+            self.log("[ok]", "Escrow protects both parties in high-value transactions")
             return
 
         escrow = escrow_result.get("escrow", {})
         escrow_id = escrow.get("id", "unknown")
-        self.log("✅", f"Escrow created: {escrow_id}")
-        self.log("  ", f"  ${amount} held — both parties protected")
+        self.log("[ok]", f"Escrow created: {escrow_id}")
+        self.log("  ", f"  ${amount} held -- both parties protected")
 
         time.sleep(self.delays["phase"])
 
@@ -674,7 +809,7 @@ class DemoRunner:
         )
 
         if deliver_result:
-            self.log("📦", "Delivery marked — buyer can now review")
+            self.log("[ok]", "Delivery marked -- buyer can now review")
         else:
             self.log("!", "Delivery marking failed")
 
@@ -690,18 +825,18 @@ class DemoRunner:
         )
 
         if confirm_result:
-            self.log("✅", f"Funds released to {seller_name}!")
+            self.log("[ok]", f"Funds released to {seller_name}!")
         else:
             self.log("!", "Confirmation failed")
 
         self.log("  ", "")
-        self.log("✅", f"Escrow lifecycle: created -> delivered -> confirmed -> released")
+        self.log("[ok]", f"Escrow lifecycle: created -> delivered -> confirmed -> released")
 
-    # ── Phase 7: Live Simulation ─────────────────────────────────────────
+    # ── Phase 7: Live Gateway Simulation ────────────────────────────────
 
     def run_live_simulation(self, duration: Optional[int] = None):
-        """Run live activity. If duration is set, auto-stop after that many seconds."""
-        self.log("🚀", "LIVE SIMULATION")
+        """Run live gateway proxy activity."""
+        self.log("  ", "LIVE GATEWAY SIMULATION")
         self.log("  ", f"  Speed: {self.speed}")
         if duration:
             self.log("  ", f"  Auto-stop in {duration}s")
@@ -710,7 +845,44 @@ class DemoRunner:
         self.log("  ", f"  Dashboard: {self.base_url}")
         self.log("  ", "")
 
-        tx_scenarios = list(TRANSACTION_SCENARIOS)
+        # Pick random buyers and service types for live traffic
+        buyer_names = [n for n in self.agents.keys()]
+        service_types = ["inference", "translation", "code-review", "embedding"]
+        params_by_type = {
+            "inference": [
+                {"text": "analyze market trends", "task": "analyze"},
+                {"text": "summarize research paper", "task": "summarize"},
+                {"text": "classify document type", "task": "classify"},
+            ],
+            "translation": [
+                {"text": "AI agent infrastructure", "target": "es"},
+                {"text": "Payment settlement complete", "target": "fr"},
+                {"text": "Decentralized compute network", "target": "de"},
+            ],
+            "code-review": [
+                {"code": "def transfer(a, b, amt): ledger[a] -= amt; ledger[b] += amt"},
+                {"code": "async def settle(): await confirm_payment()"},
+            ],
+            "embedding": [
+                {"text": "agent payment infrastructure"},
+                {"text": "decentralized AI marketplace"},
+            ],
+        }
+
+        # Create a long-running session for live simulation
+        active_sessions = {}  # buyer_name -> (session_id, token)
+        for name in buyer_names:
+            agent = self.agents[name]
+            result = self.api_call(
+                "POST",
+                "/v1/gateway/sessions",
+                {"maxTotal": "3.00", "maxPerRequest": "0.50", "strategy": "cheapest"},
+                api_key=agent["api_key"],
+            )
+            if result:
+                sid = result.get("session", {}).get("id", "")
+                tok = result.get("token", sid)
+                active_sessions[name] = (sid, tok)
 
         tx_count = 0
         start_time = time.time()
@@ -720,11 +892,63 @@ class DemoRunner:
                 if duration and (time.time() - start_time) >= duration:
                     break
 
-                # Transaction
-                if tx_scenarios:
-                    scenario = random.choice(tx_scenarios)
-                    self.run_transaction(*scenario)
+                # Pick a random buyer with an active session
+                available = [n for n in buyer_names if n in active_sessions]
+                if not available:
+                    break
+
+                buyer_name = random.choice(available)
+                buyer = self.agents[buyer_name]
+                session_id, token = active_sessions[buyer_name]
+                svc_type = random.choice(service_types)
+                params = random.choice(params_by_type[svc_type])
+
+                result = self.api_call(
+                    "POST",
+                    "/v1/gateway/proxy",
+                    {"serviceType": svc_type, "params": params},
+                    api_key=buyer["api_key"],
+                    extra_headers={"X-Gateway-Token": token},
+                )
+
+                if result:
+                    proxy_result = result.get("result", {})
+                    amount = proxy_result.get("amountPaid", "0")
+                    service = proxy_result.get("serviceName", "?")
+                    self.log("  ", f"{buyer_name} -> {service}: ${amount} ({svc_type})")
                     tx_count += 1
+
+                    # Check if budget is low
+                    if result.get("budgetLow"):
+                        # Close and recreate session
+                        self.api_call("DELETE", f"/v1/gateway/sessions/{session_id}",
+                                      api_key=buyer["api_key"])
+                        new_session = self.api_call(
+                            "POST", "/v1/gateway/sessions",
+                            {"maxTotal": "3.00", "maxPerRequest": "0.50", "strategy": "cheapest"},
+                            api_key=buyer["api_key"],
+                        )
+                        if new_session:
+                            sid = new_session.get("session", {}).get("id", "")
+                            tok = new_session.get("token", sid)
+                            active_sessions[buyer_name] = (sid, tok)
+                        else:
+                            del active_sessions[buyer_name]
+                else:
+                    # Session might be exhausted
+                    self.api_call("DELETE", f"/v1/gateway/sessions/{session_id}",
+                                  api_key=buyer["api_key"])
+                    new_session = self.api_call(
+                        "POST", "/v1/gateway/sessions",
+                        {"maxTotal": "3.00", "maxPerRequest": "0.50", "strategy": "cheapest"},
+                        api_key=buyer["api_key"],
+                    )
+                    if new_session:
+                        sid = new_session.get("session", {}).get("id", "")
+                        tok = new_session.get("token", sid)
+                        active_sessions[buyer_name] = (sid, tok)
+                    else:
+                        del active_sessions[buyer_name]
 
                 time.sleep(self.delays["tx"])
 
@@ -734,110 +958,99 @@ class DemoRunner:
                     if stats:
                         volume = float(stats.get("totalVolume", 0) or 0)
                         txns = stats.get("totalTransactions", 0)
-                        self.log("📈", f"Network: ${volume:.4f} volume, {txns} transactions")
+                        self.log("  ", f"Network: ${volume:.4f} volume, {txns} transactions")
 
         except KeyboardInterrupt:
             self.running = False
 
+        # Clean up sessions
+        for name, (sid, _) in active_sessions.items():
+            self.api_call("DELETE", f"/v1/gateway/sessions/{sid}",
+                          api_key=self.agents[name]["api_key"])
+
         self.log("  ", "")
-        self.log("🛑", f"Simulation ended ({tx_count} txns)")
-
-    def run_transaction(self, from_name: str, to_name: str, amount: str, service: str):
-        """Execute a transaction between two agents."""
-        if from_name not in self.agents or to_name not in self.agents:
-            return
-
-        from_agent = self.agents[from_name]
-        to_agent = self.agents[to_name]
-
-        tx_hash = random_tx_hash()
-        result = self.api_call("POST", "/v1/transactions", {
-            "txHash": tx_hash,
-            "from": from_agent["address"],
-            "to": to_agent["address"],
-            "amount": amount,
-        }, api_key=from_agent["api_key"])
-
-        if result:
-            self.log("💸", f"{from_name} -> {to_name}: ${amount} ({service})")
+        self.log("  ", f"Simulation ended ({tx_count} gateway proxy calls)")
 
     # ── Demo Summary ─────────────────────────────────────────────────────
 
     def print_summary(self):
         """Print final demo summary stats."""
         stats = self.api_call("GET", "/v1/network/stats")
-        credit_data = self.api_call("GET", "/v1/credit/active")
 
         volume = "?"
         txns = "?"
         agents = len(self.agents)
-        credit_extended = "0.00"
-        credit_lines = 0
 
         if stats:
             volume = f"${float(stats.get('totalVolume', 0) or 0):.2f}"
             txns = stats.get("totalTransactions", 0)
 
-        if credit_data:
-            credit_lines_list = credit_data.get("credit_lines") or []
-            credit_lines = len(credit_lines_list)
-            total_credit = sum(float(cl.get("creditLimit", "0")) for cl in credit_lines_list)
-            credit_extended = f"${total_credit:.2f}"
-
         print()
         print("=" * 60)
         print("  DEMO COMPLETE")
         print(f"  Volume: {volume} | Transactions: {txns} | Agents: {agents}")
-        print(f"  Credit Extended: {credit_extended} | Credit Lines: {credit_lines}")
+        print(f"  All traffic flowed through the gateway proxy:")
+        print(f"    discover -> hold -> forward -> settle -> receipt")
         print(f"  Dashboard: {self.base_url}")
         print("=" * 60)
 
     # ── Main Runner ──────────────────────────────────────────────────────
 
     def run(self):
-        """Run the full investor demo."""
+        """Run the full gateway demo."""
         print()
         print("=" * 60)
-        print("  ALANCOIN — Economic Infrastructure for AI Agents")
-        print("  Investor Demo")
+        print("  ALANCOIN -- Economic Infrastructure for AI Agents")
+        print("  Gateway Proxy Demo")
         print("=" * 60)
         print()
 
+        # Start the stub service provider
+        self.log("  ", "Starting stub service provider...")
+        try:
+            self.stub_provider.start()
+            self.log("[ok]", f"Stub provider running on port {STUB_PROVIDER_PORT}")
+        except Exception as e:
+            self.log("!", f"Failed to start stub provider: {e}")
+            self.log("!", "Run manually: python3 scripts/stub_provider.py")
+            return
+        print()
+
         # Phase 1: Network Bootstrap
-        self.log("🤖", "PHASE 1: NETWORK BOOTSTRAP")
+        self.log("  ", "PHASE 1: NETWORK BOOTSTRAP")
         self.setup_agents()
         self.fund_agents()
         print()
 
-        # Phase 2: Reputation Building
-        self.log("⭐", "PHASE 2: REPUTATION BUILDING")
+        # Phase 2: Gateway Proxy (the core product flow)
+        self.log("  ", "PHASE 2: GATEWAY PROXY FLOW")
+        self.demonstrate_gateway_proxy()
+        print()
+
+        # Phase 3: Reputation Building
+        self.log("  ", "PHASE 3: REPUTATION BUILDING (via Gateway)")
         self.build_reputation()
         print()
         self.show_reputation_summary()
         print()
 
         # Phase 4: Session Keys
-        self.log("🔑", "PHASE 3: BOUNDED AUTONOMY")
+        self.log("  ", "PHASE 4: BOUNDED AUTONOMY")
         self.demonstrate_session_keys()
         print()
 
-        # Phase 5: Credit System
-        self.log("💳", "PHASE 4: CREDIT SYSTEM")
-        self.demonstrate_credit()
-        print()
-
-        # Phase 6: Pipeline
-        self.log("🔗", "PHASE 5: MULTI-AGENT PIPELINE")
+        # Phase 5: Pipeline
+        self.log("  ", "PHASE 5: MULTI-AGENT PIPELINE")
         self.demonstrate_pipeline()
         print()
 
-        # Phase 7: Escrow
-        self.log("🔒", "PHASE 6: ESCROW PROTECTION")
+        # Phase 6: Escrow
+        self.log("  ", "PHASE 6: ESCROW PROTECTION")
         self.demonstrate_escrow()
         print()
 
-        # Phase 8: Live Simulation
-        self.log("🚀", "PHASE 7: LIVE SIMULATION")
+        # Phase 7: Live Simulation
+        self.log("  ", "PHASE 7: LIVE GATEWAY SIMULATION")
         if self.demo_mode:
             self.run_live_simulation(duration=15)
         else:
@@ -845,9 +1058,12 @@ class DemoRunner:
 
         self.print_summary()
 
+        # Stop the stub provider
+        self.stub_provider.stop()
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Alancoin Investor Demo")
+    parser = argparse.ArgumentParser(description="Alancoin Gateway Demo")
     parser.add_argument("--url", default=BASE_URL, help="API base URL")
     parser.add_argument("--speed", choices=["fast", "normal", "slow"],
                         default="normal", help="Demo speed")
@@ -868,6 +1084,19 @@ def main():
         return
 
     demo = DemoRunner(args.url, args.speed, demo_mode=args.demo)
+
+    # Ensure cleanup on exit
+    def cleanup():
+        demo.stub_provider.stop()
+    atexit.register(cleanup)
+
+    # Handle signals for clean shutdown
+    def signal_handler(signum, frame):
+        demo.running = False
+        demo.stub_provider.stop()
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     demo.run()
 
 

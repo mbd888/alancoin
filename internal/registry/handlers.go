@@ -30,10 +30,11 @@ type VerificationProvider interface {
 
 // Handler provides HTTP handlers for the registry API
 type Handler struct {
-	store        Store
-	verifier     TxVerifier           // optional on-chain verifier
-	reputation   ReputationProvider   // optional reputation enrichment
-	verification VerificationProvider // optional verified agent enrichment
+	store               Store
+	verifier            TxVerifier           // optional on-chain verifier
+	reputation          ReputationProvider   // optional reputation enrichment
+	verification        VerificationProvider // optional verified agent enrichment
+	allowLocalEndpoints bool                 // skip SSRF check for localhost (demo/dev mode)
 }
 
 // NewHandler creates a new registry handler
@@ -49,6 +50,12 @@ func (h *Handler) SetReputation(r ReputationProvider) {
 // SetVerification attaches a verification provider for discovery enrichment
 func (h *Handler) SetVerification(v VerificationProvider) {
 	h.verification = v
+}
+
+// SetAllowLocalEndpoints disables SSRF validation for endpoint URLs,
+// allowing localhost and private IP endpoints. Only use for demos and local development.
+func (h *Handler) SetAllowLocalEndpoints(allow bool) {
+	h.allowLocalEndpoints = allow
 }
 
 // RegisterRoutes sets up the registry routes
@@ -385,8 +392,9 @@ func (h *Handler) AddService(c *gin.Context) {
 		return
 	}
 
-	// Validate endpoint URL to prevent SSRF (blocks private/loopback/link-local IPs)
-	if req.Endpoint != "" {
+	// Validate endpoint URL to prevent SSRF (blocks private/loopback/link-local IPs).
+	// Skipped when allowLocalEndpoints is set (demo/dev mode).
+	if req.Endpoint != "" && !h.allowLocalEndpoints {
 		if err := security.ValidateEndpointURL(req.Endpoint); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":   "invalid_endpoint",
@@ -455,8 +463,9 @@ func (h *Handler) UpdateService(c *gin.Context) {
 		}
 	}
 
-	// Validate endpoint URL to prevent SSRF (blocks private/loopback/link-local IPs)
-	if service.Endpoint != "" {
+	// Validate endpoint URL to prevent SSRF (blocks private/loopback/link-local IPs).
+	// Skipped when allowLocalEndpoints is set (demo/dev mode).
+	if service.Endpoint != "" && !h.allowLocalEndpoints {
 		if err := security.ValidateEndpointURL(service.Endpoint); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":   "invalid_endpoint",
