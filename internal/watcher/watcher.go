@@ -253,7 +253,7 @@ func (w *Watcher) processBatch(ctx context.Context, fromBlock, toBlock uint64) (
 func (w *Watcher) processTransfer(ctx context.Context, vLog types.Log) error {
 	ctx, span := traces.StartSpan(ctx, "watcher.ProcessTransfer",
 		attribute.String("tx_hash", vLog.TxHash.Hex()),
-		attribute.Int64("block", int64(vLog.BlockNumber)),
+		attribute.Int64("block", int64(vLog.BlockNumber)), //nolint:gosec // block numbers won't exceed int64 max
 	)
 	defer span.End()
 

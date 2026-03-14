@@ -1249,6 +1249,118 @@ type SubscriptionInfo struct {
 	CancelAtPeriodEnd bool   `json:"cancelAtPeriodEnd"`
 }
 
+// --- Admin ---
+
+// StuckSession represents a gateway session stuck in settlement_failed status.
+type StuckSession struct {
+	ID         string    `json:"id"`
+	AgentAddr  string    `json:"agentAddr"`
+	TenantID   string    `json:"tenantId,omitempty"`
+	MaxTotal   string    `json:"maxTotal"`
+	TotalSpent string    `json:"totalSpent"`
+	Status     string    `json:"status"`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+// listStuckSessionsResponse wraps GET /v1/admin/gateway/stuck.
+type listStuckSessionsResponse struct {
+	Sessions []StuckSession `json:"sessions"`
+	Count    int            `json:"count"`
+}
+
+// ResolveResult is the response from force-resolving a stuck session.
+type ResolveResult struct {
+	Resolved  bool   `json:"resolved"`
+	SessionID string `json:"sessionId"`
+}
+
+// RetryResult is the response from retrying a failed settlement.
+type RetryResult struct {
+	Retried   bool   `json:"retried"`
+	SessionID string `json:"sessionId"`
+}
+
+// ForceCloseResult is the response from a force-close operation.
+type ForceCloseResult struct {
+	ClosedCount int `json:"closedCount"`
+}
+
+// ReconciliationReport summarizes a cross-subsystem reconciliation run.
+type ReconciliationReport struct {
+	LedgerMismatches int       `json:"ledgerMismatches"`
+	StuckEscrows     int       `json:"stuckEscrows"`
+	StaleStreams     int       `json:"staleStreams"`
+	OrphanedHolds    int       `json:"orphanedHolds"`
+	Healthy          bool      `json:"healthy"`
+	DurationMs       int64     `json:"durationMs"`
+	Timestamp        time.Time `json:"timestamp"`
+}
+
+// reconcileResponse wraps POST /v1/admin/reconcile.
+type reconcileResponse struct {
+	Report ReconciliationReport `json:"report"`
+}
+
+// DenialExportRecord is a denial record for ML training data export.
+type DenialExportRecord struct {
+	ID              int64     `json:"id"`
+	AgentAddr       string    `json:"agentAddr"`
+	RuleName        string    `json:"ruleName"`
+	Reason          string    `json:"reason"`
+	Amount          string    `json:"amount"`
+	OpType          string    `json:"opType"`
+	Tier            string    `json:"tier"`
+	Counterparty    string    `json:"counterparty"`
+	HourlyTotal     string    `json:"hourlyTotal"`
+	BaselineMean    string    `json:"baselineMean"`
+	BaselineStddev  string    `json:"baselineStddev"`
+	OverrideAllowed bool      `json:"overrideAllowed"`
+	CreatedAt       time.Time `json:"createdAt"`
+}
+
+// DenialExport is the response from GET /v1/admin/denials/export.
+type DenialExport struct {
+	Denials []DenialExportRecord `json:"denials"`
+	Count   int                  `json:"count"`
+	Since   time.Time            `json:"since"`
+}
+
+// StateInspection is the response from GET /v1/admin/state.
+type StateInspection struct {
+	State     map[string]any `json:"state"`
+	Timestamp time.Time      `json:"timestamp"`
+}
+
+// --- Real-time Events ---
+
+// EventType identifies a real-time event category.
+type EventType string
+
+// Event type constants for WebSocket subscriptions.
+const (
+	EventTransaction EventType = "transaction"
+	EventAgentJoined EventType = "agent_joined"
+	EventMilestone   EventType = "milestone"
+	EventPriceAlert  EventType = "price_alert"
+)
+
+// RealtimeEvent represents a real-time event received over WebSocket.
+type RealtimeEvent struct {
+	Type      EventType      `json:"type"`
+	Timestamp time.Time      `json:"timestamp"`
+	Data      map[string]any `json:"data"`
+}
+
+// RealtimeSubscription configures which events a client receives.
+type RealtimeSubscription struct {
+	AllEvents    bool        `json:"allEvents"`
+	EventTypes   []EventType `json:"eventTypes,omitempty"`
+	AgentAddrs   []string    `json:"agentAddrs,omitempty"`
+	ServiceTypes []string    `json:"serviceTypes,omitempty"`
+	MinAmount    float64     `json:"minAmount,omitempty"`
+}
+
 // --- Service Type Constants ---
 
 const (

@@ -124,7 +124,7 @@ func (m *Manager) ValidateKey(ctx context.Context, rawKey string) (*APIKey, erro
 
 	// Update last used (fire and forget) — re-read to avoid stomping concurrent mutations (e.g. revoke)
 	go func(keyHash string) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) //nolint:gosec // intentional: fire-and-forget outlives request
 		defer cancel()
 		current, err := m.store.GetByHash(ctx, keyHash)
 		if err != nil {

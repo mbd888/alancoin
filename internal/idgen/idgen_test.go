@@ -82,7 +82,7 @@ func TestHex_Unique(t *testing.T) {
 func TestHex_ValidHex(t *testing.T) {
 	h := Hex(8)
 	for _, c := range h {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Errorf("invalid hex char %q in %q", string(c), h)
 		}
 	}

@@ -41,7 +41,7 @@ type scoreDelta struct {
 
 // NewRealtimeUpdater creates a new real-time reputation updater.
 func NewRealtimeUpdater(provider MetricsProvider, store SnapshotStore, logger *slog.Logger) *RealtimeUpdater {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel stored in struct, called in Shutdown()
 	return &RealtimeUpdater{
 		calculator:     NewCalculator(),
 		provider:       provider,
@@ -72,7 +72,7 @@ func (u *RealtimeUpdater) Shutdown(timeout time.Duration) {
 // OnTransactionConfirmed is called after a successful payment settlement.
 // It immediately adjusts the seller's and buyer's reputation scores.
 func (u *RealtimeUpdater) OnTransactionConfirmed(ctx context.Context, buyerAddr, sellerAddr, amountUSD string) {
-	ctx, span := traces.StartSpan(ctx, "reputation.OnTransactionConfirmed",
+	_, span := traces.StartSpan(ctx, "reputation.OnTransactionConfirmed",
 		attribute.String("buyer", buyerAddr),
 		attribute.String("seller", sellerAddr),
 		traces.Amount(amountUSD),
@@ -96,7 +96,7 @@ func (u *RealtimeUpdater) OnTransactionConfirmed(ctx context.Context, buyerAddr,
 
 // OnTransactionFailed is called when a service delivery fails.
 func (u *RealtimeUpdater) OnTransactionFailed(ctx context.Context, sellerAddr, amountUSD string) {
-	ctx, span := traces.StartSpan(ctx, "reputation.OnTransactionFailed",
+	_, span := traces.StartSpan(ctx, "reputation.OnTransactionFailed",
 		attribute.String("seller", sellerAddr),
 		traces.Amount(amountUSD),
 	)
@@ -111,7 +111,7 @@ func (u *RealtimeUpdater) OnTransactionFailed(ctx context.Context, sellerAddr, a
 
 // OnDisputeResolved is called when an escrow dispute is resolved.
 func (u *RealtimeUpdater) OnDisputeResolved(ctx context.Context, sellerAddr, buyerAddr string, buyerWon bool) {
-	ctx, span := traces.StartSpan(ctx, "reputation.OnDisputeResolved",
+	_, span := traces.StartSpan(ctx, "reputation.OnDisputeResolved",
 		attribute.String("seller", sellerAddr),
 		attribute.String("buyer", buyerAddr),
 		attribute.Bool("buyer_won", buyerWon),

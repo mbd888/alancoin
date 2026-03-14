@@ -31,6 +31,7 @@ type Client struct {
 	maxRetries int           // 0 = no retries (default)
 	retryBase  time.Duration // base delay for exponential backoff
 	retryMax   time.Duration // max delay cap
+	wsDialer   WSDialer      // optional WebSocket dialer for Realtime()
 }
 
 // Option configures a [Client].

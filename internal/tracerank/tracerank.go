@@ -248,7 +248,6 @@ func (e *Engine) pagerank(g *graph, seeds map[string]float64) (map[string]float6
 		for _, addr := range g.nodes {
 			personalization[addr] = uniform
 		}
-		seedSum = 1.0
 	} else {
 		// Normalize
 		for addr := range personalization {

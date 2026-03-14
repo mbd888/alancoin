@@ -52,7 +52,7 @@ func (s *PostgresStore) Recent(ctx context.Context, limit int) ([]*State, error)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []*State
 	for rows.Next() {

@@ -14,6 +14,22 @@ import (
 
 const maxResponseSize = 5 * 1024 * 1024 // 5MB
 
+// ForwardError is returned when the service endpoint returns an HTTP error.
+// Callers can inspect StatusCode to distinguish transient (5xx) from
+// permanent (4xx) errors — e.g. for circuit breaker classification.
+type ForwardError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *ForwardError) Error() string { return e.Message }
+
+// IsTransient returns true for errors that indicate the service itself
+// is unhealthy (5xx, 429) vs. a bad request from the caller (4xx).
+func (e *ForwardError) IsTransient() bool {
+	return e.StatusCode >= 500 || e.StatusCode == 429
+}
+
 // ForwardRequest is the input to the HTTP forwarder.
 type ForwardRequest struct {
 	Endpoint  string
@@ -111,7 +127,10 @@ func (f *Forwarder) Forward(ctx context.Context, req ForwardRequest) (*ForwardRe
 	// Treat 4xx and 5xx as errors so the gateway doesn't charge the buyer
 	// for failed service calls. Only 2xx/3xx responses trigger payment.
 	if resp.StatusCode >= 400 {
-		return fwdResp, fmt.Errorf("service returned HTTP %d", resp.StatusCode)
+		return fwdResp, &ForwardError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("service returned HTTP %d", resp.StatusCode),
+		}
 	}
 
 	return fwdResp, nil

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -718,8 +719,13 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 
 		if fwdErr != nil {
 			// Forward failed — unreserve budget, no payment.
+			// Only transient errors (5xx, timeouts, connection failures) trip the
+			// circuit breaker. 4xx errors indicate a bad request, not a broken service.
 			if s.circuitBreaker != nil {
-				s.circuitBreaker.RecordFailure(candidate.Endpoint)
+				var fe *ForwardError
+				if !errors.As(fwdErr, &fe) || fe.IsTransient() {
+					s.circuitBreaker.RecordFailure(candidate.Endpoint)
+				}
 			}
 			unlock = s.locks.Lock(sessionID)
 			s.removePendingSpend(sessionIDCopy, priceBig)

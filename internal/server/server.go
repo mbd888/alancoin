@@ -1455,9 +1455,12 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Mark as ready after brief delay for startup
 	go func() {
-		time.Sleep(100 * time.Millisecond)
-		s.ready.Store(true)
-		s.logger.Info("server ready")
+		select {
+		case <-time.After(100 * time.Millisecond):
+			s.ready.Store(true)
+			s.logger.Info("server ready")
+		case <-runCtx.Done():
+		}
 	}()
 
 	// Wait for shutdown signal or error
