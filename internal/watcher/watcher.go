@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"math/big"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -64,7 +63,6 @@ type Watcher struct {
 	logger     *slog.Logger
 	stop       chan struct{}
 	running    atomic.Bool
-	mu         sync.Mutex
 }
 
 // New creates a new deposit watcher.

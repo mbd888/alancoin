@@ -34,17 +34,6 @@ func edge(from, to string, volume float64, txCount int) PaymentEdge {
 	}
 }
 
-func assertScoreInRange(t *testing.T, scores map[string]*AgentScore, addr string, min, max float64) {
-	t.Helper()
-	s, ok := scores[addr]
-	if !ok {
-		t.Fatalf("no score for %s", addr)
-	}
-	if s.GraphScore < min || s.GraphScore > max {
-		t.Errorf("%s: GraphScore=%f, expected [%f, %f]", addr, s.GraphScore, min, max)
-	}
-}
-
 // --- Core Algorithm Tests ---
 
 func TestBasicPageRank(t *testing.T) {

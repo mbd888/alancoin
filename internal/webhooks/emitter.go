@@ -42,7 +42,7 @@ type Emitter struct {
 
 // NewEmitter creates a new webhook emitter.
 func NewEmitter(d *Dispatcher, logger *slog.Logger) *Emitter {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel is stored and called in Shutdown()
 	return &Emitter{d: d, logger: logger, shutdownCtx: ctx, shutdownCancel: cancel}
 }
 

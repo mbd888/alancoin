@@ -1,6 +1,7 @@
 package flywheel
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -159,12 +160,12 @@ func TestGetHistory_FromEngine(t *testing.T) {
 func TestGetHistory_FromStore(t *testing.T) {
 	engine := &Engine{history: make([]*State, 0)} // empty engine
 	store := NewMemoryStore()
-	_ = store.Save(nil, &State{
+	_ = store.Save(context.Background(), &State{
 		HealthScore: 50,
 		HealthTier:  TierSpinning,
 		ComputedAt:  time.Now(),
 	})
-	_ = store.Save(nil, &State{
+	_ = store.Save(context.Background(), &State{
 		HealthScore: 60,
 		HealthTier:  TierAccelerating,
 		ComputedAt:  time.Now(),

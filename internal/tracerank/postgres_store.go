@@ -106,11 +106,11 @@ func (p *PostgresStore) GetScores(ctx context.Context, addresses []string) (map[
 		args[i] = strings.ToLower(addr)
 	}
 
-	q := `SELECT address, graph_score, raw_rank, seed_signal,
-			   in_degree, out_degree, in_volume, out_volume,
+	q := `SELECT address, graph_score, raw_rank, seed_signal,` + //nolint:gosec // placeholders are $1,$2,... not user input
+		`	   in_degree, out_degree, in_volume, out_volume,
 			   iterations, compute_run_id, computed_at
 		  FROM tracerank_scores
-		  WHERE address IN (` + strings.Join(placeholders, ",") + `)` //nolint:gosec // placeholders are $1,$2,... not user input
+		  WHERE address IN (` + strings.Join(placeholders, ",") + `)`
 
 	rows, err := p.db.QueryContext(ctx, q, args...)
 	if err != nil {
