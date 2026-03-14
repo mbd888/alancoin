@@ -823,6 +823,13 @@ func (s *Server) setupRoutes() {
 	// Delegation creation (A2A) — authenticated by session key ECDSA signature, no API key needed
 	v1.POST("/sessions/:keyId/delegate", sessionHandler.CreateDelegation)
 
+	// HMAC-chain delegation with proof — same auth as regular delegation (ECDSA signature)
+	v1.POST("/session-keys/:id/delegate-with-proof", sessionHandler.DelegateWithProof)
+
+	// Proof verification — stateless except for root secret lookup. No API key needed
+	// since the proof itself is the authentication mechanism.
+	v1.POST("/session-keys/verify-proof", sessionHandler.VerifyDelegationProof)
+
 	// Delegation read endpoints — require API key auth because they expose budget/spending data.
 	// Moved from public v1 group to prevent unauthenticated enumeration of financial PII.
 	protectedDelegation := v1.Group("")

@@ -136,3 +136,21 @@ func (s *MemoryStore) CountActive(ctx context.Context) (int64, error) {
 	}
 	return count, nil
 }
+
+// GetRootSecret returns the HMAC root secret for a root session key.
+func (s *MemoryStore) GetRootSecret(ctx context.Context, rootKeyID string) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	key, exists := s.keys[rootKeyID]
+	if !exists {
+		return nil, ErrKeyNotFound
+	}
+	if len(key.RootSecret) == 0 {
+		return nil, nil
+	}
+	// Return a copy to prevent mutation
+	secret := make([]byte, len(key.RootSecret))
+	copy(secret, key.RootSecret)
+	return secret, nil
+}

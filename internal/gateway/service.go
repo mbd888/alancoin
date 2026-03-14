@@ -190,8 +190,11 @@ type Service struct {
 	revenue         RevenueAccumulator
 	circuitBreaker  *circuitbreaker.Breaker
 	usageMeter      UsageMeter
-	incentives      IncentiveProvider // flywheel: reputation-based fee discounts
-	platformAddr    string            // ledger address collecting platform fees
+	incentives      IncentiveProvider  // flywheel: reputation-based fee discounts
+	healthMonitor   *HealthMonitor     // per-provider health tracking
+	healthRouter    *HealthAwareRouter // graph-based health-aware routing
+	racer           *RACER             // RACER calibrated expansion routing
+	platformAddr    string             // ledger address collecting platform fees
 	logger          *slog.Logger
 	locks           syncutil.ShardedMutex
 	idemCache       *idempotencyCache

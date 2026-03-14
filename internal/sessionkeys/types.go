@@ -162,6 +162,36 @@ type DelegateRequest struct {
 	Signature           string   `json:"signature" binding:"required"`
 }
 
+// DelegateWithProofResponse is the response from delegating with an HMAC proof chain.
+type DelegateWithProofResponse struct {
+	ChildKey  *SessionKey      `json:"childKey"`
+	Proof     *DelegationProof `json:"proof"`
+	ParentID  string           `json:"parentKeyId"`
+	RootKeyID string           `json:"rootKeyId"`
+	Depth     int              `json:"depth"`
+	Label     string           `json:"label,omitempty"`
+}
+
+// VerifyProofRequest is the request body for verifying a delegation proof.
+type VerifyProofRequest struct {
+	Proof     *DelegationProof `json:"proof" binding:"required"`
+	RootKeyID string           `json:"rootKeyId" binding:"required"`
+}
+
+// VerifyProofResponse is the response from verifying a delegation proof.
+type VerifyProofResponse struct {
+	Valid               bool     `json:"valid"`
+	LeafKeyID           string   `json:"leafKeyId,omitempty"`
+	Depth               int      `json:"depth"`
+	MaxTotal            string   `json:"maxTotal,omitempty"`
+	MaxPerTransaction   string   `json:"maxPerTransaction,omitempty"`
+	MaxPerDay           string   `json:"maxPerDay,omitempty"`
+	Scopes              []string `json:"scopes,omitempty"`
+	AllowedRecipients   []string `json:"allowedRecipients,omitempty"`
+	AllowedServiceTypes []string `json:"allowedServiceTypes,omitempty"`
+	Error               string   `json:"error,omitempty"`
+}
+
 // Delegation audit event types
 const (
 	DelegationEventCreate        = "create"

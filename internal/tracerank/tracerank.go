@@ -77,6 +77,24 @@ type PaymentEdge struct {
 	Volume   float64 // total USDC volume for this edge
 	TxCount  int     // number of transactions
 	LastTxAt time.Time
+
+	// Dispute marks this edge as a negative (dispute) edge.
+	// When true, the edge's volume REDUCES the target's reputation
+	// instead of increasing it. Disputes propagate proportionally:
+	// agents with high reputation from other sources see proportional
+	// reduction, while agents with low reputation can be pushed toward zero.
+	Dispute bool
+}
+
+// DisputeEdge is a convenience constructor for creating dispute edges.
+func DisputeEdge(from, to string, volume float64, txCount int) PaymentEdge {
+	return PaymentEdge{
+		From:    from,
+		To:      to,
+		Volume:  volume,
+		TxCount: txCount,
+		Dispute: true,
+	}
 }
 
 // ScoreProvider returns TraceRank scores.
@@ -109,6 +127,28 @@ type Config struct {
 	// 0 = no decay (default). 0.03 = ~50% weight after 23 days.
 	TemporalDecayRate float64
 
+	// DecayFunction selects the temporal decay strategy. When set to a value
+	// other than DecayNone, the corresponding parameters must also be set.
+	// If DecayFunction is 0 (DecayNone) but TemporalDecayRate > 0, exponential
+	// decay is used for backward compatibility.
+	DecayFunction DecayFunction
+
+	// SCurveHalfLife is the number of days at which the S-curve decay reaches 50%.
+	// Used when DecayFunction == DecaySCurve. Default: 30.
+	SCurveHalfLife float64
+
+	// SCurveSteepness controls how sharp the S-curve transition is.
+	// Higher = sharper cliff. Used when DecayFunction == DecaySCurve. Default: 0.2.
+	SCurveSteepness float64
+
+	// ThresholdDays is the number of days before which edges carry full weight.
+	// Used when DecayFunction == DecayThreshold. Default: 30.
+	ThresholdDays float64
+
+	// ThresholdResidual is the weight multiplier for edges older than ThresholdDays.
+	// Used when DecayFunction == DecayThreshold. Default: 0.1.
+	ThresholdResidual float64
+
 	// CyclePenalty reduces the weight of edges that form short cycles (2-3 hops).
 	// 0 = no penalty. 0.5 = cycle edges carry 50% weight. 1.0 = fully remove cycles.
 	CyclePenalty float64
@@ -117,6 +157,19 @@ type Config struct {
 	// incoming weight. Prevents reputation concentration attacks.
 	// 0 = no cap. 0.5 = no single source can provide more than 50% of incoming weight.
 	MaxSourceInfluence float64
+
+	// MaxEdgeAge is the maximum age of edges in days. Edges older than this are
+	// pruned entirely from the graph. This prevents unbounded graph growth and
+	// ensures ancient relationships don't permanently inflate scores.
+	// 0 = no pruning (default). 180 = prune edges older than 6 months.
+	MaxEdgeAge float64
+
+	// DisputePenaltyWeight controls how much negative (dispute) edges reduce
+	// a node's reputation. The dispute volume is multiplied by this factor
+	// and subtracted from the node's incoming volume during graph construction.
+	// 0 = disputes ignored. 1.0 = disputes fully offset positive volume.
+	// Default: 0.5.
+	DisputePenaltyWeight float64
 }
 
 // DefaultConfig returns production-safe defaults.

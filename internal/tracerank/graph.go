@@ -1,7 +1,6 @@
 package tracerank
 
 import (
-	"math"
 	"strings"
 	"time"
 )
@@ -41,6 +40,10 @@ func buildGraph(edges []PaymentEdge, cfg Config) *graph {
 
 	now := time.Now()
 
+	// Separate positive and dispute edges for two-pass processing.
+	// Dispute edges are applied after positive edges are accumulated.
+	var disputeEdges []PaymentEdge
+
 	// Track per-pair transaction counts for anti-wash-trading cap
 	pairTxCounts := make(map[string]int)
 
@@ -63,6 +66,26 @@ func buildGraph(edges []PaymentEdge, cfg Config) *graph {
 			continue
 		}
 
+		// Edge age pruning: discard edges older than MaxEdgeAge days.
+		if cfg.MaxEdgeAge > 0 && !e.LastTxAt.IsZero() {
+			daysSince := now.Sub(e.LastTxAt).Hours() / 24
+			if daysSince > cfg.MaxEdgeAge {
+				continue
+			}
+		}
+
+		// Collect dispute edges for second pass
+		if e.Dispute {
+			disputeEdges = append(disputeEdges, PaymentEdge{
+				From:    from,
+				To:      to,
+				Volume:  e.Volume,
+				TxCount: e.TxCount,
+				Dispute: true,
+			})
+			continue
+		}
+
 		// Anti-wash-trading: cap per-counterparty pair contribution
 		pairKey := from + ":" + to
 		if cfg.MaxPerCounterparty > 0 {
@@ -74,10 +97,10 @@ func buildGraph(edges []PaymentEdge, cfg Config) *graph {
 
 		// Apply temporal decay: recent edges matter more.
 		volume := e.Volume
-		if cfg.TemporalDecayRate > 0 && !e.LastTxAt.IsZero() {
+		if !e.LastTxAt.IsZero() {
 			daysSince := now.Sub(e.LastTxAt).Hours() / 24
 			if daysSince > 0 {
-				volume *= math.Exp(-cfg.TemporalDecayRate * daysSince)
+				volume *= applyDecay(daysSince, cfg)
 			}
 		}
 
@@ -112,6 +135,12 @@ func buildGraph(edges []PaymentEdge, cfg Config) *graph {
 		g.rawEdges[from][to] += volume
 		g.nodeInfo[from].outVolume += volume
 		g.nodeInfo[to].inVolume += volume
+	}
+
+	// Second pass: apply dispute (negative) edges.
+	// Disputes reduce the target's incoming volume proportionally.
+	if cfg.DisputePenaltyWeight > 0 && len(disputeEdges) > 0 {
+		g.applyDisputeEdges(disputeEdges, cfg.DisputePenaltyWeight)
 	}
 
 	// Sort nodes for deterministic iteration
@@ -260,6 +289,78 @@ func (g *graph) precomputeIncoming(cycleEdges map[string]bool, cyclePenalty floa
 				from:   from,
 				weight: w,
 			})
+		}
+	}
+}
+
+// applyDisputeEdges reduces edge weights based on dispute (negative) edges.
+// For each dispute from A against B, the positive edges pointing to B have
+// their volume reduced proportionally by (dispute_volume * penaltyWeight).
+// Edge volumes are clamped at zero — disputes cannot create negative weights.
+func (g *graph) applyDisputeEdges(disputes []PaymentEdge, penaltyWeight float64) {
+	for _, d := range disputes {
+		target := d.To
+		reduction := d.Volume * penaltyWeight
+
+		if reduction <= 0 {
+			continue
+		}
+
+		// Ensure the target node exists in the graph
+		if !g.nodeSet[target] {
+			continue
+		}
+
+		// Ensure the disputing node exists (register if not)
+		if !g.nodeSet[d.From] {
+			g.nodeSet[d.From] = true
+			g.nodes = append(g.nodes, d.From)
+			g.nodeInfo[d.From] = &nodeInfo{}
+		}
+
+		// Distribute the reduction across all incoming positive edges to target.
+		// This prevents disputes from one counterparty from zeroing out all
+		// incoming reputation — only the proportional share is reduced.
+		totalIncoming := 0.0
+		for from, targets := range g.rawEdges {
+			if vol, ok := targets[target]; ok && vol > 0 {
+				_ = from
+				totalIncoming += vol
+			}
+		}
+
+		if totalIncoming <= 0 {
+			continue
+		}
+
+		// Apply reduction proportionally across all incoming edges
+		remaining := reduction
+		for from, targets := range g.rawEdges {
+			vol, ok := targets[target]
+			if !ok || vol <= 0 {
+				continue
+			}
+
+			// Proportional share of the reduction for this edge
+			share := (vol / totalIncoming) * remaining
+			if share > vol {
+				share = vol
+			}
+
+			g.rawEdges[from][target] -= share
+			g.nodeInfo[target].inVolume -= share
+			g.nodeInfo[from].outVolume -= share
+
+			// Clean up zero/negative edges
+			if g.rawEdges[from][target] <= 0 {
+				delete(g.rawEdges[from], target)
+				if len(g.rawEdges[from]) == 0 {
+					delete(g.rawEdges, from)
+				}
+				g.nodeInfo[from].outDegree--
+				g.nodeInfo[target].inDegree--
+				g.edgeCount--
+			}
 		}
 	}
 }

@@ -924,6 +924,151 @@ func (h *Handler) RotateSessionKey(c *gin.Context) {
 	})
 }
 
+// DelegateWithProof handles POST /v1/session-keys/:id/delegate-with-proof
+// Delegates a session key and returns the child key with its HMAC proof chain.
+// The proof can be passed to third parties for stateless verification.
+func (h *Handler) DelegateWithProof(c *gin.Context) {
+	parentKeyID := c.Param("id")
+
+	ctx, span := traces.StartSpan(c.Request.Context(), "sessionkey.DelegateWithProof",
+		traces.SessionKeyID(parentKeyID))
+	defer span.End()
+	c.Request = c.Request.WithContext(ctx)
+
+	var req DelegateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "Invalid request body",
+			"hint":    "Required: publicKey, maxTotal, nonce, timestamp, signature",
+		})
+		return
+	}
+
+	// Verify parent key has "delegate" scope
+	parentKey, err := h.manager.Get(ctx, parentKeyID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "not_found",
+			"message": "Parent session key not found",
+		})
+		return
+	}
+	if !parentKey.HasScope("delegate") {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   ErrScopeNotAllowed.Code,
+			"message": "Parent session key does not have the 'delegate' scope",
+		})
+		return
+	}
+
+	// Lock the parent key to prevent concurrent delegation/transactions
+	unlockKey := h.manager.LockKey(parentKeyID)
+	defer unlockKey()
+
+	childKey, err := h.manager.CreateDelegated(ctx, parentKeyID, &req)
+	if err != nil {
+		if ve, ok := err.(*ValidationError); ok {
+			status := http.StatusBadRequest
+			if ve.Code == "parent_not_active" || ve.Code == "ancestor_invalid" {
+				status = http.StatusForbidden
+			}
+			c.JSON(status, gin.H{
+				"error":   ve.Code,
+				"message": ve.Message,
+			})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "delegation_failed",
+			"message": "Failed to create delegated key",
+		})
+		return
+	}
+
+	// The child key's delegation proof is generated during CreateDelegated.
+	// If proof generation failed (e.g., parent had no proof), return an error.
+	if childKey.DelegationProof == nil {
+		h.logger.Warn("delegation proof not available for child key",
+			"parentKeyId", parentKeyID, "childKeyId", childKey.ID)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "proof_unavailable",
+			"message": "Parent key does not have a delegation proof chain. Use regular /delegate endpoint instead.",
+		})
+		return
+	}
+
+	span.SetAttributes(attribute.String("childKeyId", childKey.ID))
+
+	// Emit real-time event
+	if h.events != nil {
+		h.events.EmitTransaction(map[string]interface{}{
+			"event":       "delegation_with_proof_created",
+			"parentKeyId": parentKeyID,
+			"childKeyId":  childKey.ID,
+			"depth":       childKey.Depth,
+			"maxTotal":    req.MaxTotal,
+			"label":       req.DelegationLabel,
+		})
+	}
+
+	c.JSON(http.StatusCreated, DelegateWithProofResponse{
+		ChildKey:  childKey,
+		Proof:     childKey.DelegationProof,
+		ParentID:  parentKeyID,
+		RootKeyID: childKey.RootKeyID,
+		Depth:     childKey.Depth,
+		Label:     childKey.DelegationLabel,
+	})
+}
+
+// VerifyDelegationProof handles POST /v1/session-keys/verify-proof
+// Accepts a DelegationProof JSON body + the root key ID, verifies the HMAC
+// chain, and returns whether it's valid plus the effective permissions.
+// This is stateless except for looking up the root secret.
+func (h *Handler) VerifyDelegationProof(c *gin.Context) {
+	ctx, span := traces.StartSpan(c.Request.Context(), "sessionkey.VerifyDelegationProof")
+	defer span.End()
+	c.Request = c.Request.WithContext(ctx)
+
+	var req VerifyProofRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "Invalid request body",
+			"hint":    "Required: proof (DelegationProof), rootKeyId",
+		})
+		return
+	}
+
+	if req.Proof == nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "proof is required",
+		})
+		return
+	}
+
+	span.SetAttributes(attribute.String("rootKeyId", req.RootKeyID))
+
+	resp, err := h.manager.VerifyProofWithSecret(ctx, req.Proof, req.RootKeyID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "verification failed")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "verification_error",
+			"message": "Failed to verify delegation proof",
+		})
+		return
+	}
+
+	if resp.Valid {
+		span.SetAttributes(attribute.String("leafKeyId", resp.LeafKeyID))
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
 func calculateRemaining(limit string, spent string) string {
 	if limit == "" {
 		return "unlimited"

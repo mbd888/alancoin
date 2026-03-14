@@ -23,6 +23,11 @@ type Store interface {
 	Delete(ctx context.Context, id string) error
 	CountActive(ctx context.Context) (int64, error) // Count non-revoked, non-expired keys
 	ReParentChildren(ctx context.Context, oldParentID, newParentID string) error
+
+	// GetRootSecret returns the HMAC root secret for a root session key.
+	// This is used during delegation proof verification.
+	// Returns nil, nil if no secret is stored for the given key.
+	GetRootSecret(ctx context.Context, rootKeyID string) ([]byte, error)
 }
 
 // ServiceResolver resolves service information for validation
@@ -1047,6 +1052,88 @@ func (m *Manager) ValidateScope(ctx context.Context, keyID, scope string) error 
 		return ErrScopeNotAllowed
 	}
 	return nil
+}
+
+// VerifyWithProof performs O(1) verification of a delegation proof chain and
+// checks that the leaf caveat's budget permits the given transaction amount.
+// This replaces the O(depth) database walk with a single HMAC chain recomputation
+// plus a root secret lookup.
+func (m *Manager) VerifyWithProof(ctx context.Context, proof *DelegationProof, amount string) error {
+	if proof == nil {
+		return fmt.Errorf("nil proof")
+	}
+	if proof.RootKeyID == "" {
+		return fmt.Errorf("proof missing root key ID")
+	}
+
+	// Look up the root secret for verification
+	rootSecret, err := m.store.GetRootSecret(ctx, proof.RootKeyID)
+	if err != nil {
+		return fmt.Errorf("root secret lookup: %w", err)
+	}
+	if rootSecret == nil {
+		return fmt.Errorf("no root secret found for key %s", proof.RootKeyID)
+	}
+
+	// Verify the HMAC chain — this is O(len(caveats)), not O(depth in DB)
+	if err := VerifyProof(rootSecret, proof); err != nil {
+		return fmt.Errorf("proof verification failed: %w", err)
+	}
+
+	// Verify the budget if an amount is specified
+	if amount != "" {
+		// For proof-based verification we use "0" as totalSpent because the
+		// proof is stateless — the caller is responsible for tracking spend.
+		// In production, the leaf key's actual totalSpent would be passed.
+		if err := VerifyBudget(proof, amount, "0"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// VerifyProofWithSecret verifies a delegation proof given a root key ID and
+// returns the effective permissions from the leaf caveat. This is the stateless
+// verification endpoint — it only needs the root secret from the database.
+func (m *Manager) VerifyProofWithSecret(ctx context.Context, proof *DelegationProof, rootKeyID string) (*VerifyProofResponse, error) {
+	if proof == nil {
+		return &VerifyProofResponse{Valid: false, Error: "nil proof"}, nil
+	}
+
+	// Override proof's root key ID with the one from the request for extra safety
+	if rootKeyID != "" {
+		if proof.RootKeyID != "" && proof.RootKeyID != rootKeyID {
+			return &VerifyProofResponse{Valid: false, Error: "root key ID mismatch"}, nil
+		}
+		proof.RootKeyID = rootKeyID
+	}
+
+	rootSecret, err := m.store.GetRootSecret(ctx, proof.RootKeyID)
+	if err != nil {
+		return nil, fmt.Errorf("root secret lookup: %w", err)
+	}
+	if rootSecret == nil {
+		return &VerifyProofResponse{Valid: false, Error: "no root secret found"}, nil
+	}
+
+	if err := VerifyProof(rootSecret, proof); err != nil {
+		return &VerifyProofResponse{Valid: false, Error: err.Error()}, nil
+	}
+
+	// Extract leaf caveat permissions
+	leaf := proof.Caveats[len(proof.Caveats)-1]
+	return &VerifyProofResponse{
+		Valid:               true,
+		LeafKeyID:           leaf.KeyID,
+		Depth:               leaf.Depth,
+		MaxTotal:            leaf.MaxTotal,
+		MaxPerTransaction:   leaf.MaxPerTransaction,
+		MaxPerDay:           leaf.MaxPerDay,
+		Scopes:              leaf.Scopes,
+		AllowedRecipients:   leaf.AllowedRecipients,
+		AllowedServiceTypes: leaf.AllowedServiceTypes,
+	}, nil
 }
 
 // Helper functions

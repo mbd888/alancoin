@@ -277,6 +277,22 @@ func (p *PostgresStore) CountActive(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
+// GetRootSecret returns the HMAC root secret for a root session key.
+// The root_secret column is stored as BYTEA and never exposed via API.
+func (p *PostgresStore) GetRootSecret(ctx context.Context, rootKeyID string) ([]byte, error) {
+	var secret []byte
+	err := p.db.QueryRowContext(ctx, `
+		SELECT root_secret FROM session_keys WHERE id = $1 AND root_secret IS NOT NULL
+	`, rootKeyID).Scan(&secret)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get root secret: %w", err)
+	}
+	return secret, nil
+}
+
 // Helpers
 
 func nullString(s string) sql.NullString {
