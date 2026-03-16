@@ -215,10 +215,3 @@ func MiddlewareWithConfig(cfg Config) gin.HandlerFunc {
 	limiter := New(cfg)
 	return limiter.Middleware()
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

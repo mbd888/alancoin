@@ -120,7 +120,7 @@ func (p *CoalitionPostgresStore) ListByAgent(ctx context.Context, agentAddr stri
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var result []*CoalitionEscrow
 	for rows.Next() {
@@ -145,7 +145,7 @@ func (p *CoalitionPostgresStore) ListExpired(ctx context.Context, before time.Ti
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var result []*CoalitionEscrow
 	for rows.Next() {
