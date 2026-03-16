@@ -65,7 +65,10 @@ func makeContext(t *testing.T, method, path string, body []byte, tenantParam, ca
 	}
 
 	if isAdmin {
-		c.Request.Header.Set("X-Admin-Secret", "test-secret")
+		// Simulate demo-mode admin: set DEMO_MODE and provide an authenticated API key.
+		t.Setenv("DEMO_MODE", "true")
+		t.Setenv("ADMIN_SECRET", "")
+		c.Set(auth.ContextKeyAPIKey, &auth.APIKey{ID: "test-admin-key", AgentAddr: "0x0000000000000000000000000000000000000001"})
 	} else if callerTenantID != "" {
 		c.Set(auth.ContextKeyTenantID, callerTenantID)
 	}

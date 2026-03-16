@@ -823,6 +823,12 @@ func (s *Service) AssignArbitrator(ctx context.Context, id, callerAddr, arbitrat
 		return nil, ErrUnauthorized
 	}
 
+	// Prevent self-assignment: arbitrator must not be buyer or seller.
+	arb := strings.ToLower(arbitratorAddr)
+	if arb == escrow.BuyerAddr || arb == escrow.SellerAddr {
+		return nil, fmt.Errorf("arbitrator cannot be buyer or seller: %w", ErrUnauthorized)
+	}
+
 	if err := checkTransition(escrow.Status, StatusArbitrating); err != nil {
 		return nil, err
 	}
@@ -830,7 +836,7 @@ func (s *Service) AssignArbitrator(ctx context.Context, id, callerAddr, arbitrat
 	now := time.Now()
 	deadline := now.Add(DefaultArbitrationDeadline)
 	escrow.Status = StatusArbitrating
-	escrow.ArbitratorAddr = strings.ToLower(arbitratorAddr)
+	escrow.ArbitratorAddr = arb
 	escrow.ArbitrationDeadline = &deadline
 	escrow.UpdatedAt = now
 

@@ -54,7 +54,14 @@ func (m *MemoryStore) Update(ctx context.Context, escrow *Escrow) error {
 	if _, ok := m.escrows[escrow.ID]; !ok {
 		return ErrEscrowNotFound
 	}
-	m.escrows[escrow.ID] = escrow
+	// Store a deep copy to prevent the caller's retained pointer from
+	// mutating the stored state outside the lock.
+	cp := *escrow
+	if escrow.DisputeEvidence != nil {
+		cp.DisputeEvidence = make([]EvidenceEntry, len(escrow.DisputeEvidence))
+		copy(cp.DisputeEvidence, escrow.DisputeEvidence)
+	}
+	m.escrows[escrow.ID] = &cp
 	return nil
 }
 

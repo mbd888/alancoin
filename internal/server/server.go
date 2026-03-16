@@ -33,6 +33,7 @@ import (
 	"github.com/mbd888/alancoin/internal/billing"
 	"github.com/mbd888/alancoin/internal/circuitbreaker"
 	"github.com/mbd888/alancoin/internal/config"
+	"github.com/mbd888/alancoin/internal/contracts"
 	"github.com/mbd888/alancoin/internal/dashboard"
 	"github.com/mbd888/alancoin/internal/escrow"
 	"github.com/mbd888/alancoin/internal/flywheel"
@@ -41,6 +42,7 @@ import (
 	"github.com/mbd888/alancoin/internal/ledger"
 	"github.com/mbd888/alancoin/internal/logging"
 	"github.com/mbd888/alancoin/internal/metrics"
+	"github.com/mbd888/alancoin/internal/offers"
 	"github.com/mbd888/alancoin/internal/policy"
 	"github.com/mbd888/alancoin/internal/ratelimit"
 	"github.com/mbd888/alancoin/internal/realtime"
@@ -78,6 +80,11 @@ type Server struct {
 	escrowService          *escrow.Service
 	escrowTimer            *escrow.Timer
 	multiStepEscrowService *escrow.MultiStepService
+	coalitionService       *escrow.CoalitionService
+	coalitionTimer         *escrow.CoalitionTimer
+	contractService        *contracts.Service
+	offerService           *offers.Service
+	offerTimer             *offers.Timer
 	streamService          *streams.Service
 	streamTimer            *streams.Timer
 	gatewayService         *gateway.Service
@@ -233,6 +240,15 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.multiStepEscrowService = escrow.NewMultiStepService(
 			escrow.NewMultiStepPostgresStore(db), &escrowLedgerAdapter{s.ledgerService},
 		).WithLogger(s.logger)
+		coalitionStore := escrow.NewCoalitionPostgresStore(db)
+		s.coalitionService = escrow.NewCoalitionService(coalitionStore, &escrowLedgerAdapter{s.ledgerService}).
+			WithLogger(s.logger)
+		s.coalitionTimer = escrow.NewCoalitionTimer(s.coalitionService, coalitionStore, s.logger)
+		s.contractService = contracts.NewService(contracts.NewMemoryStore()).WithLogger(s.logger)
+		offerStore := offers.NewMemoryStore()
+		s.offerService = offers.NewService(offerStore, &escrowLedgerAdapter{s.ledgerService}).
+			WithLogger(s.logger)
+		s.offerTimer = offers.NewTimer(s.offerService, s.logger)
 		s.logger.Info("escrow enabled (postgres)")
 
 		// Streams with PostgreSQL store (streaming micropayments)
@@ -273,8 +289,24 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.gatewayService.WithWebhookEmitter(s.webhookEmitter)
 		s.escrowService.WithWebhookEmitter(s.webhookEmitter)
 		s.streamService.WithWebhookEmitter(s.webhookEmitter)
+		if s.coalitionService != nil {
+			s.coalitionService.WithWebhookEmitter(s.webhookEmitter)
+			if s.realtimeHub != nil {
+				s.coalitionService.WithRealtimeBroadcaster(&coalitionRealtimeAdapter{s.realtimeHub})
+			}
+			if s.contractService != nil {
+				s.coalitionService.WithContractChecker(&coalitionContractAdapter{s.contractService})
+			}
+		}
 
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
+		if s.coalitionService != nil {
+			s.coalitionService.WithRecorder(&gatewayRecorderAdapter{s.registry})
+		}
+		if s.offerService != nil {
+			s.offerService.WithRecorder(&gatewayRecorderAdapter{s.registry})
+			s.offerService.WithRevenueAccumulator(s.revenueAccumulator)
+		}
 		s.gatewayService.WithPlatformAddress(cfg.PlatformAddress)
 
 		// Wire receipt issuer into all payment paths
@@ -283,6 +315,9 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			s.gatewayService.WithReceiptIssuer(rcptAdapter)
 			s.streamService.WithReceiptIssuer(rcptAdapter)
 			s.escrowService.WithReceiptIssuer(rcptAdapter)
+			if s.coalitionService != nil {
+				s.coalitionService.WithReceiptIssuer(rcptAdapter)
+			}
 		}
 
 		// Wire revenue accumulator into all payment paths (GAP-1 fix).
@@ -292,6 +327,9 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.gatewayService.WithRevenueAccumulator(s.revenueAccumulator)
 		s.escrowService.WithRevenueAccumulator(s.revenueAccumulator)
 		s.streamService.WithRevenueAccumulator(s.revenueAccumulator)
+		if s.coalitionService != nil {
+			s.coalitionService.WithRevenueAccumulator(s.revenueAccumulator)
+		}
 		s.logger.Info("revenue accumulator wired into all payment paths")
 
 		// Tenant store (PostgreSQL)
@@ -378,6 +416,15 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.multiStepEscrowService = escrow.NewMultiStepService(
 			escrow.NewMultiStepMemoryStore(), &escrowLedgerAdapter{s.ledgerService},
 		).WithLogger(s.logger)
+		coalitionStore := escrow.NewCoalitionMemoryStore()
+		s.coalitionService = escrow.NewCoalitionService(coalitionStore, &escrowLedgerAdapter{s.ledgerService}).
+			WithLogger(s.logger)
+		s.coalitionTimer = escrow.NewCoalitionTimer(s.coalitionService, coalitionStore, s.logger)
+		s.contractService = contracts.NewService(contracts.NewMemoryStore()).WithLogger(s.logger)
+		offerStore := offers.NewMemoryStore()
+		s.offerService = offers.NewService(offerStore, &escrowLedgerAdapter{s.ledgerService}).
+			WithLogger(s.logger)
+		s.offerTimer = offers.NewTimer(s.offerService, s.logger)
 		s.logger.Info("escrow enabled (in-memory)")
 
 		// Streams with in-memory store (streaming micropayments)
@@ -406,6 +453,13 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.logger.Info("gateway enabled (in-memory)")
 
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
+		if s.coalitionService != nil {
+			s.coalitionService.WithRecorder(&gatewayRecorderAdapter{s.registry})
+		}
+		if s.offerService != nil {
+			s.offerService.WithRecorder(&gatewayRecorderAdapter{s.registry})
+			s.offerService.WithRevenueAccumulator(s.revenueAccumulator)
+		}
 		s.gatewayService.WithPlatformAddress(cfg.PlatformAddress)
 
 		// Wire webhook emitter into all payment subsystems (in-memory mode).
@@ -413,6 +467,15 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.gatewayService.WithWebhookEmitter(s.webhookEmitter)
 		s.escrowService.WithWebhookEmitter(s.webhookEmitter)
 		s.streamService.WithWebhookEmitter(s.webhookEmitter)
+		if s.coalitionService != nil {
+			s.coalitionService.WithWebhookEmitter(s.webhookEmitter)
+			if s.realtimeHub != nil {
+				s.coalitionService.WithRealtimeBroadcaster(&coalitionRealtimeAdapter{s.realtimeHub})
+			}
+			if s.contractService != nil {
+				s.coalitionService.WithContractChecker(&coalitionContractAdapter{s.contractService})
+			}
+		}
 
 		// Wire receipt issuer into all payment paths
 		if s.receiptService != nil {
@@ -420,6 +483,9 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			s.gatewayService.WithReceiptIssuer(rcptAdapter)
 			s.streamService.WithReceiptIssuer(rcptAdapter)
 			s.escrowService.WithReceiptIssuer(rcptAdapter)
+			if s.coalitionService != nil {
+				s.coalitionService.WithReceiptIssuer(rcptAdapter)
+			}
 		}
 
 		// Wire revenue accumulator into all payment paths (in-memory mode).
@@ -427,6 +493,9 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.gatewayService.WithRevenueAccumulator(s.revenueAccumulator)
 		s.escrowService.WithRevenueAccumulator(s.revenueAccumulator)
 		s.streamService.WithRevenueAccumulator(s.revenueAccumulator)
+		if s.coalitionService != nil {
+			s.coalitionService.WithRevenueAccumulator(s.revenueAccumulator)
+		}
 		s.logger.Info("revenue accumulator wired into all payment paths")
 
 		// Tenant store (in-memory)
@@ -615,8 +684,18 @@ func (s *Server) setupMiddleware() {
 	// Security headers
 	s.router.Use(security.HeadersMiddleware())
 
-	// CORS (allow all origins for demo - restrict in production)
-	s.router.Use(security.CORSMiddleware([]string{"*"}))
+	// CORS — use configured origins in production, allow all in development.
+	corsOrigins := []string{"*"}
+	if s.cfg.CORSAllowedOrigins != "" {
+		corsOrigins = strings.Split(s.cfg.CORSAllowedOrigins, ",")
+		for i := range corsOrigins {
+			corsOrigins[i] = strings.TrimSpace(corsOrigins[i])
+		}
+	} else if s.cfg.IsProduction() {
+		// Production with no explicit origins: deny all cross-origin requests.
+		corsOrigins = nil
+	}
+	s.router.Use(security.CORSMiddleware(corsOrigins))
 
 	// Gzip compression (after CORS, before request size limit)
 	s.router.Use(gzipMiddleware())
@@ -734,8 +813,32 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/health/ready", s.readinessHandler)
 	s.router.GET("/metrics", metrics.Handler())
 
-	// WebSocket for real-time streaming
+	// WebSocket for real-time streaming (requires API key auth)
 	s.router.GET("/ws", func(c *gin.Context) {
+		// Authenticate via query param or header before upgrading to WebSocket.
+		// WebSocket clients cannot set custom headers after upgrade, so we also
+		// accept the API key as a query parameter for the initial handshake.
+		apiKey := c.GetHeader("Authorization")
+		if apiKey == "" {
+			apiKey = c.GetHeader("X-API-Key")
+		}
+		if apiKey == "" {
+			apiKey = c.Query("token")
+		}
+		if apiKey == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "unauthorized",
+				"message": "API key required. Pass 'Authorization' header or 'token' query parameter.",
+			})
+			return
+		}
+		if _, err := s.authMgr.ValidateKey(c.Request.Context(), apiKey); err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "unauthorized",
+				"message": "Invalid API key.",
+			})
+			return
+		}
 		s.realtimeHub.HandleWebSocket(c.Writer, c.Request)
 	})
 
@@ -770,6 +873,9 @@ func (s *Server) setupRoutes() {
 
 	// Wire reputation impact tracking into escrow (dispute/confirm outcomes)
 	s.escrowService.WithReputationImpactor(reputationProvider)
+	if s.coalitionService != nil {
+		s.coalitionService.WithReputationImpactor(reputationProvider)
+	}
 
 	// PUBLIC ROUTES (no auth required)
 	// These are the discovery/read endpoints
@@ -861,8 +967,9 @@ func (s *Server) setupRoutes() {
 	protectedPolicies.Use(auth.Middleware(s.authMgr), tenantRL)
 	protectedPolicies.Use(auth.RequireOwnership(s.authMgr, "address"))
 	sessionHandler.RegisterPolicyRoutes(protectedPolicies)
-	// Using a session key to transact doesn't require API key (the session key IS the auth)
-	v1.POST("/agents/:address/sessions/:keyId/transact", sessionHandler.Transact)
+	// Using a session key to transact doesn't require API key (the session key IS the auth).
+	// Still apply rate limiting to prevent brute-force against the ECDSA signature.
+	v1.POST("/agents/:address/sessions/:keyId/transact", s.rateLimiter.Middleware(), sessionHandler.Transact)
 
 	// Delegation creation (A2A) — authenticated by session key ECDSA signature, no API key needed
 	v1.POST("/sessions/:keyId/delegate", sessionHandler.CreateDelegation)
@@ -953,15 +1060,21 @@ func (s *Server) setupRoutes() {
 	if s.ledger != nil {
 		ledgerHandler := ledger.NewHandler(s.ledger, s.logger)
 		ledgerHandler.WithReputation(reputationProvider)
-		v1.GET("/agents/:address/balance", ledgerHandler.GetBalance)
-		v1.GET("/agents/:address/ledger", ledgerHandler.GetHistory)
 
-		// Credit routes (public read, protected apply)
-		v1.GET("/agents/:address/credit", ledgerHandler.GetCreditInfo)
-		v1.GET("/credit/active", ledgerHandler.ListActiveCredit)
+		// Ledger read routes — require ownership (financial PII).
+		protectedLedgerRead := v1.Group("")
+		protectedLedgerRead.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireOwnership(s.authMgr, "address"))
+		protectedLedgerRead.GET("/agents/:address/balance", ledgerHandler.GetBalance)
+		protectedLedgerRead.GET("/agents/:address/ledger", ledgerHandler.GetHistory)
+		protectedLedgerRead.GET("/agents/:address/credit", ledgerHandler.GetCreditInfo)
+
+		// Active credit listing is admin-only.
+		adminCreditList := v1.Group("")
+		adminCreditList.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAdmin())
+		adminCreditList.GET("/credit/active", ledgerHandler.ListActiveCredit)
 
 		protectedCredit := v1.Group("")
-		protectedCredit.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		protectedCredit.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireOwnership(s.authMgr, "address"))
 		protectedCredit.POST("/agents/:address/credit/apply", ledgerHandler.ApplyForCredit)
 
 		// Protected ledger routes
@@ -990,6 +1103,9 @@ func (s *Server) setupRoutes() {
 		}
 		if s.escrowService != nil {
 			adminHandler.WithEscrowService(&adminEscrowAdapter{svc: s.escrowService})
+		}
+		if s.coalitionService != nil {
+			adminHandler.WithCoalitionService(&adminCoalitionAdapter{svc: s.coalitionService})
 		}
 		if s.streamService != nil {
 			adminHandler.WithStreamService(&adminStreamAdapter{svc: s.streamService})
@@ -1105,8 +1221,10 @@ func (s *Server) setupRoutes() {
 			escrowHandler = escrowHandler.WithScopeChecker(s.sessionMgr)
 		}
 
-		// Public routes - anyone can read
-		escrowHandler.RegisterRoutes(v1)
+		// Escrow read routes require authentication to protect financial PII.
+		authedEscrow := v1.Group("")
+		authedEscrow.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		escrowHandler.RegisterRoutes(authedEscrow)
 
 		// Protected routes - only authenticated agents can create/confirm/dispute
 		protectedEscrow := v1.Group("")
@@ -1118,11 +1236,53 @@ func (s *Server) setupRoutes() {
 	if s.multiStepEscrowService != nil {
 		msHandler := escrow.NewMultiStepHandler(s.multiStepEscrowService)
 
-		msHandler.RegisterRoutes(v1)
+		// MultiStep escrow read routes require authentication.
+		authedMS := v1.Group("")
+		authedMS.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		msHandler.RegisterRoutes(authedMS)
 
 		protectedMS := v1.Group("")
 		protectedMS.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
 		msHandler.RegisterProtectedRoutes(protectedMS)
+	}
+
+	// Coalition escrow routes (outcome-triggered multi-agent settlement)
+	if s.coalitionService != nil {
+		coaHandler := escrow.NewCoalitionHandler(s.coalitionService)
+
+		authedCoa := v1.Group("")
+		authedCoa.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		coaHandler.RegisterRoutes(authedCoa)
+
+		protectedCoa := v1.Group("")
+		protectedCoa.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		coaHandler.RegisterProtectedRoutes(protectedCoa)
+	}
+
+	// Behavioral contract routes (SLA enforcement for coalition escrows)
+	if s.contractService != nil {
+		contractHandler := contracts.NewHandler(s.contractService)
+
+		authedContracts := v1.Group("")
+		authedContracts.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		contractHandler.RegisterRoutes(authedContracts)
+
+		protectedContracts := v1.Group("")
+		protectedContracts.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		contractHandler.RegisterProtectedRoutes(protectedContracts)
+	}
+
+	// Standing offers / marketplace routes
+	if s.offerService != nil {
+		offerHandler := offers.NewHandler(s.offerService)
+
+		authedOffers := v1.Group("")
+		authedOffers.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		offerHandler.RegisterRoutes(authedOffers)
+
+		protectedOffers := v1.Group("")
+		protectedOffers.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		offerHandler.RegisterProtectedRoutes(protectedOffers)
 	}
 
 	// Streaming micropayment routes (per-tick payments for continuous services)
@@ -1132,8 +1292,10 @@ func (s *Server) setupRoutes() {
 			streamHandler = streamHandler.WithScopeChecker(s.sessionMgr)
 		}
 
-		// Public routes - anyone can read
-		streamHandler.RegisterRoutes(v1)
+		// Stream read routes require authentication to protect financial PII.
+		authedStreams := v1.Group("")
+		authedStreams.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		streamHandler.RegisterRoutes(authedStreams)
 
 		// Protected routes - only authenticated agents can open/tick/close
 		protectedStreams := v1.Group("")
@@ -1316,6 +1478,8 @@ func (s *Server) readinessHandler(c *gin.Context) {
 
 	// Timer checks
 	checks["escrow_timer"] = timerStatus(s.escrowTimer)
+	checks["coalition_timer"] = timerStatus(s.coalitionTimer)
+	checks["offers_timer"] = timerStatus(s.offerTimer)
 	checks["stream_timer"] = timerStatus(s.streamTimer)
 	checks["gateway_timer"] = timerStatus(s.gatewayTimer)
 	checks["reconcile_timer"] = timerStatus(s.reconcileTimer)
@@ -1469,6 +1633,16 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.escrowTimer.Start(runCtx)
 	}
 
+	// Start coalition escrow auto-settle timer
+	if s.coalitionTimer != nil {
+		go s.coalitionTimer.Start(runCtx)
+	}
+
+	// Start offers expiry timer
+	if s.offerTimer != nil {
+		go s.offerTimer.Start(runCtx)
+	}
+
 	// Start stream stale-close timer
 	if s.streamTimer != nil {
 		go s.streamTimer.Start(runCtx)
@@ -1602,6 +1776,18 @@ drainLoop:
 	if s.escrowTimer != nil {
 		s.escrowTimer.Stop()
 		s.logger.Info("escrow timer stopped")
+	}
+
+	// Stop coalition timer
+	if s.coalitionTimer != nil {
+		s.coalitionTimer.Stop()
+		s.logger.Info("coalition timer stopped")
+	}
+
+	// Stop offers timer
+	if s.offerTimer != nil {
+		s.offerTimer.Stop()
+		s.logger.Info("offers timer stopped")
 	}
 
 	// Stop stream timer
@@ -2145,6 +2331,57 @@ type adminEscrowAdapter struct {
 }
 
 func (a *adminEscrowAdapter) ForceCloseExpired(ctx context.Context) (int, error) {
+	return a.svc.ForceCloseExpired(ctx)
+}
+
+// coalitionContractAdapter adapts contracts.Service to escrow.ContractChecker
+type coalitionContractAdapter struct {
+	svc *contracts.Service
+}
+
+func (a *coalitionContractAdapter) GetContractByEscrow(ctx context.Context, escrowID string) (*escrow.BoundContract, error) {
+	c, err := a.svc.GetByEscrow(ctx, escrowID)
+	if err != nil {
+		return nil, err
+	}
+	return &escrow.BoundContract{
+		ID:             c.ID,
+		Status:         string(c.Status),
+		QualityPenalty: c.QualityPenalty,
+		HardViolations: c.HardViolations,
+	}, nil
+}
+
+func (a *coalitionContractAdapter) BindContract(ctx context.Context, contractID, escrowID string) error {
+	_, err := a.svc.BindToEscrow(ctx, contractID, escrowID)
+	return err
+}
+
+func (a *coalitionContractAdapter) MarkContractPassed(ctx context.Context, contractID string) error {
+	_, err := a.svc.MarkPassed(ctx, contractID)
+	return err
+}
+
+// coalitionRealtimeAdapter adapts realtime.Hub to escrow.RealtimeBroadcaster
+type coalitionRealtimeAdapter struct {
+	hub *realtime.Hub
+}
+
+func (a *coalitionRealtimeAdapter) BroadcastCoalitionEvent(eventType string, coalitionID, buyerAddr, status string) {
+	a.hub.BroadcastCoalition(map[string]interface{}{
+		"event":       eventType,
+		"coalitionId": coalitionID,
+		"buyerAddr":   buyerAddr,
+		"status":      status,
+	})
+}
+
+// adminCoalitionAdapter adapts escrow.CoalitionService to admin.CoalitionService
+type adminCoalitionAdapter struct {
+	svc *escrow.CoalitionService
+}
+
+func (a *adminCoalitionAdapter) ForceCloseExpired(ctx context.Context) (int, error) {
 	return a.svc.ForceCloseExpired(ctx)
 }
 

@@ -294,7 +294,10 @@ func validateAttenuation(parent, child Caveat) error {
 		}
 	}
 
-	if parent.MaxPerTransaction != "" && child.MaxPerTransaction != "" {
+	if parent.MaxPerTransaction != "" {
+		if child.MaxPerTransaction == "" {
+			return fmt.Errorf("child must set maxPerTransaction when parent has one")
+		}
 		parentBig, _ := usdc.Parse(parent.MaxPerTransaction)
 		childBig, _ := usdc.Parse(child.MaxPerTransaction)
 		if childBig.Cmp(parentBig) > 0 {
@@ -307,7 +310,10 @@ func validateAttenuation(parent, child Caveat) error {
 		return fmt.Errorf("child expiry %v exceeds parent %v", child.ExpiresAt, parent.ExpiresAt)
 	}
 
-	// Scopes: child must be subset
+	// Scopes: child must be subset (and must inherit if parent restricts)
+	if len(parent.Scopes) > 0 && len(child.Scopes) == 0 {
+		return fmt.Errorf("child must set scopes when parent restricts them")
+	}
 	if len(parent.Scopes) > 0 && len(child.Scopes) > 0 {
 		parentSet := make(map[string]bool, len(parent.Scopes))
 		for _, s := range parent.Scopes {
@@ -320,7 +326,10 @@ func validateAttenuation(parent, child Caveat) error {
 		}
 	}
 
-	// Recipients: child must be subset (if parent restricts)
+	// Recipients: child must be subset (and must inherit if parent restricts)
+	if len(parent.AllowedRecipients) > 0 && len(child.AllowedRecipients) == 0 {
+		return fmt.Errorf("child must set allowedRecipients when parent restricts them")
+	}
 	if len(parent.AllowedRecipients) > 0 && len(child.AllowedRecipients) > 0 {
 		parentSet := make(map[string]bool, len(parent.AllowedRecipients))
 		for _, r := range parent.AllowedRecipients {
@@ -333,7 +342,10 @@ func validateAttenuation(parent, child Caveat) error {
 		}
 	}
 
-	// Service types: child must be subset (if parent restricts)
+	// Service types: child must be subset (and must inherit if parent restricts)
+	if len(parent.AllowedServiceTypes) > 0 && len(child.AllowedServiceTypes) == 0 {
+		return fmt.Errorf("child must set allowedServiceTypes when parent restricts them")
+	}
 	if len(parent.AllowedServiceTypes) > 0 && len(child.AllowedServiceTypes) > 0 {
 		parentSet := make(map[string]bool, len(parent.AllowedServiceTypes))
 		for _, s := range parent.AllowedServiceTypes {

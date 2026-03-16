@@ -242,10 +242,26 @@ func (h *Handler) RegisterAgent(c *gin.Context) {
 		return
 	}
 
+	// Validate endpoint URL to prevent SSRF (blocks private/loopback/link-local IPs).
+	// Skipped when allowLocalEndpoints is set (demo/dev mode).
+	if req.Endpoint != "" && !h.allowLocalEndpoints {
+		if err := security.ValidateEndpointURL(req.Endpoint); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "invalid_endpoint",
+				"message": fmt.Sprintf("Endpoint URL rejected: %v", err),
+			})
+			return
+		}
+	}
+
+	// Sanitize and length-limit user-provided strings.
+	reqName := validation.SanitizeString(req.Name, 200)
+	reqDesc := validation.SanitizeString(req.Description, 2000)
+
 	agent := &Agent{
 		Address:      req.Address,
-		Name:         req.Name,
-		Description:  req.Description,
+		Name:         reqName,
+		Description:  reqDesc,
 		OwnerAddress: req.OwnerAddress,
 		Endpoint:     req.Endpoint,
 		IsAutonomous: req.OwnerAddress != "",

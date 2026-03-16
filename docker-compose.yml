@@ -7,9 +7,9 @@ services:
     environment:
       POSTGRES_DB: alancoin
       POSTGRES_USER: alancoin
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alancoin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your environment or .env file}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -31,7 +31,7 @@ services:
       - PORT=8080
       - ENV=development
       - LOG_LEVEL=debug
-      - DATABASE_URL=postgres://alancoin:${POSTGRES_PASSWORD:-alancoin}@postgres:5432/alancoin?sslmode=disable
+      - DATABASE_URL=postgres://alancoin:${POSTGRES_PASSWORD}@postgres:5432/alancoin?sslmode=disable
       - RPC_URL=https://sepolia.base.org
       - CHAIN_ID=84532
       - USDC_CONTRACT=0x036CbD53842c5426634e7929541eC2318f3dCF7e
@@ -67,7 +67,7 @@ services:
       alancoin:
         condition: service_healthy
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - promdata:/prometheus
@@ -78,10 +78,10 @@ services:
     depends_on:
       - prometheus
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?Set GRAFANA_PASSWORD in your environment or .env file}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro

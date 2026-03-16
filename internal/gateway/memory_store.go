@@ -57,7 +57,14 @@ func (m *MemoryStore) UpdateSession(_ context.Context, session *Session) error {
 	if _, ok := m.sessions[session.ID]; !ok {
 		return ErrSessionNotFound
 	}
-	m.sessions[session.ID] = session
+	// Store a deep copy to prevent the caller's retained pointer from
+	// mutating the stored state outside the lock.
+	cp := *session
+	if session.AllowedTypes != nil {
+		cp.AllowedTypes = make([]string, len(session.AllowedTypes))
+		copy(cp.AllowedTypes, session.AllowedTypes)
+	}
+	m.sessions[session.ID] = &cp
 	return nil
 }
 

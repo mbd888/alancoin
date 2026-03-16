@@ -68,13 +68,17 @@ func (p *PostgresStore) Update(ctx context.Context, e *Escrow) error {
 	if e.DisputeEvidence == nil {
 		evidenceJSON = []byte("[]")
 	}
+	// Optimistic lock: refuse to overwrite a terminal state. This prevents
+	// double-release/double-refund in multi-replica deployments where the
+	// in-process mutex does not provide cross-pod protection.
 	result, err := p.db.ExecContext(ctx, `
 		UPDATE escrows SET
 			status = $1, delivered_at = $2, resolved_at = $3,
 			dispute_reason = $4, resolution = $5, updated_at = $6,
 			dispute_evidence = $7, arbitrator_addr = $8, arbitration_deadline = $9,
 			partial_release_amount = $10, partial_refund_amount = $11, dispute_window_until = $12
-		WHERE id = $13`,
+		WHERE id = $13
+		  AND status NOT IN ('released', 'refunded', 'expired')`,
 		string(e.Status), nullTime(e.DeliveredAt), nullTime(e.ResolvedAt),
 		nullString(e.DisputeReason), nullString(e.Resolution), e.UpdatedAt,
 		evidenceJSON, nullString(e.ArbitratorAddr), nullTime(e.ArbitrationDeadline),
@@ -89,6 +93,7 @@ func (p *PostgresStore) Update(ctx context.Context, e *Escrow) error {
 		return err
 	}
 	if rows == 0 {
+		// Could be not found or already in terminal state.
 		return ErrEscrowNotFound
 	}
 	return nil

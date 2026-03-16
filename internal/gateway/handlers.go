@@ -188,7 +188,7 @@ func (h *Handler) GetSession(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Session not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to retrieve session"})
 		return
 	}
 
@@ -223,7 +223,7 @@ func (h *Handler) ListSessions(c *gin.Context) {
 	// Request limit+1 to detect if there are more results.
 	sessions, err := h.service.ListSessions(c.Request.Context(), agentAddr, limit+1, opts...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to list sessions"})
 		return
 	}
 
@@ -398,7 +398,7 @@ func (h *Handler) DryRun(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Session not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to retrieve session"})
 		return
 	}
 
@@ -455,7 +455,7 @@ func (h *Handler) ListLogs(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Session not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to retrieve session"})
 		return
 	}
 
@@ -472,7 +472,7 @@ func (h *Handler) ListLogs(c *gin.Context) {
 
 	logs, err := h.service.ListLogs(c.Request.Context(), sessionID, limit+1, opts...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to list logs"})
 		return
 	}
 

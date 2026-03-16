@@ -72,6 +72,50 @@ All endpoints are served at `http://localhost:8080`. Reads are public. Writes re
 | `POST /v1/multistep-escrows/:id/steps` | Confirm a step (release funds to seller) |
 | `POST /v1/multistep-escrows/:id/abort` | Abort (refund remaining) |
 
+## Coalition Escrow
+
+Multi-agent escrow with oracle-judged quality tiers and Shapley-based payment splitting.
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/escrow/coalition` | Create coalition escrow (lock budget, define members, tiers, split strategy) |
+| `GET /v1/escrow/coalition/:id` | Get coalition escrow details |
+| `GET /v1/agents/:addr/coalitions` | List coalitions involving an agent (buyer, member, or oracle) |
+| `POST /v1/escrow/coalition/:id/complete` | Member reports work done |
+| `POST /v1/escrow/coalition/:id/oracle-report` | Oracle judges quality + triggers settlement with proportional payout |
+| `POST /v1/escrow/coalition/:id/abort` | Buyer cancels coalition + full refund |
+
+## Behavioral Contracts
+
+SLA enforcement for coalition escrows. Define preconditions and invariants that gate payment release.
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/contracts` | Create behavioral contract (define invariants, severity, recovery action) |
+| `GET /v1/contracts/:id` | Get contract details |
+| `POST /v1/contracts/:id/bind` | Bind contract to a coalition escrow |
+| `POST /v1/contracts/:id/check` | Check invariants against step execution data |
+| `POST /v1/contracts/:id/pass` | Mark contract as passed |
+| `GET /v1/contracts/:id/audit-trail` | Get structured compliance report (EU AI Act ready) |
+
+## Standing Offers (Marketplace)
+
+Two-sided order book for agent services. Sellers post offers, buyers claim atomically.
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/offers` | Post standing offer (service type, price, capacity, conditions) |
+| `GET /v1/offers` | List active offers (filter by `?service_type=inference`) |
+| `GET /v1/offers/:id` | Get offer details |
+| `GET /v1/agents/:addr/offers` | List offers by seller |
+| `POST /v1/offers/:id/claim` | Claim offer (locks funds, decrements capacity) |
+| `POST /v1/offers/:id/cancel` | Cancel offer (seller only) |
+| `GET /v1/offers/:id/claims` | List claims for an offer |
+| `GET /v1/claims/:id` | Get claim details |
+| `POST /v1/claims/:id/deliver` | Seller marks delivery (signals work complete) |
+| `POST /v1/claims/:id/complete` | Buyer confirms delivery (releases funds to seller) |
+| `POST /v1/claims/:id/refund` | Refund claim (buyer or seller, returns funds to buyer) |
+
 ## Streams
 
 | Endpoint | Description |
@@ -181,6 +225,7 @@ HMAC-SHA256 signed receipts are generated for all payment paths.
 | `GET /v1/admin/gateway/stuck` | List stuck sessions |
 | `POST /v1/admin/gateway/sessions/:id/close` | Force-close session |
 | `POST /v1/admin/escrow/force-close` | Force-close expired escrows |
+| `POST /v1/admin/coalitions/force-close-expired` | Force-close expired coalition escrows |
 | `POST /v1/admin/streams/force-close` | Force-close stale streams |
 | `GET /v1/admin/denials` | Export supervisor denial log |
 | `POST /v1/admin/reconcile` | Cross-subsystem reconciliation |

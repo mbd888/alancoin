@@ -188,16 +188,21 @@ func RequireAdmin() gin.HandlerFunc {
 
 // IsAdminRequest checks if the request carries a valid admin secret.
 // Uses constant-time comparison to prevent timing attacks.
-// Returns false if ADMIN_SECRET is not set (unless DEMO_MODE is enabled).
+// In demo mode without ADMIN_SECRET, falls back to checking if the caller
+// is authenticated (has a valid API key) — never accepts arbitrary header values.
 func IsAdminRequest(c *gin.Context) bool {
+	adminSecret := os.Getenv("ADMIN_SECRET")
+	if adminSecret == "" {
+		// Demo mode: require the caller to be authenticated (has valid API key).
+		if os.Getenv("DEMO_MODE") != "true" {
+			return false
+		}
+		_, exists := c.Get(ContextKeyAPIKey)
+		return exists
+	}
 	provided := c.GetHeader("X-Admin-Secret")
 	if provided == "" {
 		return false
-	}
-	adminSecret := os.Getenv("ADMIN_SECRET")
-	if adminSecret == "" {
-		// Demo mode: any non-empty admin header is accepted
-		return os.Getenv("DEMO_MODE") == "true"
 	}
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(adminSecret)) == 1
 }

@@ -71,7 +71,10 @@ func makeRequest(t *testing.T, handler gin.HandlerFunc, tenantParam, callerTenan
 	c.Request = httptest.NewRequest("GET", "/test", nil)
 
 	if isAdmin {
-		c.Request.Header.Set("X-Admin-Secret", "test-secret")
+		// Simulate demo-mode admin: set DEMO_MODE and provide an authenticated API key.
+		t.Setenv("DEMO_MODE", "true")
+		t.Setenv("ADMIN_SECRET", "")
+		c.Set(auth.ContextKeyAPIKey, &auth.APIKey{ID: "test-admin-key", AgentAddr: "0x0000000000000000000000000000000000000001"})
 	} else if callerTenantID != "" {
 		c.Set(auth.ContextKeyTenantID, callerTenantID)
 	}
@@ -414,10 +417,14 @@ func TestCheckOwnership_NonOwnerGets403(t *testing.T) {
 }
 
 func TestCheckOwnership_AdminCanAccessAny(t *testing.T) {
+	// Simulate demo-mode admin: set DEMO_MODE and provide an authenticated API key.
+	t.Setenv("DEMO_MODE", "true")
+	t.Setenv("ADMIN_SECRET", "")
+
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest("GET", "/test", nil)
-	c.Request.Header.Set("X-Admin-Secret", "test-secret")
+	c.Set(auth.ContextKeyAPIKey, &auth.APIKey{ID: "test-admin-key", AgentAddr: "0x0000000000000000000000000000000000000001"})
 
 	result := checkOwnership(c, "ten_b")
 	assert.True(t, result)

@@ -2,6 +2,8 @@
 package ratelimit
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"sync"
@@ -138,9 +140,11 @@ func (l *Limiter) Middleware() gin.HandlerFunc {
 			key = c.Request.RemoteAddr
 		}
 
-		// Allow authenticated requests higher limits
+		// Allow authenticated requests higher limits.
+		// Use a hash of the key to avoid storing auth material in memory.
 		if apiKey := c.GetHeader("Authorization"); apiKey != "" {
-			key = "auth:" + apiKey[:min(20, len(apiKey))]
+			h := sha256.Sum256([]byte(apiKey))
+			key = "auth:" + hex.EncodeToString(h[:8])
 		}
 
 		if !l.Allow(key) {

@@ -2,11 +2,15 @@
 package security
 
 import (
+	"os"
+
 	"github.com/gin-gonic/gin"
 )
 
 // HeadersMiddleware adds security headers to all responses
 func HeadersMiddleware() gin.HandlerFunc {
+	isProduction := os.Getenv("ENV") == "production"
+
 	return func(c *gin.Context) {
 		// Prevent MIME type sniffing
 		c.Header("X-Content-Type-Options", "nosniff")
@@ -27,6 +31,11 @@ func HeadersMiddleware() gin.HandlerFunc {
 		// Permissions Policy
 		c.Header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
 
+		// HTTP Strict Transport Security — tell browsers to always use HTTPS.
+		if isProduction {
+			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+
 		c.Next()
 	}
 }
@@ -41,13 +50,16 @@ func CORSMiddleware(allowedOrigins []string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
 
+		// Always set Vary: Origin so CDN/proxy caches key on origin.
+		c.Header("Vary", "Origin")
+
 		// Check if origin is allowed
 		if len(allowedOrigins) == 0 || originsMap[origin] || originsMap["*"] {
 			if origin != "" {
 				c.Header("Access-Control-Allow-Origin", origin)
 			}
 			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
+			c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID, X-API-Key, X-Admin-Secret")
 			c.Header("Access-Control-Max-Age", "86400")
 			// Only set Allow-Credentials when NOT using wildcard origins
 			// (wildcard + credentials is a security vulnerability per CORS spec)

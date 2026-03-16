@@ -48,6 +48,7 @@ const (
 	EventAgentJoined EventType = "agent_joined"
 	EventMilestone   EventType = "milestone"
 	EventPriceAlert  EventType = "price_alert"
+	EventCoalition   EventType = "coalition"
 )
 
 // Event represents a real-time event
@@ -270,6 +271,15 @@ func (h *Hub) BroadcastTransaction(tx map[string]interface{}) {
 	})
 }
 
+// BroadcastCoalition sends a coalition lifecycle event.
+func (h *Hub) BroadcastCoalition(data map[string]interface{}) {
+	h.Broadcast(&Event{
+		Type:      EventCoalition,
+		Timestamp: time.Now(),
+		Data:      data,
+	})
+}
+
 // Stats returns hub statistics
 func (h *Hub) Stats() map[string]interface{} {
 	h.mu.RLock()
@@ -347,9 +357,19 @@ func (c *Client) readPump() {
 			break
 		}
 
-		// Parse subscription update
+		// Parse subscription update — cap filter array sizes to prevent DoS.
 		var sub Subscription
 		if err := json.Unmarshal(message, &sub); err == nil {
+			const maxFilterEntries = 100
+			if len(sub.EventTypes) > maxFilterEntries {
+				sub.EventTypes = sub.EventTypes[:maxFilterEntries]
+			}
+			if len(sub.AgentAddrs) > maxFilterEntries {
+				sub.AgentAddrs = sub.AgentAddrs[:maxFilterEntries]
+			}
+			if len(sub.ServiceTypes) > maxFilterEntries {
+				sub.ServiceTypes = sub.ServiceTypes[:maxFilterEntries]
+			}
 			c.mu.Lock()
 			c.sub = sub
 			c.mu.Unlock()

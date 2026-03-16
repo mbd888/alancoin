@@ -146,6 +146,33 @@ var (
 		Buckets:   []float64{10, 30, 60, 120, 300, 600, 1800, 3600, 86400},
 	})
 
+	// --- Coalition escrow metrics ---
+
+	CoalitionCreatedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "coalition_created_total",
+		Help:      "Total coalition escrows created.",
+	})
+
+	CoalitionSettledTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "coalition_settled_total",
+		Help:      "Total coalition escrows settled by oracle.",
+	})
+
+	CoalitionExpiredTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "coalition_expired_total",
+		Help:      "Total coalition escrows auto-expired.",
+	})
+
+	CoalitionDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "alancoin",
+		Name:      "coalition_duration_seconds",
+		Help:      "Time from coalition creation to settlement in seconds.",
+		Buckets:   []float64{10, 30, 60, 120, 300, 600, 1800, 3600, 86400},
+	})
+
 	// --- Session key metrics (extended) ---
 
 	SessionKeyTransactionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
@@ -175,6 +202,10 @@ func init() {
 		EscrowDisputedTotal,
 		EscrowAutoReleasedTotal,
 		EscrowDuration,
+		CoalitionCreatedTotal,
+		CoalitionSettledTotal,
+		CoalitionExpiredTotal,
+		CoalitionDuration,
 		SessionKeyTransactionsTotal,
 	)
 }

@@ -29,6 +29,11 @@ type EscrowService interface {
 	ForceCloseExpired(ctx context.Context) (int, error)
 }
 
+// CoalitionService abstracts coalition escrow operations for admin handlers.
+type CoalitionService interface {
+	ForceCloseExpired(ctx context.Context) (int, error)
+}
+
 // StreamService abstracts stream operations for admin handlers.
 type StreamService interface {
 	ForceCloseStale(ctx context.Context) (int, error)
@@ -59,6 +64,7 @@ type GatewayStoreAdmin interface {
 type Handler struct {
 	gwService      GatewayService
 	escrowForce    EscrowService
+	coalitionForce CoalitionService
 	streamForce    StreamService
 	reconciler     ReconciliationRunner
 	denialExport   DenialExporter
@@ -79,6 +85,12 @@ func (h *Handler) WithGatewayService(svc GatewayService) *Handler {
 // WithEscrowService sets the escrow service for force-close operations.
 func (h *Handler) WithEscrowService(svc EscrowService) *Handler {
 	h.escrowForce = svc
+	return h
+}
+
+// WithCoalitionService sets the coalition service for force-close operations.
+func (h *Handler) WithCoalitionService(svc CoalitionService) *Handler {
+	h.coalitionForce = svc
 	return h
 }
 
@@ -120,6 +132,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.POST("/admin/gateway/sessions/:id/resolve", h.resolveSession)
 	r.POST("/admin/gateway/sessions/:id/retry-settlement", h.retrySettlement)
 	r.POST("/admin/escrow/force-close-expired", h.forceCloseExpiredEscrows)
+	r.POST("/admin/coalitions/force-close-expired", h.forceCloseExpiredCoalitions)
 	r.POST("/admin/streams/force-close-stale", h.forceCloseStaleStreams)
 	r.POST("/admin/reconcile", h.triggerReconciliation)
 	r.GET("/admin/denials/export", h.exportDenials)
@@ -223,6 +236,22 @@ func (h *Handler) forceCloseExpiredEscrows(c *gin.Context) {
 	closed, err := h.escrowForce.ForceCloseExpired(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to force-close escrows", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"closedCount": closed})
+}
+
+// forceCloseExpiredCoalitions force-closes all expired coalition escrows.
+func (h *Handler) forceCloseExpiredCoalitions(c *gin.Context) {
+	if h.coalitionForce == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "coalition service not configured"})
+		return
+	}
+
+	closed, err := h.coalitionForce.ForceCloseExpired(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to force-close coalitions", "message": err.Error()})
 		return
 	}
 

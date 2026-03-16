@@ -57,7 +57,8 @@ type Config struct {
 	ReceiptHMACSecret string // HMAC secret for signing payment receipts (optional)
 
 	// Gateway proxy settings
-	AllowLocalEndpoints bool // Allow localhost/private endpoints (for demos and local development)
+	AllowLocalEndpoints bool   // Allow localhost/private endpoints (for demos and local development)
+	CORSAllowedOrigins  string // Comma-separated allowed CORS origins (empty = allow all in dev, reject in production)
 
 	// Database pool settings
 	DBMaxOpenConns     int
@@ -162,6 +163,7 @@ func Load() (*Config, error) {
 		OTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 
 		AllowLocalEndpoints: os.Getenv("ALLOW_LOCAL_ENDPOINTS") == "true",
+		CORSAllowedOrigins:  os.Getenv("CORS_ALLOWED_ORIGINS"),
 
 		StripeSecretKey:         os.Getenv("STRIPE_SECRET_KEY"),
 		StripeWebhookSecret:     os.Getenv("STRIPE_WEBHOOK_SECRET"),
@@ -220,6 +222,11 @@ func (c *Config) Validate() error {
 	// Warnings (non-fatal)
 	if c.IsProduction() && c.AdminSecret == "" {
 		slog.Warn("ADMIN_SECRET not set — admin endpoints accept any authenticated request")
+	}
+
+	// Reject DEMO_MODE in production — prevents accidental admin access bypass.
+	if c.IsProduction() && os.Getenv("DEMO_MODE") == "true" {
+		return fmt.Errorf("DEMO_MODE=true is not allowed when ENV=production")
 	}
 
 	return nil

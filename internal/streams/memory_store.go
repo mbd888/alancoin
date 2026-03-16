@@ -51,7 +51,10 @@ func (m *MemoryStore) Update(_ context.Context, stream *Stream) error {
 	if _, ok := m.streams[stream.ID]; !ok {
 		return ErrStreamNotFound
 	}
-	m.streams[stream.ID] = stream
+	// Store a deep copy to prevent the caller's retained pointer from
+	// mutating the stored state outside the lock.
+	cp := *stream
+	m.streams[stream.ID] = &cp
 	return nil
 }
 

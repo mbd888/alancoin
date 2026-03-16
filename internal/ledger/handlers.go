@@ -308,28 +308,30 @@ func (h *Handler) RequestWithdrawal(c *gin.Context) {
 		return
 	}
 
-	// No executor - check balance before accepting
-	canSpend, err := h.ledger.CanSpend(c.Request.Context(), address, req.Amount)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "balance_error",
-			"message": "Failed to check balance",
-		})
-		return
-	}
-	if !canSpend {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "insufficient_balance",
-			"message": "Insufficient balance for withdrawal",
-		})
+	// No executor — hold funds atomically to prevent TOCTOU double-spend.
+	// The hold will be released or confirmed when the withdrawal is processed out-of-band.
+	holdRef := "withdrawal:" + address + ":" + idgen.WithPrefix("wd_")
+	if err := h.ledger.Hold(c.Request.Context(), address, req.Amount, holdRef); err != nil {
+		if err == ErrInsufficientBalance {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "insufficient_balance",
+				"message": "Insufficient balance for withdrawal",
+			})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "balance_error",
+				"message": "Failed to reserve funds for withdrawal",
+			})
+		}
 		return
 	}
 
-	// No executor - return pending status
+	// Funds are now locked — return pending status
 	c.JSON(http.StatusAccepted, gin.H{
 		"status":  "pending",
-		"message": "Withdrawal request received",
+		"message": "Withdrawal request received — funds held pending processing",
 		"amount":  req.Amount,
+		"holdRef": holdRef,
 		"note":    "Withdrawals are processed within 24 hours",
 	})
 }
