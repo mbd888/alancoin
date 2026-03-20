@@ -11,6 +11,7 @@ import { SessionsPage } from "@/routes/dashboard/sessions";
 import { AgentsPage } from "@/routes/dashboard/agents";
 import { AlertsPage } from "@/routes/dashboard/alerts";
 import { ChargebackPage } from "@/routes/dashboard/chargeback";
+import { CertificatesPage } from "@/routes/dashboard/certificates";
 import { ApiKeysPage } from "@/routes/settings/api-keys";
 import { SettingsPage } from "@/routes/settings/general";
 
@@ -60,6 +61,12 @@ const chargebackRoute = createRoute({
   component: ChargebackPage,
 });
 
+const certificatesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/certificates",
+  component: CertificatesPage,
+});
+
 const apiKeysRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/api-keys",
@@ -79,6 +86,7 @@ const routeTree = rootRoute.addChildren([
   agentsRoute,
   alertsRoute,
   chargebackRoute,
+  certificatesRoute,
   apiKeysRoute,
   settingsRoute,
 ]);

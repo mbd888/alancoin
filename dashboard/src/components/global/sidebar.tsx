@@ -12,6 +12,7 @@ import {
   Command,
   ShieldAlert,
   TrendingDown,
+  Shield,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
@@ -23,6 +24,7 @@ const NAV_ITEMS = [
   { divider: true as const },
   { to: "/alerts", label: "Alerts", icon: ShieldAlert },
   { to: "/chargeback", label: "Chargeback", icon: TrendingDown },
+  { to: "/certificates", label: "Certificates", icon: Shield },
   { divider: true as const },
   { to: "/api-keys", label: "API Keys", icon: Key },
   { divider: true as const },
