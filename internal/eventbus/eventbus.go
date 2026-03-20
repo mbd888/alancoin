@@ -126,7 +126,6 @@ type MemoryBus struct {
 	buffer        chan Event
 	subscriptions []subscription
 	logger        *slog.Logger
-	mu            sync.RWMutex
 	drainTimeout  time.Duration
 
 	// Dead letter queue
@@ -193,13 +192,13 @@ func (b *MemoryBus) Start(ctx context.Context) {
 
 	// Router goroutine
 	routerDone := make(chan struct{})
-	go func() {
+	go func() { //nolint:gosec // G118: intentional Background context for drain after shutdown
 		defer close(routerDone)
 		for {
 			select {
 			case <-ctx.Done():
 				// Graceful drain: read remaining events from buffer before closing
-				drainCtx, cancel := context.WithTimeout(context.Background(), b.drainTimeout)
+				drainCtx, cancel := context.WithTimeout(context.Background(), b.drainTimeout) //nolint:gosec // intentional: drain runs after request context is cancelled
 				b.drainBuffer(drainCtx, subChans)
 				cancel()
 				for _, ch := range subChans {
