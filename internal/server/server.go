@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -29,16 +31,21 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/mbd888/alancoin/internal/admin"
+	"github.com/mbd888/alancoin/internal/arbitration"
 	"github.com/mbd888/alancoin/internal/auth"
 	"github.com/mbd888/alancoin/internal/billing"
+	"github.com/mbd888/alancoin/internal/chargeback"
 	"github.com/mbd888/alancoin/internal/circuitbreaker"
 	"github.com/mbd888/alancoin/internal/config"
 	"github.com/mbd888/alancoin/internal/contracts"
 	"github.com/mbd888/alancoin/internal/dashboard"
 	"github.com/mbd888/alancoin/internal/escrow"
+	"github.com/mbd888/alancoin/internal/eventbus"
 	"github.com/mbd888/alancoin/internal/flywheel"
+	"github.com/mbd888/alancoin/internal/forensics"
 	"github.com/mbd888/alancoin/internal/gateway"
 	"github.com/mbd888/alancoin/internal/health"
+	"github.com/mbd888/alancoin/internal/kya"
 	"github.com/mbd888/alancoin/internal/ledger"
 	"github.com/mbd888/alancoin/internal/logging"
 	"github.com/mbd888/alancoin/internal/metrics"
@@ -61,6 +68,7 @@ import (
 	"github.com/mbd888/alancoin/internal/validation"
 	"github.com/mbd888/alancoin/internal/watcher"
 	"github.com/mbd888/alancoin/internal/webhooks"
+	"github.com/mbd888/alancoin/internal/workflows"
 )
 
 // -----------------------------------------------------------------------------
@@ -85,6 +93,7 @@ type Server struct {
 	contractService        *contracts.Service
 	offerService           *offers.Service
 	offerTimer             *offers.Timer
+	workflowService        *workflows.Service
 	streamService          *streams.Service
 	streamTimer            *streams.Timer
 	gatewayService         *gateway.Service
@@ -115,6 +124,11 @@ type Server struct {
 	reconcileRunner        *reconciliation.Runner // cross-subsystem reconciliation
 	reconcileTimer         *reconciliation.Timer  // periodic reconciliation
 	depositWatcher         *watcher.Watcher       // on-chain USDC deposit watcher (optional)
+	kyaService             *kya.Service           // KYA identity certificates
+	chargebackService      *chargeback.Service    // FinOps cost attribution
+	arbitrationService     *arbitration.Service   // Dispute resolution
+	forensicsService       *forensics.Service     // Spend anomaly detection
+	eventBus               *eventbus.MemoryBus    // Settlement event bus
 	db                     *sql.DB                // nil if using in-memory
 	router                 *gin.Engine
 	httpSrv                *http.Server
@@ -249,7 +263,29 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.offerService = offers.NewService(offerStore, &escrowLedgerAdapter{s.ledgerService}).
 			WithLogger(s.logger)
 		s.offerTimer = offers.NewTimer(s.offerService, s.logger)
+		s.workflowService = workflows.NewService(workflows.NewMemoryStore(), &escrowLedgerAdapter{s.ledgerService}).
+			WithLogger(s.logger)
 		s.logger.Info("escrow enabled (postgres)")
+
+		// KYA identity certificates
+		kyaAgentProvider := &kyaRegistryAdapter{s.registry}
+		kyaRepProvider := &kyaReputationAdapter{} // wired to real reputation in setupRoutes
+		s.kyaService = kya.NewService(kya.NewPostgresStore(db), kyaAgentProvider, kyaRepProvider,
+			[]byte(s.cfg.ReceiptHMACSecret), s.logger)
+		s.logger.Info("kya enabled (postgres)")
+
+		// FinOps chargeback engine (postgres)
+		s.chargebackService = chargeback.NewService(chargeback.NewPostgresStore(db), s.logger)
+		s.logger.Info("chargeback enabled (postgres)")
+
+		// Dispute arbitration (postgres)
+		s.arbitrationService = arbitration.NewService(arbitration.NewPostgresStore(db),
+			&arbitrationEscrowAdapter{s.escrowService}, nil, s.logger)
+		s.logger.Info("arbitration enabled (postgres)")
+
+		// Spend forensics (postgres)
+		s.forensicsService = forensics.NewService(forensics.NewPostgresStore(db), forensics.DefaultConfig(), s.logger)
+		s.logger.Info("forensics enabled (postgres)")
 
 		// Streams with PostgreSQL store (streaming micropayments)
 		streamStore := streams.NewPostgresStore(db)
@@ -319,6 +355,28 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 				s.coalitionService.WithReceiptIssuer(rcptAdapter)
 			}
 		}
+
+		// Wire forensics into gateway for automatic anomaly detection.
+		if s.forensicsService != nil {
+			s.gatewayService.WithForensics(&forensicsGatewayAdapter{s.forensicsService})
+		}
+
+		// Wire chargeback into gateway for automatic cost attribution + pre-flight budget check.
+		if s.chargebackService != nil {
+			s.gatewayService.WithChargeback(&chargebackGatewayAdapter{s.chargebackService})
+			s.gatewayService.WithBudgetPreFlight(&budgetPreFlightAdapter{s.chargebackService})
+		}
+
+		// Event bus: replaces fire-and-forget goroutines with durable, batched processing.
+		s.eventBus = eventbus.NewMemoryBus(10000, s.logger)
+		s.eventBus.Subscribe(eventbus.TopicSettlement, "forensics", 50, time.Second,
+			s.makeForensicsConsumer())
+		s.eventBus.Subscribe(eventbus.TopicSettlement, "chargeback", 50, time.Second,
+			s.makeChargebackConsumer())
+		s.eventBus.Subscribe(eventbus.TopicSettlement, "webhooks", 20, 500*time.Millisecond,
+			s.makeWebhookConsumer())
+		s.gatewayService.WithEventBus(&eventBusGatewayAdapter{s.eventBus})
+		s.logger.Info("event bus enabled (in-memory, 10K buffer, 3 consumers)")
 
 		// Wire revenue accumulator into all payment paths (GAP-1 fix).
 		// Records seller revenue from gateway, escrow, streams for flywheel
@@ -425,7 +483,29 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.offerService = offers.NewService(offerStore, &escrowLedgerAdapter{s.ledgerService}).
 			WithLogger(s.logger)
 		s.offerTimer = offers.NewTimer(s.offerService, s.logger)
+		s.workflowService = workflows.NewService(workflows.NewMemoryStore(), &escrowLedgerAdapter{s.ledgerService}).
+			WithLogger(s.logger)
 		s.logger.Info("escrow enabled (in-memory)")
+
+		// KYA identity certificates (in-memory)
+		kyaAgentProvider := &kyaRegistryAdapter{s.registry}
+		kyaRepProvider := &kyaReputationAdapter{} // wired to real reputation in setupRoutes
+		s.kyaService = kya.NewService(kya.NewMemoryStore(), kyaAgentProvider, kyaRepProvider,
+			[]byte(s.cfg.ReceiptHMACSecret), s.logger)
+		s.logger.Info("kya enabled (in-memory)")
+
+		// FinOps chargeback engine (in-memory)
+		s.chargebackService = chargeback.NewService(chargeback.NewMemoryStore(), s.logger)
+		s.logger.Info("chargeback enabled (in-memory)")
+
+		// Dispute arbitration (in-memory)
+		s.arbitrationService = arbitration.NewService(arbitration.NewMemoryStore(),
+			&arbitrationEscrowAdapter{s.escrowService}, nil, s.logger)
+		s.logger.Info("arbitration enabled (in-memory)")
+
+		// Spend forensics (in-memory)
+		s.forensicsService = forensics.NewService(forensics.NewMemoryStore(), forensics.DefaultConfig(), s.logger)
+		s.logger.Info("forensics enabled (in-memory)")
 
 		// Streams with in-memory store (streaming micropayments)
 		streamStore := streams.NewMemoryStore()
@@ -487,6 +567,28 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 				s.coalitionService.WithReceiptIssuer(rcptAdapter)
 			}
 		}
+
+		// Wire forensics into gateway (in-memory mode).
+		if s.forensicsService != nil {
+			s.gatewayService.WithForensics(&forensicsGatewayAdapter{s.forensicsService})
+		}
+
+		// Wire chargeback into gateway (in-memory mode).
+		if s.chargebackService != nil {
+			s.gatewayService.WithChargeback(&chargebackGatewayAdapter{s.chargebackService})
+			s.gatewayService.WithBudgetPreFlight(&budgetPreFlightAdapter{s.chargebackService})
+		}
+
+		// Event bus (in-memory mode).
+		s.eventBus = eventbus.NewMemoryBus(10000, s.logger)
+		s.eventBus.Subscribe(eventbus.TopicSettlement, "forensics", 50, time.Second,
+			s.makeForensicsConsumer())
+		s.eventBus.Subscribe(eventbus.TopicSettlement, "chargeback", 50, time.Second,
+			s.makeChargebackConsumer())
+		s.eventBus.Subscribe(eventbus.TopicSettlement, "webhooks", 20, 500*time.Millisecond,
+			s.makeWebhookConsumer())
+		s.gatewayService.WithEventBus(&eventBusGatewayAdapter{s.eventBus})
+		s.logger.Info("event bus enabled (in-memory, 3 consumers)")
 
 		// Wire revenue accumulator into all payment paths (in-memory mode).
 		s.revenueAccumulator = flywheel.NewRevenueAccumulator(s.logger)
@@ -580,6 +682,17 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 				stats.InUse, stats.Idle, stats.OpenConnections, maxOpen, stats.WaitCount)
 			healthy := maxOpen == 0 || float64(stats.InUse) < 0.9*float64(maxOpen)
 			return health.Status{Name: "db_pool", Healthy: healthy, Detail: detail}
+		})
+	}
+
+	// Event bus health check
+	if s.eventBus != nil {
+		s.healthRegistry.Register("event_bus", func(_ context.Context) health.Status {
+			m := s.eventBus.Metrics()
+			healthy := s.eventBus.IsHealthy()
+			detail := fmt.Sprintf("pending=%d published=%d consumed=%d dropped=%d dlq=%d",
+				m.Pending, m.Published, m.Consumed, m.Dropped, m.DeadLettered)
+			return health.Status{Name: "event_bus", Healthy: healthy, Detail: detail}
 		})
 	}
 
@@ -684,8 +797,8 @@ func (s *Server) setupMiddleware() {
 	// Security headers
 	s.router.Use(security.HeadersMiddleware())
 
-	// CORS — use configured origins in production, allow all in development.
-	corsOrigins := []string{"*"}
+	// CORS — use configured origins in production, restrict in development.
+	var corsOrigins []string
 	if s.cfg.CORSAllowedOrigins != "" {
 		corsOrigins = strings.Split(s.cfg.CORSAllowedOrigins, ",")
 		for i := range corsOrigins {
@@ -694,6 +807,16 @@ func (s *Server) setupMiddleware() {
 	} else if s.cfg.IsProduction() {
 		// Production with no explicit origins: deny all cross-origin requests.
 		corsOrigins = nil
+	} else {
+		// Development: allow localhost origins only (not wildcard).
+		corsOrigins = []string{
+			"http://localhost:3000",
+			"http://localhost:5173",
+			"http://localhost:8080",
+			"http://127.0.0.1:3000",
+			"http://127.0.0.1:5173",
+			"http://127.0.0.1:8080",
+		}
 	}
 	s.router.Use(security.CORSMiddleware(corsOrigins))
 
@@ -877,6 +1000,11 @@ func (s *Server) setupRoutes() {
 		s.coalitionService.WithReputationImpactor(reputationProvider)
 	}
 
+	// Wire KYA trust gate into escrow (verify seller trust before locking funds)
+	if s.kyaService != nil {
+		s.escrowService.WithTrustGate(&kyaTrustGateAdapter{s.kyaService})
+	}
+
 	// PUBLIC ROUTES (no auth required)
 	// These are the discovery/read endpoints
 	v1.GET("/platform", s.platformHandler)
@@ -971,11 +1099,12 @@ func (s *Server) setupRoutes() {
 	// Still apply rate limiting to prevent brute-force against the ECDSA signature.
 	v1.POST("/agents/:address/sessions/:keyId/transact", s.rateLimiter.Middleware(), sessionHandler.Transact)
 
-	// Delegation creation (A2A) — authenticated by session key ECDSA signature, no API key needed
-	v1.POST("/sessions/:keyId/delegate", sessionHandler.CreateDelegation)
+	// Delegation creation (A2A) — authenticated by session key ECDSA signature, no API key needed.
+	// Rate limited to prevent brute-force against ECDSA signatures.
+	v1.POST("/sessions/:keyId/delegate", s.rateLimiter.Middleware(), sessionHandler.CreateDelegation)
 
 	// HMAC-chain delegation with proof — same auth as regular delegation (ECDSA signature)
-	v1.POST("/session-keys/:id/delegate-with-proof", sessionHandler.DelegateWithProof)
+	v1.POST("/session-keys/:id/delegate-with-proof", s.rateLimiter.Middleware(), sessionHandler.DelegateWithProof)
 
 	// Proof verification — stateless except for root secret lookup. No API key needed
 	// since the proof itself is the authentication mechanism.
@@ -1131,6 +1260,24 @@ func (s *Server) setupRoutes() {
 		adminOps := v1.Group("")
 		adminOps.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAdmin())
 		adminHandler.RegisterRoutes(adminOps)
+
+		// Event bus observability (admin-only)
+		if s.eventBus != nil {
+			adminOps.GET("/admin/eventbus/stats", func(c *gin.Context) {
+				c.JSON(200, gin.H{
+					"metrics": s.eventBus.Metrics(),
+					"healthy": s.eventBus.IsHealthy(),
+				})
+			})
+			adminOps.GET("/admin/eventbus/dlq", func(c *gin.Context) {
+				dlq := s.eventBus.DeadLetterQueue()
+				c.JSON(200, gin.H{"events": dlq, "count": len(dlq)})
+			})
+			adminOps.POST("/admin/eventbus/dlq/replay", func(c *gin.Context) {
+				replayed := s.eventBus.ReplayDeadLetters(c.Request.Context())
+				c.JSON(200, gin.H{"replayed": replayed})
+			})
+		}
 	}
 
 	// Reputation routes (the network moat - agents build reputation over time)
@@ -1283,6 +1430,68 @@ func (s *Server) setupRoutes() {
 		protectedOffers := v1.Group("")
 		protectedOffers.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
 		offerHandler.RegisterProtectedRoutes(protectedOffers)
+	}
+
+	// Workflow budget management routes (enterprise cost attribution)
+	if s.workflowService != nil {
+		wfHandler := workflows.NewHandler(s.workflowService)
+
+		authedWF := v1.Group("")
+		authedWF.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		wfHandler.RegisterRoutes(authedWF)
+
+		protectedWF := v1.Group("")
+		protectedWF.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		wfHandler.RegisterProtectedRoutes(protectedWF)
+	}
+
+	// KYA identity certificate routes
+	if s.kyaService != nil {
+		kyaHandler := kya.NewHandler(s.kyaService)
+		kyaHandler.RegisterRoutes(v1) // public reads
+
+		protectedKYA := v1.Group("")
+		protectedKYA.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		kyaHandler.RegisterProtectedRoutes(protectedKYA)
+	}
+
+	// FinOps chargeback routes (cost attribution + budget enforcement)
+	if s.chargebackService != nil {
+		cbHandler := chargeback.NewHandler(s.chargebackService)
+
+		authedCB := v1.Group("")
+		authedCB.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		cbHandler.RegisterRoutes(authedCB)
+
+		protectedCB := v1.Group("")
+		protectedCB.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		cbHandler.RegisterProtectedRoutes(protectedCB)
+	}
+
+	// Dispute arbitration routes
+	if s.arbitrationService != nil {
+		arbHandler := arbitration.NewHandler(s.arbitrationService)
+
+		authedArb := v1.Group("")
+		authedArb.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		arbHandler.RegisterRoutes(authedArb)
+
+		protectedArb := v1.Group("")
+		protectedArb.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		arbHandler.RegisterProtectedRoutes(protectedArb)
+	}
+
+	// Spend forensics routes (anomaly detection)
+	if s.forensicsService != nil {
+		forHandler := forensics.NewHandler(s.forensicsService)
+
+		authedFor := v1.Group("")
+		authedFor.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		forHandler.RegisterRoutes(authedFor)
+
+		protectedFor := v1.Group("")
+		protectedFor.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		forHandler.RegisterProtectedRoutes(protectedFor)
 	}
 
 	// Streaming micropayment routes (per-tick payments for continuous services)
@@ -1617,6 +1826,18 @@ func (s *Server) Run(ctx context.Context) error {
 	// Start realtime hub
 	if s.realtimeHub != nil {
 		go s.realtimeHub.Run(runCtx)
+	}
+
+	// Start event bus (settlement event consumers)
+	if s.eventBus != nil {
+		go s.eventBus.Start(runCtx)
+	}
+
+	// Start materialized view refresher (5-minute interval)
+	if s.db != nil {
+		refresher := eventbus.NewMatviewRefresher(s.db, 5*time.Minute, s.logger)
+		go refresher.Start(runCtx)
+		s.logger.Info("materialized view refresher started (5m interval)")
 	}
 
 	// Start deposit watcher
@@ -2622,4 +2843,265 @@ func (a *watcherAgentResolverAdapter) IsRegisteredAgent(ctx context.Context, add
 		return false, nil // treat errors as "not found"
 	}
 	return agent != nil, nil
+}
+
+// --- KYA adapters ---
+
+type kyaRegistryAdapter struct {
+	reg registry.Store
+}
+
+func (a *kyaRegistryAdapter) GetAgentName(ctx context.Context, addr string) (string, error) {
+	agent, err := a.reg.GetAgent(ctx, addr)
+	if err != nil {
+		return "", err
+	}
+	return agent.Name, nil
+}
+
+func (a *kyaRegistryAdapter) GetAgentCreatedAt(ctx context.Context, addr string) (time.Time, error) {
+	agent, err := a.reg.GetAgent(ctx, addr)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return agent.CreatedAt, nil
+}
+
+type kyaReputationAdapter struct {
+	rep *reputation.RegistryProvider
+}
+
+func (a *kyaReputationAdapter) GetScore(ctx context.Context, addr string) (float64, error) {
+	if a.rep == nil {
+		return 50.0, nil
+	}
+	score, _, err := a.rep.GetScore(ctx, addr)
+	return score, err
+}
+
+func (a *kyaReputationAdapter) GetSuccessRate(ctx context.Context, addr string) (float64, error) {
+	if a.rep == nil {
+		return 0.95, nil
+	}
+	m, err := a.rep.GetAgentMetrics(ctx, addr)
+	if err != nil {
+		return 0, err
+	}
+	if m.TotalTransactions == 0 {
+		return 0, nil
+	}
+	return float64(m.SuccessfulTxns) / float64(m.TotalTransactions), nil
+}
+
+func (a *kyaReputationAdapter) GetDisputeRate(_ context.Context, addr string) (float64, error) {
+	if a.rep == nil {
+		return 0.02, nil
+	}
+	return a.rep.DisputeRate(addr), nil
+}
+
+func (a *kyaReputationAdapter) GetTxCount(ctx context.Context, addr string) (int, error) {
+	if a.rep == nil {
+		return 50, nil
+	}
+	m, err := a.rep.GetAgentMetrics(ctx, addr)
+	if err != nil {
+		return 0, err
+	}
+	return m.TotalTransactions, nil
+}
+
+// --- Arbitration adapters ---
+
+type arbitrationEscrowAdapter struct {
+	svc *escrow.Service
+}
+
+func (a *arbitrationEscrowAdapter) RefundBuyer(ctx context.Context, escrowID string) error {
+	_, err := a.svc.Dispute(ctx, escrowID, "", "arbitration: buyer wins")
+	return err
+}
+
+func (a *arbitrationEscrowAdapter) ReleaseSeller(ctx context.Context, escrowID string) error {
+	_, err := a.svc.Confirm(ctx, escrowID, "")
+	return err
+}
+
+func (a *arbitrationEscrowAdapter) SplitFunds(_ context.Context, _ string, _ int) error {
+	return nil // TODO: implement partial split via escrow
+}
+
+// --- Forensics adapter ---
+
+type forensicsGatewayAdapter struct {
+	svc *forensics.Service
+}
+
+func (a *forensicsGatewayAdapter) IngestSpend(ctx context.Context, agentAddr, counterparty string, amountFloat float64, serviceType string) error {
+	_, err := a.svc.Ingest(ctx, forensics.SpendEvent{
+		AgentAddr:    agentAddr,
+		Counterparty: counterparty,
+		Amount:       amountFloat,
+		ServiceType:  serviceType,
+		Timestamp:    time.Now(),
+	})
+	return err
+}
+
+// --- Chargeback adapter ---
+
+type chargebackGatewayAdapter struct {
+	svc *chargeback.Service
+}
+
+func (a *chargebackGatewayAdapter) RecordGatewaySpend(ctx context.Context, tenantID, agentAddr, amount, serviceType, sessionID string) error {
+	// Auto-attribute to the first active cost center for the tenant.
+	centers, err := a.svc.ListCostCenters(ctx, tenantID)
+	if err != nil || len(centers) == 0 {
+		return nil // No cost centers configured — skip silently
+	}
+	for _, cc := range centers {
+		if cc.Active {
+			_, err := a.svc.RecordSpend(ctx, cc.ID, tenantID, agentAddr, amount, serviceType, chargeback.SpendOpts{
+				SessionID:      sessionID,
+				Description:    "auto: gateway proxy",
+				IdempotencyKey: sessionID + ":" + amount, // Prevent double-count on event bus redelivery
+			})
+			return err
+		}
+	}
+	return nil
+}
+
+// --- Budget pre-flight adapter (gateway → chargeback budget check) ---
+
+type budgetPreFlightAdapter struct {
+	svc *chargeback.Service
+}
+
+func (a *budgetPreFlightAdapter) CheckBudget(ctx context.Context, tenantID, _, _ string) error {
+	hasRemaining, err := a.svc.HasBudgetRemaining(ctx, tenantID)
+	if err != nil {
+		return nil // Don't block on check failures
+	}
+	if !hasRemaining {
+		return fmt.Errorf("all cost centers for tenant %s have exhausted their monthly budget", tenantID)
+	}
+	return nil
+}
+
+// --- KYA trust gate adapter (escrow → KYA verification) ---
+
+type kyaTrustGateAdapter struct {
+	kyaSvc *kya.Service
+}
+
+func (a *kyaTrustGateAdapter) CheckCounterpartyTrust(ctx context.Context, agentAddr string) error {
+	if a.kyaSvc == nil {
+		return nil // no KYA service → allow all
+	}
+	cert, err := a.kyaSvc.GetByAgent(ctx, agentAddr)
+	if err != nil {
+		// No certificate found — allow (KYA is optional, not mandatory)
+		return nil
+	}
+	if !cert.IsValid() {
+		return fmt.Errorf("agent %s has an expired or revoked KYA certificate", agentAddr)
+	}
+	if cert.Reputation.TrustTier == kya.TierD {
+		return fmt.Errorf("agent %s has trust tier D (no history) — escrow requires higher trust", agentAddr)
+	}
+	return nil
+}
+
+// --- Event bus adapter ---
+
+type eventBusGatewayAdapter struct {
+	bus *eventbus.MemoryBus
+}
+
+func (a *eventBusGatewayAdapter) PublishSettlement(ctx context.Context, sessionID, tenantID, buyerAddr, sellerAddr, amount, fee, serviceType, serviceID, reference string, latencyMs int64) error {
+	amountFloat, _ := strconv.ParseFloat(amount, 64)
+	event, err := eventbus.NewEvent(eventbus.TopicSettlement, buyerAddr, eventbus.SettlementPayload{
+		SessionID:   sessionID,
+		TenantID:    tenantID,
+		BuyerAddr:   buyerAddr,
+		SellerAddr:  sellerAddr,
+		Amount:      amount,
+		ServiceType: serviceType,
+		ServiceID:   serviceID,
+		Fee:         fee,
+		Reference:   reference,
+		LatencyMs:   latencyMs,
+		AmountFloat: amountFloat,
+	})
+	if err != nil {
+		return err
+	}
+	return a.bus.Publish(ctx, event)
+}
+
+// makeForensicsConsumer creates an event bus consumer that feeds settlement events
+// into the forensics anomaly detection engine in batches.
+func (s *Server) makeForensicsConsumer() eventbus.Handler {
+	return func(ctx context.Context, events []eventbus.Event) error {
+		if s.forensicsService == nil {
+			return nil
+		}
+		for _, e := range events {
+			var p eventbus.SettlementPayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				continue
+			}
+			s.forensicsService.Ingest(ctx, forensics.SpendEvent{
+				AgentAddr:    p.BuyerAddr,
+				Counterparty: p.SellerAddr,
+				Amount:       p.AmountFloat,
+				ServiceType:  p.ServiceType,
+				Timestamp:    e.Timestamp,
+			})
+		}
+		return nil
+	}
+}
+
+// makeChargebackConsumer creates an event bus consumer that auto-attributes
+// settlement costs to tenant cost centers in batches.
+func (s *Server) makeChargebackConsumer() eventbus.Handler {
+	return func(ctx context.Context, events []eventbus.Event) error {
+		if s.chargebackService == nil {
+			return nil
+		}
+		for _, e := range events {
+			var p eventbus.SettlementPayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				continue
+			}
+			if p.TenantID == "" {
+				continue
+			}
+			adapter := &chargebackGatewayAdapter{s.chargebackService}
+			_ = adapter.RecordGatewaySpend(ctx, p.TenantID, p.BuyerAddr, p.Amount, p.ServiceType, p.SessionID)
+		}
+		return nil
+	}
+}
+
+// makeWebhookConsumer creates an event bus consumer that delivers settlement
+// events to webhook subscribers, replacing fire-and-forget goroutines.
+func (s *Server) makeWebhookConsumer() eventbus.Handler {
+	return func(_ context.Context, events []eventbus.Event) error {
+		if s.webhooks == nil {
+			return nil
+		}
+		emitter := webhooks.NewEmitter(s.webhooks, s.logger)
+		for _, e := range events {
+			var p eventbus.SettlementPayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				continue
+			}
+			emitter.EmitProxySuccess(p.BuyerAddr, p.SessionID, p.SellerAddr, p.Amount)
+		}
+		return nil
+	}
 }

@@ -231,6 +231,12 @@ type WebhookEmitter interface {
 	EmitEscrowDisputed(sellerAddr, escrowID, buyerAddr, reason string)
 }
 
+// TrustGate checks counterparty trust before creating escrows.
+// Returns nil if the counterparty is trusted, or an error with the reason.
+type TrustGate interface {
+	CheckCounterpartyTrust(ctx context.Context, agentAddr string) error
+}
+
 // CreateRequest contains the parameters for creating an escrow.
 type CreateRequest struct {
 	BuyerAddr    string `json:"buyerAddr" binding:"required"`
@@ -274,6 +280,7 @@ type Service struct {
 	reputation     ReputationImpactor
 	receiptIssuer  ReceiptIssuer
 	webhookEmitter WebhookEmitter
+	trustGate      TrustGate // KYA trust verification before escrow creation
 	logger         *slog.Logger
 	locks          sync.Map // per-escrow ID locks to prevent race conditions
 }
@@ -335,6 +342,13 @@ func (s *Service) WithWebhookEmitter(e WebhookEmitter) *Service {
 	return s
 }
 
+// WithTrustGate adds KYA trust verification before escrow creation.
+// When configured, the seller's trust tier is checked before funds are locked.
+func (s *Service) WithTrustGate(tg TrustGate) *Service {
+	s.trustGate = tg
+	return s
+}
+
 // validateAmount checks that the amount string is a positive number within NUMERIC(20,6) range.
 func validateAmount(amount string) error {
 	amount = strings.TrimSpace(amount)
@@ -375,6 +389,15 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Escrow, error
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid amount")
 		return nil, err
+	}
+
+	// KYA trust gate: verify seller's trust tier before creating escrow.
+	// This prevents transactions with untrusted or revoked agents.
+	if s.trustGate != nil {
+		if err := s.trustGate.CheckCounterpartyTrust(ctx, req.SellerAddr); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("escrow: seller trust check failed: %w", err)
+		}
 	}
 
 	autoRelease := DefaultAutoRelease

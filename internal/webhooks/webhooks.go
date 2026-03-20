@@ -62,6 +62,21 @@ const (
 	EventStreamOpened  EventType = "stream.opened"
 	EventStreamClosed  EventType = "stream.closed"
 	EventStreamSettled EventType = "stream.settled"
+
+	// KYA identity events
+	EventKYAIssued  EventType = "kya.certificate.issued"
+	EventKYARevoked EventType = "kya.certificate.revoked"
+
+	// Chargeback events
+	EventChargebackBudgetWarning  EventType = "chargeback.budget.warning"
+	EventChargebackBudgetExceeded EventType = "chargeback.budget.exceeded"
+
+	// Arbitration events
+	EventArbitrationCaseFiled    EventType = "arbitration.case.filed"
+	EventArbitrationCaseResolved EventType = "arbitration.case.resolved"
+
+	// Forensics events
+	EventForensicsAlertCritical EventType = "forensics.alert.critical"
 )
 
 // Event represents a webhook event

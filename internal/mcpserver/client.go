@@ -44,6 +44,16 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
+// Get makes a GET request to the platform API.
+func (c *AlancoinClient) Get(ctx context.Context, path string) (json.RawMessage, error) {
+	return c.doRequest(ctx, http.MethodGet, path, nil, nil)
+}
+
+// Post makes a POST request to the platform API with a JSON body.
+func (c *AlancoinClient) Post(ctx context.Context, path string, body any) (json.RawMessage, error) {
+	return c.doRequest(ctx, http.MethodPost, path, nil, body)
+}
+
 // doRequest makes an HTTP request to the platform and returns the response body.
 func (c *AlancoinClient) doRequest(ctx context.Context, method, path string, query url.Values, body any) (json.RawMessage, error) {
 	u, err := url.Parse(c.cfg.APIURL + path)

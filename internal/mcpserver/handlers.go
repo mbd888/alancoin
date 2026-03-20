@@ -232,6 +232,190 @@ func (h *Handlers) HandleDisputeEscrow(ctx context.Context, req mcp.CallToolRequ
 		escrowID, reason)), nil
 }
 
+// --- Enterprise Plugin Handlers ---
+
+// HandleVerifyAgent checks an agent's KYA identity certificate.
+func (h *Handlers) HandleVerifyAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	addr := req.GetString("agent_address", "")
+	if addr == "" {
+		return mcp.NewToolResultError("agent_address is required"), nil
+	}
+
+	raw, err := h.client.Get(ctx, "/kya/agents/"+addr)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Agent not verified or no certificate found: %v", err)), nil
+	}
+
+	var resp struct {
+		Certificate map[string]any `json:"certificate"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil || resp.Certificate == nil {
+		return mcp.NewToolResultText("No KYA certificate found for this agent. Exercise caution."), nil
+	}
+
+	c := resp.Certificate
+	var sb strings.Builder
+	sb.WriteString("KYA Identity Certificate:\n")
+	fmt.Fprintf(&sb, "  DID: %s\n", getString(c, "did"))
+	fmt.Fprintf(&sb, "  Status: %s\n", getString(c, "status"))
+
+	if rep, ok := c["reputation"].(map[string]any); ok {
+		fmt.Fprintf(&sb, "  Trust Tier: %s\n", getString(rep, "trustTier"))
+		if score, ok := getFloat(rep, "traceRankScore"); ok {
+			fmt.Fprintf(&sb, "  TraceRank Score: %.1f\n", score)
+		}
+		if rate, ok := getFloat(rep, "successRate"); ok {
+			fmt.Fprintf(&sb, "  Success Rate: %.0f%%\n", rate*100)
+		}
+	}
+
+	if org, ok := c["org"].(map[string]any); ok {
+		fmt.Fprintf(&sb, "  Organization: %s\n", getString(org, "orgName"))
+	}
+
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
+// HandleCheckBudget checks a cost center's remaining budget.
+func (h *Handlers) HandleCheckBudget(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ccID := req.GetString("cost_center_id", "")
+	if ccID == "" {
+		return mcp.NewToolResultError("cost_center_id is required"), nil
+	}
+
+	raw, err := h.client.Get(ctx, "/chargeback/cost-centers/"+ccID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to check budget: %v", err)), nil
+	}
+
+	var resp struct {
+		CostCenter map[string]any `json:"costCenter"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil || resp.CostCenter == nil {
+		return mcp.NewToolResultError("Cost center not found"), nil
+	}
+
+	cc := resp.CostCenter
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Cost Center: %s\n", getString(cc, "name"))
+	fmt.Fprintf(&sb, "  Department: %s\n", getString(cc, "department"))
+	fmt.Fprintf(&sb, "  Monthly Budget: %s USDC\n", getString(cc, "monthlyBudget"))
+	if active, ok := cc["active"].(bool); ok {
+		fmt.Fprintf(&sb, "  Active: %v\n", active)
+	}
+
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
+// HandleFileDispute files a formal arbitration case.
+func (h *Handlers) HandleFileDispute(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	escrowID := req.GetString("escrow_id", "")
+	if escrowID == "" {
+		return mcp.NewToolResultError("escrow_id is required"), nil
+	}
+	sellerAddr := req.GetString("seller_address", "")
+	if sellerAddr == "" {
+		return mcp.NewToolResultError("seller_address is required"), nil
+	}
+	amount := req.GetString("amount", "")
+	if amount == "" {
+		return mcp.NewToolResultError("amount is required"), nil
+	}
+	reason := req.GetString("reason", "")
+	if reason == "" {
+		return mcp.NewToolResultError("reason is required"), nil
+	}
+	contractID := req.GetString("contract_id", "")
+
+	body := map[string]any{
+		"escrowId":   escrowID,
+		"buyerAddr":  h.client.cfg.AgentAddress,
+		"sellerAddr": sellerAddr,
+		"amount":     amount,
+		"reason":     reason,
+	}
+	if contractID != "" {
+		body["contractId"] = contractID
+	}
+
+	raw, err := h.client.Post(ctx, "/arbitration/cases", body)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to file dispute: %v", err)), nil
+	}
+
+	var resp struct {
+		Case map[string]any `json:"case"`
+	}
+	if err := json.Unmarshal(raw, &resp); err == nil && resp.Case != nil {
+		caseID := getString(resp.Case, "id")
+		autoResolvable := false
+		if v, ok := resp.Case["autoResolvable"].(bool); ok {
+			autoResolvable = v
+		}
+
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Arbitration case filed successfully.\n")
+		fmt.Fprintf(&sb, "  Case ID: %s\n", caseID)
+		fmt.Fprintf(&sb, "  Status: open\n")
+		fmt.Fprintf(&sb, "  Fee: %s USDC\n", getString(resp.Case, "fee"))
+		if autoResolvable {
+			sb.WriteString("  Auto-resolution will be attempted using the behavioral contract.\n")
+		} else {
+			sb.WriteString("  A human arbiter will be assigned to review the case.\n")
+		}
+		return mcp.NewToolResultText(sb.String()), nil
+	}
+
+	return mcp.NewToolResultText("Dispute filed. Check case status via the API."), nil
+}
+
+// HandleGetAlerts retrieves spend anomaly alerts.
+func (h *Handlers) HandleGetAlerts(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	severity := req.GetString("severity", "")
+	limit := 10
+	if v := req.GetArguments()["limit"]; v != nil {
+		if f, ok := v.(float64); ok {
+			limit = int(f)
+		}
+	}
+
+	path := fmt.Sprintf("/forensics/agents/%s/alerts?limit=%d", h.client.cfg.AgentAddress, limit)
+	if severity != "" {
+		path += "&severity=" + severity
+	}
+
+	raw, err := h.client.Get(ctx, path)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to get alerts: %v", err)), nil
+	}
+
+	var resp struct {
+		Alerts []map[string]any `json:"alerts"`
+		Count  int              `json:"count"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return mcp.NewToolResultText("No alerts found."), nil
+	}
+
+	if resp.Count == 0 {
+		return mcp.NewToolResultText("No spend anomaly alerts. All clear."), nil
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%d alert(s) found:\n\n", resp.Count)
+	for i, a := range resp.Alerts {
+		fmt.Fprintf(&sb, "%d. [%s] %s\n", i+1,
+			strings.ToUpper(getString(a, "severity")),
+			getString(a, "message"))
+		fmt.Fprintf(&sb, "   Type: %s | Score: %s\n", getString(a, "type"), getString(a, "score"))
+		if i < len(resp.Alerts)-1 {
+			sb.WriteString("\n")
+		}
+	}
+
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
 // --- Formatting helpers ---
 
 type serviceInfo struct {

@@ -19,5 +19,11 @@ func NewMCPServer(cfg Config) *server.MCPServer {
 	s.AddTool(ToolPayAgent, h.HandlePayAgent)
 	s.AddTool(ToolDisputeEscrow, h.HandleDisputeEscrow)
 
+	// Enterprise plugin tools
+	s.AddTool(ToolVerifyAgent, h.HandleVerifyAgent)
+	s.AddTool(ToolCheckBudget, h.HandleCheckBudget)
+	s.AddTool(ToolFileDispute, h.HandleFileDispute)
+	s.AddTool(ToolGetAlerts, h.HandleGetAlerts)
+
 	return s
 }

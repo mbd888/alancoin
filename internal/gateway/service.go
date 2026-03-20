@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/big"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -194,6 +195,10 @@ type Service struct {
 	healthMonitor   *HealthMonitor     // per-provider health tracking
 	healthRouter    *HealthAwareRouter // graph-based health-aware routing
 	racer           *RACER             // RACER calibrated expansion routing
+	forensics       ForensicsIngestor  // spend anomaly detection
+	chargeback      ChargebackRecorder // FinOps cost attribution
+	eventBus        EventPublisher     // settlement event bus (replaces fire-and-forget goroutines)
+	budgetCheck     BudgetPreFlight    // pre-flight budget check before proxy
 	platformAddr    string             // ledger address collecting platform fees
 	logger          *slog.Logger
 	locks           syncutil.ShardedMutex
@@ -274,6 +279,32 @@ func (s *Service) WithUsageMeter(m UsageMeter) *Service {
 // WithRevenueAccumulator adds a revenue accumulator for stakes interception.
 func (s *Service) WithRevenueAccumulator(r RevenueAccumulator) *Service {
 	s.revenue = r
+	return s
+}
+
+// WithForensics adds spend anomaly detection to every proxy call.
+func (s *Service) WithForensics(f ForensicsIngestor) *Service {
+	s.forensics = f
+	return s
+}
+
+// WithChargeback adds FinOps cost attribution to every proxy call.
+func (s *Service) WithChargeback(c ChargebackRecorder) *Service {
+	s.chargeback = c
+	return s
+}
+
+// WithBudgetPreFlight adds a chargeback budget check before proxy calls.
+func (s *Service) WithBudgetPreFlight(bp BudgetPreFlight) *Service {
+	s.budgetCheck = bp
+	return s
+}
+
+// WithEventBus adds durable event publishing for settlement events.
+// When configured, forensics and chargeback processing happen via the event bus
+// instead of fire-and-forget goroutines.
+func (s *Service) WithEventBus(ep EventPublisher) *Service {
+	s.eventBus = ep
 	return s
 }
 
@@ -567,6 +598,18 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		unlock()
 		cancelIdem()
 		return nil, fmt.Errorf("%w: service type %q not in allowed types", ErrNoServiceAvailable, req.ServiceType)
+	}
+
+	// Pre-flight budget check: verify tenant cost center has budget remaining.
+	// This prevents proxy calls that would succeed at the gateway level
+	// but be attributed to an exhausted cost center.
+	if s.budgetCheck != nil && session.TenantID != "" {
+		if err := s.budgetCheck.CheckBudget(ctx, session.TenantID, req.ServiceType, session.MaxPerRequest); err != nil {
+			unlock()
+			cancelIdem()
+			gwProxyRequests.WithLabelValues("budget_denied").Inc()
+			return nil, fmt.Errorf("chargeback budget check failed: %w", err)
+		}
 	}
 
 	// Resolve candidates
@@ -883,6 +926,28 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 
 		if s.webhookEmitter != nil {
 			go s.webhookEmitter.EmitProxySuccess(agentAddr, sessionIDCopy, candidate.AgentAddress, priceStr)
+		}
+
+		// Publish settlement event to event bus (preferred) or fall back to direct goroutines.
+		// The event bus provides batching, backpressure, and durability.
+		if s.eventBus != nil {
+			_ = s.eventBus.PublishSettlement(context.Background(),
+				sessionIDCopy, tenantIDCopy, agentAddr, candidate.AgentAddress,
+				priceStr, feeAmountStr, req.ServiceType, candidate.ServiceID,
+				ref, fwdResp.LatencyMs)
+		} else {
+			// Legacy fire-and-forget path (no event bus configured)
+			if s.forensics != nil {
+				pf, _ := strconv.ParseFloat(candidate.Price, 64)
+				go func() {
+					_ = s.forensics.IngestSpend(context.Background(), agentAddr, candidate.AgentAddress, pf, req.ServiceType)
+				}()
+			}
+			if s.chargeback != nil && tenantIDCopy != "" {
+				go func() {
+					_ = s.chargeback.RecordGatewaySpend(context.Background(), tenantIDCopy, agentAddr, priceStr, req.ServiceType, sessionIDCopy)
+				}()
+			}
 		}
 
 		// Compute budget state for the response.

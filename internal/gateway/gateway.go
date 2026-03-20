@@ -213,6 +213,28 @@ type UsageMeter interface {
 	RecordVolume(tenantID, customerID string, microUSDC int64)
 }
 
+// ForensicsIngestor analyzes spend events for anomaly detection.
+type ForensicsIngestor interface {
+	IngestSpend(ctx context.Context, agentAddr, counterparty string, amountFloat float64, serviceType string) error
+}
+
+// ChargebackRecorder attributes costs to cost centers for FinOps reporting.
+type ChargebackRecorder interface {
+	RecordGatewaySpend(ctx context.Context, tenantID, agentAddr, amount, serviceType, sessionID string) error
+}
+
+// EventPublisher publishes settlement events to the event bus.
+// Replaces fire-and-forget goroutines with durable, batched event processing.
+type EventPublisher interface {
+	PublishSettlement(ctx context.Context, sessionID, tenantID, buyerAddr, sellerAddr, amount, fee, serviceType, serviceID, reference string, latencyMs int64) error
+}
+
+// BudgetPreFlight checks whether a tenant's cost center has remaining budget
+// before executing a proxy call. Returns nil if budget is available.
+type BudgetPreFlight interface {
+	CheckBudget(ctx context.Context, tenantID, serviceType, estimatedAmount string) error
+}
+
 // IncentiveProvider applies reputation-based fee adjustments.
 // Part of the flywheel: higher reputation → lower fees → more transactions.
 type IncentiveProvider interface {

@@ -196,3 +196,65 @@ func (e *Emitter) EmitStreamClosed(buyerAddr, streamID, sellerAddr, spentAmount,
 		"status":      status,
 	})
 }
+
+// --- KYA events ---
+
+func (e *Emitter) EmitKYAIssued(agentAddr, certID, trustTier string) {
+	e.emit(agentAddr, EventKYAIssued, map[string]interface{}{
+		"certId":    certID,
+		"agentAddr": agentAddr,
+		"trustTier": trustTier,
+	})
+}
+
+func (e *Emitter) EmitKYARevoked(agentAddr, certID, reason string) {
+	e.emit(agentAddr, EventKYARevoked, map[string]interface{}{
+		"certId":    certID,
+		"agentAddr": agentAddr,
+		"reason":    reason,
+	})
+}
+
+// --- Chargeback events ---
+
+func (e *Emitter) EmitChargebackBudgetWarning(agentAddr, costCenterName string, usedPct int) {
+	e.emit(agentAddr, EventChargebackBudgetWarning, map[string]interface{}{
+		"costCenter": costCenterName,
+		"usedPct":    usedPct,
+	})
+}
+
+func (e *Emitter) EmitChargebackBudgetExceeded(agentAddr, costCenterName, attemptedAmount string) {
+	e.emit(agentAddr, EventChargebackBudgetExceeded, map[string]interface{}{
+		"costCenter":      costCenterName,
+		"attemptedAmount": attemptedAmount,
+	})
+}
+
+// --- Arbitration events ---
+
+func (e *Emitter) EmitArbitrationCaseFiled(buyerAddr, caseID, escrowID, amount string) {
+	e.emit(buyerAddr, EventArbitrationCaseFiled, map[string]interface{}{
+		"caseId":   caseID,
+		"escrowId": escrowID,
+		"amount":   amount,
+	})
+}
+
+func (e *Emitter) EmitArbitrationCaseResolved(agentAddr, caseID, outcome, decision string) {
+	e.emit(agentAddr, EventArbitrationCaseResolved, map[string]interface{}{
+		"caseId":   caseID,
+		"outcome":  outcome,
+		"decision": decision,
+	})
+}
+
+// --- Forensics events ---
+
+func (e *Emitter) EmitForensicsCriticalAlert(agentAddr, alertID, alertType string, score float64) {
+	e.emit(agentAddr, EventForensicsAlertCritical, map[string]interface{}{
+		"alertId": alertID,
+		"type":    alertType,
+		"score":   score,
+	})
+}

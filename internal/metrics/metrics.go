@@ -146,6 +146,32 @@ var (
 		Buckets:   []float64{10, 30, 60, 120, 300, 600, 1800, 3600, 86400},
 	})
 
+	// --- Workflow metrics ---
+
+	WorkflowCreatedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "workflow_created_total",
+		Help:      "Total workflows created.",
+	})
+
+	WorkflowCompletedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "workflow_completed_total",
+		Help:      "Total workflows completed.",
+	})
+
+	WorkflowAbortedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "workflow_aborted_total",
+		Help:      "Total workflows aborted.",
+	})
+
+	WorkflowBreakerTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "workflow_circuit_broken_total",
+		Help:      "Total workflows halted by circuit breaker.",
+	})
+
 	// --- Coalition escrow metrics ---
 
 	CoalitionCreatedTotal = prometheus.NewCounter(prometheus.CounterOpts{
@@ -180,6 +206,125 @@ var (
 		Name:      "sessionkey_transactions_total",
 		Help:      "Total session key transactions processed.",
 	})
+
+	// --- Enterprise plugin metrics ---
+
+	KYACertificatesIssuedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "kya_certificates_issued_total",
+		Help:      "Total KYA certificates issued.",
+	})
+
+	KYACertificatesRevokedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "kya_certificates_revoked_total",
+		Help:      "Total KYA certificates revoked.",
+	})
+
+	ChargebackSpendTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "alancoin",
+			Name:      "chargeback_spend_total",
+			Help:      "Total spend recorded through chargeback engine by service type.",
+		},
+		[]string{"service_type"},
+	)
+
+	ChargebackBudgetExceededTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "chargeback_budget_exceeded_total",
+		Help:      "Total cost center budget exceeded events.",
+	})
+
+	ArbitrationCasesFiledTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "arbitration_cases_filed_total",
+		Help:      "Total arbitration cases filed.",
+	})
+
+	ArbitrationCasesResolvedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "alancoin",
+			Name:      "arbitration_cases_resolved_total",
+			Help:      "Total arbitration cases resolved by outcome.",
+		},
+		[]string{"outcome"},
+	)
+
+	ForensicsAlertsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "alancoin",
+			Name:      "forensics_alerts_total",
+			Help:      "Total forensic alerts by severity.",
+		},
+		[]string{"severity"},
+	)
+
+	ForensicsEventsIngested = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "forensics_events_ingested_total",
+		Help:      "Total spend events ingested by forensics engine.",
+	})
+
+	// --- Event bus metrics ---
+
+	EventBusPublished = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "eventbus_published_total",
+		Help:      "Total events published to the event bus.",
+	})
+
+	EventBusConsumed = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "eventbus_consumed_total",
+		Help:      "Total events consumed from the event bus.",
+	})
+
+	EventBusDropped = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "eventbus_dropped_total",
+		Help:      "Total events dropped due to full buffer.",
+	})
+
+	EventBusErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "eventbus_consumer_errors_total",
+		Help:      "Total consumer handler errors.",
+	})
+
+	EventBusBatchesProcessed = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "eventbus_batches_processed_total",
+		Help:      "Total batches processed by consumers.",
+	})
+
+	EventBusPending = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "alancoin",
+		Name:      "eventbus_pending",
+		Help:      "Current number of events pending in the bus.",
+	})
+
+	EventBusRetries = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "eventbus_retries_total",
+		Help:      "Total event bus consumer retry attempts.",
+	})
+
+	EventBusDeadLettered = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "eventbus_dead_lettered_total",
+		Help:      "Total events moved to dead letter queue after retry exhaustion.",
+	})
+
+	MatviewRefreshDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "alancoin",
+			Name:      "matview_refresh_duration_seconds",
+			Help:      "Duration of materialized view refreshes.",
+			Buckets:   []float64{0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30},
+		},
+		[]string{"view"},
+	)
 )
 
 func init() {
@@ -202,11 +347,32 @@ func init() {
 		EscrowDisputedTotal,
 		EscrowAutoReleasedTotal,
 		EscrowDuration,
+		WorkflowCreatedTotal,
+		WorkflowCompletedTotal,
+		WorkflowAbortedTotal,
+		WorkflowBreakerTotal,
 		CoalitionCreatedTotal,
 		CoalitionSettledTotal,
 		CoalitionExpiredTotal,
 		CoalitionDuration,
 		SessionKeyTransactionsTotal,
+		KYACertificatesIssuedTotal,
+		KYACertificatesRevokedTotal,
+		ChargebackSpendTotal,
+		ChargebackBudgetExceededTotal,
+		ArbitrationCasesFiledTotal,
+		ArbitrationCasesResolvedTotal,
+		ForensicsAlertsTotal,
+		ForensicsEventsIngested,
+		EventBusPublished,
+		EventBusConsumed,
+		EventBusDropped,
+		EventBusErrors,
+		EventBusBatchesProcessed,
+		EventBusPending,
+		EventBusRetries,
+		EventBusDeadLettered,
+		MatviewRefreshDuration,
 	)
 }
 

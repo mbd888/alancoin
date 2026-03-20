@@ -95,3 +95,59 @@ var ToolDisputeEscrow = mcp.NewTool("dispute_escrow",
 		mcp.Required(),
 		mcp.Description("Explanation of why the service result was unsatisfactory")),
 )
+
+// --- Enterprise Plugin Tools ---
+
+var ToolVerifyAgent = mcp.NewTool("verify_agent",
+	mcp.WithDescription(
+		"Verify an agent's KYA (Know Your Agent) identity certificate. "+
+			"Returns the agent's trust tier (AAA-D), organizational binding, "+
+			"permission scope, and reputation snapshot. Use this before transacting "+
+			"with an unknown agent to assess trustworthiness."),
+	mcp.WithString("agent_address",
+		mcp.Required(),
+		mcp.Description("The agent's address to verify (e.g. '0x1234...')")),
+)
+
+var ToolCheckBudget = mcp.NewTool("check_budget",
+	mcp.WithDescription(
+		"Check the remaining budget for a cost center. "+
+			"Returns current month spend, budget limit, and utilization percentage. "+
+			"Use this before making expensive service calls to ensure budget is available."),
+	mcp.WithString("cost_center_id",
+		mcp.Required(),
+		mcp.Description("The cost center ID to check (e.g. 'cc_abc123')")),
+)
+
+var ToolFileDispute = mcp.NewTool("file_dispute",
+	mcp.WithDescription(
+		"File a formal arbitration case for a disputed escrow payment. "+
+			"This escalates beyond a simple dispute to a structured resolution process. "+
+			"If a behavioral contract was attached, auto-resolution may be attempted first."),
+	mcp.WithString("escrow_id",
+		mcp.Required(),
+		mcp.Description("The escrow ID being disputed")),
+	mcp.WithString("seller_address",
+		mcp.Required(),
+		mcp.Description("The seller agent's address")),
+	mcp.WithString("amount",
+		mcp.Required(),
+		mcp.Description("The disputed amount in USDC")),
+	mcp.WithString("reason",
+		mcp.Required(),
+		mcp.Description("Detailed reason for the dispute")),
+	mcp.WithString("contract_id",
+		mcp.Description("Optional: behavioral contract ID for auto-resolution")),
+)
+
+var ToolGetAlerts = mcp.NewTool("get_alerts",
+	mcp.WithDescription(
+		"Get spend anomaly alerts for your agent from the forensics engine. "+
+			"Returns any detected anomalies such as unusual spending patterns, "+
+			"new counterparties, or service type deviations."),
+	mcp.WithString("severity",
+		mcp.Description("Filter by severity: 'info', 'warning', or 'critical'"),
+		mcp.Enum("info", "warning", "critical")),
+	mcp.WithNumber("limit",
+		mcp.Description("Maximum alerts to return (default 10)")),
+)

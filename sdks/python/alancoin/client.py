@@ -1723,6 +1723,148 @@ class Alancoin:
         )
 
     # -------------------------------------------------------------------------
+    # KYA (Know Your Agent) Identity
+    # -------------------------------------------------------------------------
+
+    def kya_issue(
+        self,
+        agent_addr: str,
+        org_name: str,
+        authorized_by: str,
+        department: str = "",
+        max_spend_per_day: str = "",
+        allowed_apis: Optional[List[str]] = None,
+        valid_days: int = 90,
+    ) -> dict:
+        """Issue a KYA identity certificate for an agent."""
+        body = {
+            "agentAddr": agent_addr,
+            "org": {
+                "tenantId": "default",
+                "orgName": org_name,
+                "department": department,
+                "authorizedBy": authorized_by,
+                "authMethod": "api_key",
+            },
+            "permissions": {},
+            "validDays": valid_days,
+        }
+        if max_spend_per_day:
+            body["permissions"]["maxSpendPerDay"] = max_spend_per_day
+        if allowed_apis:
+            body["permissions"]["allowedApis"] = allowed_apis
+        return self._request("POST", "/v1/kya/certificates", json=body)
+
+    def kya_verify(self, cert_id: str) -> dict:
+        """Verify a KYA certificate's validity and signature."""
+        return self._request("GET", f"/v1/kya/certificates/{cert_id}/verify")
+
+    def kya_revoke(self, cert_id: str, reason: str = "") -> dict:
+        """Revoke a KYA certificate."""
+        return self._request("POST", f"/v1/kya/certificates/{cert_id}/revoke", json={"reason": reason})
+
+    def kya_get_by_agent(self, agent_addr: str) -> dict:
+        """Get the active KYA certificate for an agent."""
+        return self._request("GET", f"/v1/kya/agents/{agent_addr}")
+
+    def kya_compliance_export(self, cert_id: str) -> dict:
+        """Generate EU AI Act Article 12 compliance report."""
+        return self._request("GET", f"/v1/kya/certificates/{cert_id}/compliance")
+
+    # -------------------------------------------------------------------------
+    # FinOps Chargeback
+    # -------------------------------------------------------------------------
+
+    def chargeback_create_cost_center(
+        self, name: str, department: str, monthly_budget: str, warn_pct: int = 80
+    ) -> dict:
+        """Create a cost center for FinOps cost attribution."""
+        return self._request("POST", "/v1/chargeback/cost-centers", json={
+            "name": name,
+            "department": department,
+            "monthlyBudget": monthly_budget,
+            "warnAtPercent": warn_pct,
+        })
+
+    def chargeback_list_cost_centers(self) -> dict:
+        """List cost centers for the caller's tenant."""
+        return self._request("GET", "/v1/chargeback/cost-centers")
+
+    def chargeback_record_spend(
+        self, cost_center_id: str, agent_addr: str, amount: str, service_type: str, **kwargs
+    ) -> dict:
+        """Record a spend event against a cost center."""
+        body = {
+            "costCenterId": cost_center_id,
+            "agentAddr": agent_addr,
+            "amount": amount,
+            "serviceType": service_type,
+        }
+        body.update(kwargs)
+        return self._request("POST", "/v1/chargeback/spend", json=body)
+
+    def chargeback_report(self, year: int = 0, month: int = 0) -> dict:
+        """Generate a monthly chargeback report."""
+        params = {}
+        if year:
+            params["year"] = str(year)
+        if month:
+            params["month"] = str(month)
+        return self._request("GET", "/v1/chargeback/reports", params=params)
+
+    # -------------------------------------------------------------------------
+    # Dispute Arbitration
+    # -------------------------------------------------------------------------
+
+    def arbitration_file_case(
+        self, escrow_id: str, buyer_addr: str, seller_addr: str, amount: str, reason: str, contract_id: str = ""
+    ) -> dict:
+        """File a formal arbitration case for a disputed escrow."""
+        body = {
+            "escrowId": escrow_id,
+            "buyerAddr": buyer_addr,
+            "sellerAddr": seller_addr,
+            "amount": amount,
+            "reason": reason,
+        }
+        if contract_id:
+            body["contractId"] = contract_id
+        return self._request("POST", "/v1/arbitration/cases", json=body)
+
+    def arbitration_get_case(self, case_id: str) -> dict:
+        """Get an arbitration case by ID."""
+        return self._request("GET", f"/v1/arbitration/cases/{case_id}")
+
+    def arbitration_auto_resolve(self, case_id: str, contract_passed: bool) -> dict:
+        """Attempt auto-resolution via behavioral contract."""
+        return self._request("POST", f"/v1/arbitration/cases/{case_id}/auto-resolve", json={"contractPassed": contract_passed})
+
+    def arbitration_submit_evidence(self, case_id: str, submitted_by: str, role: str, content: str) -> dict:
+        """Submit evidence to an arbitration case."""
+        return self._request("POST", f"/v1/arbitration/cases/{case_id}/evidence", json={
+            "submittedBy": submitted_by,
+            "role": role,
+            "type": "text",
+            "content": content,
+        })
+
+    # -------------------------------------------------------------------------
+    # Spend Forensics
+    # -------------------------------------------------------------------------
+
+    def forensics_get_baseline(self, agent_addr: str) -> dict:
+        """Get the behavioral spending baseline for an agent."""
+        return self._request("GET", f"/v1/forensics/agents/{agent_addr}/baseline")
+
+    def forensics_list_alerts(self, agent_addr: str, limit: int = 50) -> dict:
+        """List spend anomaly alerts for an agent."""
+        return self._request("GET", f"/v1/forensics/agents/{agent_addr}/alerts", params={"limit": str(limit)})
+
+    def forensics_acknowledge_alert(self, alert_id: str) -> dict:
+        """Acknowledge a forensics alert."""
+        return self._request("POST", f"/v1/forensics/alerts/{alert_id}/acknowledge")
+
+    # -------------------------------------------------------------------------
     # Internal
     # -------------------------------------------------------------------------
 
