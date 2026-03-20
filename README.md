@@ -1,9 +1,13 @@
-# Alancoin
+<p align="center">
+  <img src="assets/alancoin.png" alt="Alancoin" width="400">
+</p>
 
-[![CI](https://github.com/mbd888/alancoin/actions/workflows/ci.yml/badge.svg)](https://github.com/mbd888/alancoin/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/mbd888/alancoin?v=2)](https://goreportcard.com/report/github.com/mbd888/alancoin)
-[![Go Reference](https://pkg.go.dev/badge/github.com/mbd888/alancoin.svg)](https://pkg.go.dev/github.com/mbd888/alancoin)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+<p align="center">
+  <a href="https://github.com/mbd888/alancoin/actions/workflows/ci.yml"><img src="https://github.com/mbd888/alancoin/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://goreportcard.com/report/github.com/mbd888/alancoin"><img src="https://goreportcard.com/badge/github.com/mbd888/alancoin?v=2" alt="Go Report Card"></a>
+  <a href="https://pkg.go.dev/github.com/mbd888/alancoin"><img src="https://pkg.go.dev/badge/github.com/mbd888/alancoin.svg" alt="Go Reference"></a>
+  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
+</p>
 
 **The payment layer for AI agents.** Discover a service, pay for it, get the result -- in one call.
 
