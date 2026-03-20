@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -227,6 +228,20 @@ func (c *Config) Validate() error {
 	// Reject DEMO_MODE in production — prevents accidental admin access bypass.
 	if c.IsProduction() && os.Getenv("DEMO_MODE") == "true" {
 		return fmt.Errorf("DEMO_MODE=true is not allowed when ENV=production")
+	}
+
+	// Reject ALLOW_LOCAL_ENDPOINTS in production — prevents SSRF to internal services.
+	if c.IsProduction() && c.AllowLocalEndpoints {
+		return fmt.Errorf("ALLOW_LOCAL_ENDPOINTS=true is not allowed when ENV=production")
+	}
+
+	// Warn if production database connection doesn't use SSL
+	if c.IsProduction() && c.DatabaseURL != "" {
+		if !strings.Contains(c.DatabaseURL, "sslmode=require") &&
+			!strings.Contains(c.DatabaseURL, "sslmode=verify-full") &&
+			!strings.Contains(c.DatabaseURL, "sslmode=verify-ca") {
+			slog.Warn("DATABASE_URL does not enforce SSL (sslmode=require recommended in production)")
+		}
 	}
 
 	return nil

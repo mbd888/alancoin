@@ -37,6 +37,12 @@ func Middleware(m *Manager) gin.HandlerFunc {
 				if key.TenantID != "" {
 					c.Set(ContextKeyTenantID, key.TenantID)
 				}
+			} else {
+				slog.Warn("auth: invalid API key presented",
+					"ip", c.ClientIP(),
+					"path", c.Request.URL.Path,
+					"error", err.Error(),
+				)
 			}
 		}
 

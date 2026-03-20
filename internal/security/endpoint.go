@@ -26,11 +26,28 @@ func ValidateEndpointURL(rawURL string) error {
 
 	host := u.Hostname()
 
-	// Block known internal hostnames
-	blocked := []string{"localhost", "metadata.google.internal", "metadata.google"}
+	// Block known internal/metadata hostnames
+	blocked := []string{
+		"localhost",
+		"metadata.google.internal",
+		"metadata.google",
+		"metadata.aws.internal",
+	}
 	for _, b := range blocked {
 		if strings.EqualFold(host, b) {
 			return fmt.Errorf("URL host %q is not allowed", host)
+		}
+	}
+
+	// Block cloud metadata service IPs directly
+	metadataIPs := []string{
+		"169.254.169.254", // AWS, GCP, Azure metadata
+		"100.100.100.200", // Alibaba Cloud metadata
+		"fd00:ec2::254",   // AWS IMDSv2 IPv6
+	}
+	for _, mip := range metadataIPs {
+		if host == mip {
+			return fmt.Errorf("cloud metadata address %q is not allowed", host)
 		}
 	}
 

@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -92,7 +93,8 @@ func (h *Handler) GetBalance(c *gin.Context) {
 		}
 		bal, err := h.ledger.BalanceAtTime(c.Request.Context(), address, ts)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "balance_error", "message": err.Error()})
+			h.logger.Error("balance lookup failed", "agent", address, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "balance_error", "message": "Failed to retrieve balance"})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"balance": bal, "at": tsStr})
@@ -340,9 +342,10 @@ func (h *Handler) RequestWithdrawal(c *gin.Context) {
 func (h *Handler) Reconcile(c *gin.Context) {
 	results, err := h.ledger.ReconcileAll(c.Request.Context())
 	if err != nil {
+		h.logger.Error("reconciliation failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "reconciliation_error",
-			"message": err.Error(),
+			"message": "Reconciliation check failed",
 		})
 		return
 	}
@@ -436,7 +439,7 @@ func (h *Handler) Reverse(c *gin.Context) {
 		return
 	}
 
-	adminID := c.GetString("agent_address") // from auth middleware
+	adminID := c.GetString("authAgentAddr") // from auth middleware
 	if adminID == "" {
 		adminID = "admin"
 	}
@@ -458,9 +461,19 @@ func (h *Handler) Reverse(c *gin.Context) {
 			errCode = "insufficient_balance"
 		}
 
+		msg := "Reversal failed"
+		if errors.Is(err, ErrEntryNotFound) {
+			msg = "Entry not found"
+		} else if errors.Is(err, ErrAlreadyReversed) {
+			msg = "Entry already reversed"
+		} else if errors.Is(err, ErrInsufficientBalance) {
+			msg = "Insufficient balance to reverse"
+		} else {
+			h.logger.Error("ledger reversal failed", "entryId", req.EntryID, "error", err)
+		}
 		c.JSON(status, gin.H{
 			"error":   errCode,
-			"message": err.Error(),
+			"message": msg,
 		})
 		return
 	}
@@ -521,6 +534,14 @@ func (h *Handler) ApplyForCredit(c *gin.Context) {
 			"message": "Failed to retrieve reputation score",
 		})
 		return
+	}
+
+	// Validate score is in expected range to prevent calculation errors
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
 	}
 
 	const minScore = 50.0
