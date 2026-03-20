@@ -2,6 +2,7 @@ package chargeback
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -65,7 +66,7 @@ func TestHandlerCreateCostCenter(t *testing.T) {
 func TestHandlerRecordSpend(t *testing.T) {
 	r, svc := setupChargebackRouter()
 
-	cc, _ := svc.CreateCostCenter(nil, "ten_1", "Eng", "Engineering", "", "5000.00", 80)
+	cc, _ := svc.CreateCostCenter(context.Background(), "ten_1", "Eng", "Engineering", "", "5000.00", 80)
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"costCenterId": cc.ID,
@@ -87,10 +88,10 @@ func TestHandlerRecordSpend(t *testing.T) {
 func TestHandlerBudgetExceeded(t *testing.T) {
 	r, svc := setupChargebackRouter()
 
-	cc, _ := svc.CreateCostCenter(nil, "ten_1", "Small", "R&D", "", "10.00", 80)
+	cc, _ := svc.CreateCostCenter(context.Background(), "ten_1", "Small", "R&D", "", "10.00", 80)
 
 	// Spend the whole budget
-	svc.RecordSpend(nil, cc.ID, "ten_1", "0xA", "10.00", "inference", SpendOpts{})
+	svc.RecordSpend(context.Background(), cc.ID, "ten_1", "0xA", "10.00", "inference", SpendOpts{})
 
 	// Try to spend more
 	body, _ := json.Marshal(map[string]interface{}{
@@ -113,9 +114,9 @@ func TestHandlerBudgetExceeded(t *testing.T) {
 func TestHandlerListCostCenters(t *testing.T) {
 	r, svc := setupChargebackRouter()
 
-	svc.CreateCostCenter(nil, "ten_1", "A", "Dept", "", "1000.00", 80)
-	svc.CreateCostCenter(nil, "ten_1", "B", "Dept", "", "2000.00", 80)
-	svc.CreateCostCenter(nil, "ten_2", "C", "Dept", "", "3000.00", 80) // different tenant
+	svc.CreateCostCenter(context.Background(), "ten_1", "A", "Dept", "", "1000.00", 80)
+	svc.CreateCostCenter(context.Background(), "ten_1", "B", "Dept", "", "2000.00", 80)
+	svc.CreateCostCenter(context.Background(), "ten_2", "C", "Dept", "", "3000.00", 80) // different tenant
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/v1/chargeback/cost-centers", nil)
@@ -138,9 +139,9 @@ func TestHandlerListCostCenters(t *testing.T) {
 func TestHandlerGenerateReport(t *testing.T) {
 	r, svc := setupChargebackRouter()
 
-	cc, _ := svc.CreateCostCenter(nil, "ten_1", "Claims", "Insurance", "", "10000.00", 80)
-	svc.RecordSpend(nil, cc.ID, "ten_1", "0xA", "150.00", "inference", SpendOpts{})
-	svc.RecordSpend(nil, cc.ID, "ten_1", "0xA", "75.00", "translation", SpendOpts{})
+	cc, _ := svc.CreateCostCenter(context.Background(), "ten_1", "Claims", "Insurance", "", "10000.00", 80)
+	svc.RecordSpend(context.Background(), cc.ID, "ten_1", "0xA", "150.00", "inference", SpendOpts{})
+	svc.RecordSpend(context.Background(), cc.ID, "ten_1", "0xA", "75.00", "translation", SpendOpts{})
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/v1/chargeback/reports", nil)
@@ -163,7 +164,7 @@ func TestHandlerGetCostCenterTenantIsolation(t *testing.T) {
 	r, svc := setupChargebackRouter()
 
 	// Create cost center for different tenant
-	cc, _ := svc.CreateCostCenter(nil, "ten_2", "Other", "Dept", "", "1000.00", 80)
+	cc, _ := svc.CreateCostCenter(context.Background(), "ten_2", "Other", "Dept", "", "1000.00", 80)
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/v1/chargeback/cost-centers/"+cc.ID, nil)

@@ -2,6 +2,7 @@ package kya
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -81,7 +82,7 @@ func TestHandlerGetCertificate(t *testing.T) {
 	r, svc := setupRouter()
 
 	// Issue a cert first
-	cert, _ := svc.Issue(nil, "0xAgent1", OrgBinding{
+	cert, _ := svc.Issue(context.Background(), "0xAgent1", OrgBinding{
 		TenantID: "ten_1", OrgName: "Test", AuthorizedBy: "0x1", AuthMethod: "api_key",
 	}, PermissionScope{}, 90)
 
@@ -109,7 +110,7 @@ func TestHandlerGetCertificateNotFound(t *testing.T) {
 func TestHandlerVerifyCertificate(t *testing.T) {
 	r, svc := setupRouter()
 
-	cert, _ := svc.Issue(nil, "0xAgent1", OrgBinding{
+	cert, _ := svc.Issue(context.Background(), "0xAgent1", OrgBinding{
 		TenantID: "ten_1", OrgName: "Test", AuthorizedBy: "0x1", AuthMethod: "api_key",
 	}, PermissionScope{}, 90)
 
@@ -133,10 +134,10 @@ func TestHandlerVerifyCertificate(t *testing.T) {
 func TestHandlerVerifyRevokedCertificate(t *testing.T) {
 	r, svc := setupRouter()
 
-	cert, _ := svc.Issue(nil, "0xAgent1", OrgBinding{
+	cert, _ := svc.Issue(context.Background(), "0xAgent1", OrgBinding{
 		TenantID: "ten_1", OrgName: "Test", AuthorizedBy: "0x1", AuthMethod: "api_key",
 	}, PermissionScope{}, 90)
-	svc.Revoke(nil, cert.ID, "test")
+	svc.Revoke(context.Background(), cert.ID, "test")
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/v1/kya/certificates/"+cert.ID+"/verify", nil)
@@ -158,7 +159,7 @@ func TestHandlerVerifyRevokedCertificate(t *testing.T) {
 func TestHandlerRevokeCertificate(t *testing.T) {
 	r, svc := setupRouter()
 
-	cert, _ := svc.Issue(nil, "0xAgent1", OrgBinding{
+	cert, _ := svc.Issue(context.Background(), "0xAgent1", OrgBinding{
 		TenantID: "ten_1", OrgName: "Test", AuthorizedBy: "0x1", AuthMethod: "api_key",
 	}, PermissionScope{}, 90)
 
@@ -176,7 +177,7 @@ func TestHandlerRevokeCertificate(t *testing.T) {
 func TestHandlerComplianceExport(t *testing.T) {
 	r, svc := setupRouter()
 
-	cert, _ := svc.Issue(nil, "0xAgent1", OrgBinding{
+	cert, _ := svc.Issue(context.Background(), "0xAgent1", OrgBinding{
 		TenantID: "ten_1", OrgName: "Acme Corp", AuthorizedBy: "0x1", AuthMethod: "api_key",
 	}, PermissionScope{MaxSpendPerDay: "1000.00"}, 365)
 
@@ -203,7 +204,7 @@ func TestHandlerComplianceExport(t *testing.T) {
 func TestHandlerGetByAgent(t *testing.T) {
 	r, svc := setupRouter()
 
-	svc.Issue(nil, "0xAgent1", OrgBinding{
+	svc.Issue(context.Background(), "0xAgent1", OrgBinding{
 		TenantID: "ten_1", OrgName: "Test", AuthorizedBy: "0x1", AuthMethod: "api_key",
 	}, PermissionScope{}, 90)
 
@@ -219,10 +220,10 @@ func TestHandlerGetByAgent(t *testing.T) {
 func TestHandlerListByTenantEnforcesTenantIsolation(t *testing.T) {
 	r, svc := setupRouter()
 
-	svc.Issue(nil, "0xA1", OrgBinding{
+	svc.Issue(context.Background(), "0xA1", OrgBinding{
 		TenantID: "ten_1", OrgName: "T1", AuthorizedBy: "0x1", AuthMethod: "api_key",
 	}, PermissionScope{}, 90)
-	svc.Issue(nil, "0xA2", OrgBinding{
+	svc.Issue(context.Background(), "0xA2", OrgBinding{
 		TenantID: "ten_2", OrgName: "T2", AuthorizedBy: "0x2", AuthMethod: "api_key",
 	}, PermissionScope{}, 90)
 

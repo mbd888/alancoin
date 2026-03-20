@@ -2,6 +2,7 @@ package forensics
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -68,7 +69,7 @@ func TestHandlerIngestAnomalousEvent(t *testing.T) {
 
 	// Build baseline with varied amounts for nonzero stddev
 	for i := 0; i < 15; i++ {
-		svc.Ingest(nil, SpendEvent{
+		svc.Ingest(context.Background(), SpendEvent{
 			AgentAddr:    "0xAgent1",
 			Counterparty: "0xVendor",
 			Amount:       10.0 + float64(i%5),
@@ -110,7 +111,7 @@ func TestHandlerGetBaseline(t *testing.T) {
 
 	// Ingest some events to create baseline
 	for i := 0; i < 5; i++ {
-		svc.Ingest(nil, SpendEvent{
+		svc.Ingest(context.Background(), SpendEvent{
 			AgentAddr:    "0xAgent1",
 			Counterparty: "0xVendor",
 			Amount:       10.0,
@@ -153,12 +154,12 @@ func TestHandlerListAlerts(t *testing.T) {
 
 	// Build baseline then trigger alert
 	for i := 0; i < 15; i++ {
-		svc.Ingest(nil, SpendEvent{
+		svc.Ingest(context.Background(), SpendEvent{
 			AgentAddr: "0xAgent1", Counterparty: "0xV", Amount: 10.0 + float64(i%5),
 			ServiceType: "inference", Timestamp: time.Now().Add(-time.Duration(15-i) * time.Minute),
 		})
 	}
-	svc.Ingest(nil, SpendEvent{
+	svc.Ingest(context.Background(), SpendEvent{
 		AgentAddr: "0xAgent1", Counterparty: "0xV", Amount: 1000.0,
 		ServiceType: "inference", Timestamp: time.Now(),
 	})
@@ -186,12 +187,12 @@ func TestHandlerAcknowledgeAlert(t *testing.T) {
 
 	// Build baseline + trigger
 	for i := 0; i < 15; i++ {
-		svc.Ingest(nil, SpendEvent{
+		svc.Ingest(context.Background(), SpendEvent{
 			AgentAddr: "0xAgent1", Counterparty: "0xV", Amount: 10.0 + float64(i%5),
 			ServiceType: "inference", Timestamp: time.Now().Add(-time.Duration(15-i) * time.Minute),
 		})
 	}
-	alerts, _ := svc.Ingest(nil, SpendEvent{
+	alerts, _ := svc.Ingest(context.Background(), SpendEvent{
 		AgentAddr: "0xAgent1", Counterparty: "0xV", Amount: 1000.0,
 		ServiceType: "inference", Timestamp: time.Now(),
 	})

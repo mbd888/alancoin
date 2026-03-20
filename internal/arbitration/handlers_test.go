@@ -2,6 +2,7 @@ package arbitration
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -81,7 +82,7 @@ func TestHandlerFileCaseForbiddenForNonParty(t *testing.T) {
 func TestHandlerAutoResolve(t *testing.T) {
 	r, svc := setupArbRouter()
 
-	c, _ := svc.FileCase(nil, "esc_1", "0xBuyer", "0xSeller", "200.00", "Dispute", "contract_1")
+	c, _ := svc.FileCase(context.Background(), "esc_1", "0xBuyer", "0xSeller", "200.00", "Dispute", "contract_1")
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"contractPassed": false,
@@ -108,7 +109,7 @@ func TestHandlerAutoResolve(t *testing.T) {
 func TestHandlerGetCase(t *testing.T) {
 	r, svc := setupArbRouter()
 
-	c, _ := svc.FileCase(nil, "esc_1", "0xBuyer", "0xSeller", "50.00", "Test", "")
+	c, _ := svc.FileCase(context.Background(), "esc_1", "0xBuyer", "0xSeller", "50.00", "Test", "")
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/v1/arbitration/cases/"+c.ID, nil)
@@ -134,7 +135,7 @@ func TestHandlerGetCaseNotFound(t *testing.T) {
 func TestHandlerSubmitEvidence(t *testing.T) {
 	r, svc := setupArbRouter()
 
-	c, _ := svc.FileCase(nil, "esc_1", "0xBuyer", "0xSeller", "100.00", "Test", "")
+	c, _ := svc.FileCase(context.Background(), "esc_1", "0xBuyer", "0xSeller", "100.00", "Test", "")
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"submittedBy": "0xBuyer",
@@ -156,8 +157,8 @@ func TestHandlerSubmitEvidence(t *testing.T) {
 func TestHandlerListOpenCases(t *testing.T) {
 	r, svc := setupArbRouter()
 
-	svc.FileCase(nil, "esc_1", "0xBuyer", "0xSeller", "100.00", "R1", "")
-	svc.FileCase(nil, "esc_2", "0xBuyer", "0xSeller", "200.00", "R2", "")
+	svc.FileCase(context.Background(), "esc_1", "0xBuyer", "0xSeller", "100.00", "R1", "")
+	svc.FileCase(context.Background(), "esc_2", "0xBuyer", "0xSeller", "200.00", "R2", "")
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/v1/arbitration/cases?limit=10", nil)
