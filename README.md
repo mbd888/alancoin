@@ -9,7 +9,7 @@
   <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
 </p>
 
-**The payment layer for AI agents.** Discover a service, pay for it, get the result -- in one call.
+**The payment layer for AI agents.** Budget-controlled, escrow-backed, compliance-ready settlement for autonomous agent economies.
 
 Alancoin is a transparent payment proxy for autonomous AI agents. An agent sends a request. Alancoin finds the right service, handles payment in USDC, forwards the request, and returns the result. The agent never touches a wallet, signs a transaction, or thinks about money. It just works.
 
@@ -23,11 +23,20 @@ with connect("http://localhost:8080", api_key="ak_...", budget="5.00") as gw:
 
 ## Why This Exists
 
-There are millions of AI agents that can reason, plan, and use tools. They can't pay each other. Every integration is a custom API key, a manual billing agreement, a human in the loop.
+Enterprise AI agent deployments are losing money. Gartner documented $400M in unbudgeted agent spend across the Fortune 500 in 2026. 73% of enterprise agent projects exceed their budget. The root cause: agents have compute capabilities but no financial controls.
 
-Alancoin removes the human from the payment loop. An agent gets a budget with hard limits. Within those limits, the agent operates autonomously. The platform handles discovery, payment, escrow, and settlement.
+Alancoin removes the human from the payment loop. An agent gets a budget with hard limits, behavioral constraints, and compliance audit trails. Within those limits, the agent operates without human approval. The platform handles discovery, settlement, escrow, and dispute resolution, with every action recorded for regulatory compliance.
 
-**The result**: AI agents can hire other AI agents, in real-time, for micropayments, without human approval per transaction.
+## Financial Safety Guarantees
+
+| Guarantee | How It's Enforced |
+|-----------|-------------------|
+| **No agent can overspend** | Funds move `available → pending` via two-phase holds before any transfer. `CHECK available >= 0` at the database level prevents overdraft regardless of application logic. |
+| **No payment without escrow** | Every service call locks funds in escrow first. Released to seller only on confirmed delivery. Refunded to buyer on dispute. |
+| **No unauthorized access** | Session keys use ECDSA signatures with monotonic nonces. Hierarchical delegation with monotonic attenuation. |
+| **No silent failures** | Circuit breakers halt payment flow on anomaly detection. Forensics engine scores every transaction against behavioral baselines. Critical alerts auto-pause the agent. |
+| **No unaudited transactions** | HMAC-SHA256 signed receipts on every payment path. Hash-chained audit trails for EU AI Act compliance. |
+| **No budget surprises** | Per-department cost attribution with monthly budget envelopes enforced in real time. CFO-ready chargeback reports. |
 
 ## Quick Start
 
@@ -37,7 +46,7 @@ make deps && make run
 # Server at http://localhost:8080 -- no database, no config, in-memory mode
 ```
 
-Run the demo in a second terminal:
+Run the demo:
 
 ```bash
 pip install requests
@@ -48,12 +57,15 @@ python3 scripts/demo.py --speed fast
 
 ## How It Works
 
-1. **Buyer creates a session** with a budget and constraints. Funds are held.
-2. **Buyer sends a proxy request**. The gateway discovers matching services, selects one (by price, reputation, or value), pays via escrow, and forwards the request.
-3. **Service responds**. On success, escrow confirms and funds transfer. On failure, the buyer can dispute.
-4. **Session closes**. Unspent funds are released back to the buyer.
+```
+Agent Request → Budget Check → Service Discovery → Escrow Lock → Forward → Settle → Audit
+```
 
-Every transaction feeds the reputation system. Agents with consistent delivery earn higher scores, better placement in discovery, and more business. The flywheel: transact -> build reputation -> get discovered -> transact more.
+1. **Budget check**: verify the agent's session budget, cost center budget, and spend policies allow this call.
+2. **Service discovery**: find matching services ranked by price, reputation, or value.
+3. **Escrow lock**: hold the payment amount before any external call is made.
+4. **Forward + settle**: proxy the request, settle to seller on success, refund on failure.
+5. **Audit**: emit signed receipt, update reputation, publish settlement event to forensics and chargeback engines.
 
 > See [Architecture](docs/architecture.md) for the full system diagram and subsystem details.
 
