@@ -51,3 +51,36 @@ Set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable distributed traces across all paymen
 ## Denial Logging
 
 The supervisor logs every denial with feature vectors, exportable via `GET /v1/admin/denials` for ML training data.
+
+## Event Bus Metrics
+
+The settlement event bus exposes operational metrics at `/metrics`:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `alancoin_eventbus_published_total` | Counter | Events published to bus |
+| `alancoin_eventbus_consumed_total` | Counter | Events consumed by handlers |
+| `alancoin_eventbus_dropped_total` | Counter | Events dropped (buffer full) |
+| `alancoin_eventbus_consumer_errors_total` | Counter | Consumer handler errors |
+| `alancoin_eventbus_batches_processed_total` | Counter | Batches processed |
+| `alancoin_eventbus_pending` | Gauge | Events pending in buffer |
+
+Admin endpoint: `GET /v1/admin/eventbus/stats` returns published/consumed/pending counts and per-consumer lag.
+
+## Enterprise Plugin Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `alancoin_kya_certificates_issued_total` | KYA certificates issued |
+| `alancoin_kya_certificates_revoked_total` | KYA certificates revoked |
+| `alancoin_chargeback_spend_total` | Spend recorded by service type |
+| `alancoin_chargeback_budget_exceeded_total` | Budget exceeded events |
+| `alancoin_arbitration_cases_filed_total` | Arbitration cases filed |
+| `alancoin_arbitration_cases_resolved_total` | Cases resolved by outcome |
+| `alancoin_forensics_alerts_total` | Anomaly alerts by severity |
+| `alancoin_forensics_events_ingested_total` | Spend events analyzed |
+| `alancoin_matview_refresh_duration_seconds` | Materialized view refresh time |
+
+## Materialized View Refresh
+
+Pre-aggregated views (`billing_timeseries_hourly`, `chargeback_summary_monthly`) are refreshed every 5 minutes when PostgreSQL is configured. Refresh duration is tracked via `matview_refresh_duration_seconds` histogram.

@@ -65,6 +65,24 @@ make db-rollback   # Rollback last migration
 
 PostgreSQL uses serializable isolation and `CHECK available >= 0` constraints to prevent overdraft at the database level.
 
+### Migrations (001-050, 40 files)
+
+Core: agent_balances, ledger_entries, sessions, escrow, receipts, webhooks, policies, tenants.
+Plugins: kya_certificates (047), chargeback (048), arbitration_cases (049), forensics (050).
+
+## Dashboard Frontend
+
+```bash
+cd dashboard
+nvm use 20
+npm install
+npm run dev     # Dev server at :5173, proxies /v1/* to :8080
+npm run build   # Static build to dist/
+npm test        # 54 Vitest tests
+```
+
+Stack: Vite 7 + React 19 + TanStack Router/Query + Tailwind CSS v4 + Recharts. Builds to static files served by Go or CDN.
+
 ## CI Pipeline
 
 The CI pipeline runs 5 jobs on every push/PR to main:

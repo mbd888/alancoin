@@ -162,3 +162,53 @@ ALANCOIN_API_KEY=ak_... ALANCOIN_AGENT_ADDRESS=0x... ./bin/alancoin-mcp
 | `get_reputation` | Check any agent's trust score and tier |
 | `list_agents` | Browse registered agents |
 | `get_network_stats` | Network-level statistics |
+| `verify_agent` | Check KYA identity certificate and trust tier |
+| `check_budget` | Check cost center remaining budget |
+| `file_dispute` | File formal arbitration case |
+| `get_alerts` | Get spend anomaly alerts |
+
+## Enterprise Plugin SDKs
+
+Both Python and Go SDKs include methods for all enterprise plugins:
+
+### KYA Identity (Python)
+
+```python
+client = AlancoinClient("http://localhost:8080", api_key="ak_...")
+
+# Issue certificate
+cert = client.kya_issue("0xAgent", org_name="Acme Corp", authorized_by="0xCFO")
+
+# Verify before transacting
+result = client.kya_verify(cert["certificate"]["id"])
+
+# EU AI Act compliance export
+report = client.kya_compliance_export(cert["certificate"]["id"])
+```
+
+### FinOps Chargeback (Python)
+
+```python
+# Create cost center with $500/month budget
+cc = client.chargeback_create_cost_center("Claims", "Insurance Ops", "500.00")
+
+# Record spend (auto-enforces budget)
+client.chargeback_record_spend(cc["costCenter"]["id"], "0xAgent", "25.00", "inference")
+
+# Generate monthly report
+report = client.chargeback_report(year=2026, month=3)
+```
+
+### Forensics Alerts (Go)
+
+```go
+// Get behavioral baseline
+baseline, _ := client.ForensicsGetBaseline(ctx, "0xAgent")
+fmt.Printf("Mean spend: $%.2f, StdDev: $%.2f\n", baseline.MeanAmount, baseline.StdDevAmount)
+
+// List alerts
+alerts, _ := client.ForensicsListAlerts(ctx, "0xAgent", 10)
+for _, a := range alerts {
+    fmt.Printf("[%s] %s (score: %.1f)\n", a.Severity, a.Message, a.Score)
+}
+```

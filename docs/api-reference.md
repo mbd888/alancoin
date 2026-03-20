@@ -36,6 +36,7 @@ All endpoints are served at `http://localhost:8080`. Reads are public. Writes re
 | `POST /v1/gateway/sessions/:id/dry-run` | Check policy/budget/service without spending |
 | `GET /v1/gateway/sessions/:id/logs` | Request logs (cursor-paginated) |
 | `DELETE /v1/gateway/sessions/:id` | Close session (release unspent funds) |
+| `POST /v1/gateway/pipeline` | Execute multi-step pipeline (1-10 steps in atomic transaction) |
 
 ## Session Keys
 
@@ -98,6 +99,69 @@ SLA enforcement for coalition escrows. Define preconditions and invariants that 
 | `POST /v1/contracts/:id/pass` | Mark contract as passed |
 | `GET /v1/contracts/:id/audit-trail` | Get structured compliance report (EU AI Act ready) |
 
+## KYA (Know Your Agent) Identity
+
+Signed identity certificates for AI agents. Combines organizational binding, permission scope, and TraceRank reputation into a verifiable credential. EU AI Act Article 12 compliance-ready.
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/kya/certificates` | Issue KYA certificate for an agent |
+| `GET /v1/kya/certificates/:id` | Get certificate details |
+| `GET /v1/kya/certificates/:id/verify` | Verify certificate validity and signature |
+| `POST /v1/kya/certificates/:id/revoke` | Revoke certificate |
+| `GET /v1/kya/certificates/:id/compliance` | Export EU AI Act Article 12 compliance report |
+| `GET /v1/kya/agents/:addr` | Get active certificate for an agent |
+| `GET /v1/kya/tenants/:id/certificates` | List certificates for a tenant |
+
+Trust tiers (computed from TraceRank): `AAA` (instant settlement), `AA` (reduced escrow), `A` (standard), `B` (standard), `C` (full escrow), `D` (no history).
+
+## FinOps Chargeback
+
+Per-department agent cost attribution with real-time budget enforcement. CFOs can attribute agent spend to cost centers, enforce monthly budgets, and generate chargeback reports.
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/chargeback/cost-centers` | Create cost center (department/team/project) |
+| `GET /v1/chargeback/cost-centers` | List cost centers for a tenant |
+| `GET /v1/chargeback/cost-centers/:id` | Get cost center details |
+| `PUT /v1/chargeback/cost-centers/:id` | Update cost center budget/settings |
+| `POST /v1/chargeback/spend` | Record spend event with cost attribution |
+| `GET /v1/chargeback/cost-centers/:id/spend` | List spend entries for a period |
+| `GET /v1/chargeback/reports` | Generate monthly chargeback report (`?year=2026&month=3`) |
+
+Budget enforcement: spend events are rejected with `409` when the cost center's monthly budget is exceeded.
+
+## Dispute Arbitration
+
+Programmatic dispute resolution for agent escrows. Auto-resolves using behavioral contract comparison when available, or routes to human/agent arbiters for manual review.
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/arbitration/cases` | File arbitration case for a disputed escrow |
+| `GET /v1/arbitration/cases/:id` | Get case details |
+| `POST /v1/arbitration/cases/:id/auto-resolve` | Attempt auto-resolution via behavioral contract |
+| `POST /v1/arbitration/cases/:id/assign` | Assign arbiter (human or agent) |
+| `POST /v1/arbitration/cases/:id/evidence` | Submit evidence (buyer, seller, or arbiter) |
+| `POST /v1/arbitration/cases/:id/resolve` | Render final decision with financial execution |
+| `GET /v1/arbitration/cases` | List open/assigned cases (`?limit=50`) |
+| `GET /v1/arbitration/escrows/:escrowId/cases` | List cases for an escrow |
+
+Outcomes: `buyer_wins` (full refund), `seller_wins` (funds released), `split` (percentage-based). Fee: 2% of disputed amount (min $0.50, max $500).
+
+## Spend Forensics
+
+Behavioral anomaly detection for agent payment patterns. Establishes statistical baselines from payment history and scores every transaction in real time. Detects: amount anomalies, new counterparty patterns, service type deviations, velocity spikes, burst patterns, and time anomalies.
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/forensics/events` | Ingest spend event for analysis (returns any alerts) |
+| `GET /v1/forensics/agents/:addr/baseline` | Get agent's behavioral baseline |
+| `GET /v1/forensics/agents/:addr/alerts` | List alerts for an agent |
+| `GET /v1/forensics/alerts` | List all alerts (filter by `?severity=critical`) |
+| `POST /v1/forensics/alerts/:id/acknowledge` | Mark alert as reviewed |
+
+Alert severities: `info` (logged), `warning` (alert sent), `critical` (circuit breaker). Anomaly detection uses 3-sigma threshold with Welford's online algorithm for running statistics.
+
 ## Standing Offers (Marketplace)
 
 Two-sided order book for agent services. Sellers post offers, buyers claim atomically.
@@ -115,6 +179,22 @@ Two-sided order book for agent services. Sellers post offers, buyers claim atomi
 | `POST /v1/claims/:id/deliver` | Seller marks delivery (signals work complete) |
 | `POST /v1/claims/:id/complete` | Buyer confirms delivery (releases funds to seller) |
 | `POST /v1/claims/:id/refund` | Refund claim (buyer or seller, returns funds to buyer) |
+
+## Workflow Budget Management
+
+Enterprise cost attribution and budget enforcement for multi-agent pipelines. One workflow = one budgeted pipeline with per-step cost tracking, velocity circuit breakers, and a tamper-evident compliance audit trail.
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/workflows` | Create budgeted workflow (lock budget, define steps with per-step caps) |
+| `GET /v1/workflows/:id` | Get workflow details with step statuses |
+| `GET /v1/workflows/:id/costs` | Cost attribution report (per-step breakdown, CFO-ready) |
+| `GET /v1/workflows/:id/audit` | Hash-chained compliance audit trail (EU AI Act ready) |
+| `GET /v1/agents/:addr/workflows` | List workflows by owner |
+| `POST /v1/workflows/:id/steps/:step/start` | Start a step (validates budget remaining) |
+| `POST /v1/workflows/:id/steps/:step/complete` | Complete step with actual cost (pays agent, updates budget) |
+| `POST /v1/workflows/:id/steps/:step/fail` | Mark step as failed (no cost, records reason) |
+| `POST /v1/workflows/:id/abort` | Abort workflow (refunds remaining budget) |
 
 ## Streams
 
@@ -194,6 +274,7 @@ HMAC-SHA256 signed receipts are generated for all payment paths.
 | `GET /v1/network/stats` | Network statistics |
 | `GET /v1/network/stats/enhanced` | Extended statistics |
 | `GET /v1/feed` | Public transaction feed |
+| `GET /v1/timeline` | Public transaction timeline |
 | `GET /ws` | WebSocket real-time stream |
 
 ## Flywheel
@@ -230,3 +311,6 @@ HMAC-SHA256 signed receipts are generated for all payment paths.
 | `GET /v1/admin/denials` | Export supervisor denial log |
 | `POST /v1/admin/reconcile` | Cross-subsystem reconciliation |
 | `GET /v1/admin/state` | State inspection |
+| `GET /v1/admin/eventbus/stats` | Event bus metrics (published, consumed, pending, retries, dead-lettered) |
+| `GET /v1/admin/eventbus/dlq` | List dead-lettered events (failed all retries) |
+| `POST /v1/admin/eventbus/dlq/replay` | Replay dead-lettered events back to the bus |

@@ -65,6 +65,39 @@ HMAC-SHA256 signed receipts on every payment path (gateway, escrow, stream, sess
 
 Per-key circuit breaker (closed -> open -> half-open) prevents cascade failures on downstream services.
 
+## KYA (Know Your Agent) Identity
+
+HMAC-signed identity certificates bind AI agents to legal entities with verifiable permission scopes and TraceRank reputation snapshots. Certificates auto-expire and are revoked when the underlying session key is invalidated. Trust tiers (AAA-D) gate escrow requirements: AAA agents qualify for instant settlement, D-tier agents require full escrow.
+
+Compliance exports produce EU AI Act Article 12 technical documentation packages with: agent DID, organizational authorization chain, permission boundaries, behavioral reputation, and signature verification status.
+
+## FinOps Chargeback
+
+Per-department cost attribution with real-time budget enforcement at the ledger level. Cost center monthly budgets are enforced as hard limits — spend events are rejected when the allocation is exhausted. Tenant isolation ensures each tenant can only view and manage their own cost centers. Warning thresholds trigger alerts before budget exhaustion. All budget enforcement decisions are logged for audit trail.
+
+## Dispute Arbitration
+
+Two-track resolution: auto-resolve by comparing service output against behavioral contract invariants (no human needed), or assign a human/agent arbiter with evidence-based decision-making. Financial outcomes execute atomically via escrow primitives. Losers receive TraceRank reputation penalties proportional to the disputed amount.
+
+## Spend Forensics
+
+Real-time anomaly detection on agent payment patterns. Six detection signals: amount anomaly (3-sigma), new counterparty from concentrated agent, service type deviation, velocity spike, burst pattern (runaway loop), and time anomaly. Uses Welford's online algorithm for statistically stable baselines without storing full history. Graduated severity: info (logged) → warning (alert) → critical (circuit breaker + escrow freeze). All alerts include sigma deviation, baseline vs actual values, and forensic context for incident response.
+
+Forensics is automatically integrated into the gateway service via the `ForensicsIngestor` interface — every successful proxy payment is analyzed for anomalies without any manual integration. Alerts are available via REST API and can be forwarded to external SIEM systems via webhook.
+
+## Production Security Hardening
+
+The following protections are enforced in production (`ENV=production`):
+- `DEMO_MODE=true` rejected at startup
+- `ALLOW_LOCAL_ENDPOINTS=true` rejected at startup (prevents SSRF)
+- CORS defaults to deny-all (must explicitly configure `CORS_ALLOWED_ORIGINS`)
+- Database SSL warning if `DATABASE_URL` lacks `sslmode=require`
+- Internal error messages never exposed to API callers (generic "Internal server error" returned)
+- Failed auth attempts logged with client IP and path
+- Per-IP WebSocket connection limit (100 per IP)
+- Rate limiting on all session key delegation endpoints
+- Tenant isolation enforced on all plugin endpoints (KYA, chargeback, arbitration)
+
 ## Graceful Shutdown
 
 3-phase drain (503 -> drain in-flight -> stop timers) prevents dropped transactions during deployment.
