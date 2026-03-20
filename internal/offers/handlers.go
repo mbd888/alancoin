@@ -91,7 +91,7 @@ func (h *Handler) GetOffer(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Offer not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Internal server error"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"offer": offer})
@@ -112,7 +112,7 @@ func (h *Handler) ListOffers(c *gin.Context) {
 
 	offers, err := h.service.ListOffers(c.Request.Context(), serviceType, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Internal server error"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"offers": offers, "count": len(offers)})
@@ -133,7 +133,7 @@ func (h *Handler) ListSellerOffers(c *gin.Context) {
 
 	offers, err := h.service.ListOffersBySeller(c.Request.Context(), address, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Internal server error"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"offers": offers, "count": len(offers)})
@@ -210,7 +210,7 @@ func (h *Handler) ListClaims(c *gin.Context) {
 
 	claims, err := h.service.ListClaimsByOffer(c.Request.Context(), offerID, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Internal server error"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"claims": claims, "count": len(claims)})
@@ -224,7 +224,7 @@ func (h *Handler) GetClaim(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Claim not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Internal server error"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"claim": claim})

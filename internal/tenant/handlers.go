@@ -174,7 +174,7 @@ func (h *Handler) GetTenant(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "tenant not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Internal server error"})
 		return
 	}
 
@@ -200,7 +200,7 @@ func (h *Handler) UpdateTenant(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "tenant not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Internal server error"})
 		return
 	}
 
@@ -263,7 +263,7 @@ func (h *Handler) ListAgents(c *gin.Context) {
 
 	agents, err := h.store.ListAgents(c.Request.Context(), tenantID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Internal server error"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"agents": agents, "count": len(agents)})
@@ -295,13 +295,13 @@ func (h *Handler) RegisterAgent(c *gin.Context) {
 	// Check agent cap.
 	t, err := h.store.Get(c.Request.Context(), tenantID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Internal server error"})
 		return
 	}
 	if t.Settings.MaxAgents > 0 {
 		count, err := h.store.CountAgents(c.Request.Context(), tenantID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Internal server error"})
 			return
 		}
 		if count >= t.Settings.MaxAgents {
@@ -400,7 +400,7 @@ func (h *Handler) ListKeys(c *gin.Context) {
 	// List agents first, then gather all keys.
 	agents, err := h.store.ListAgents(c.Request.Context(), tenantID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Internal server error"})
 		return
 	}
 
@@ -439,7 +439,7 @@ func (h *Handler) RevokeKey(c *gin.Context) {
 	// We need to find the key's agent address. List all tenant agents and search.
 	agents, err := h.store.ListAgents(c.Request.Context(), tenantID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Internal server error"})
 		return
 	}
 
@@ -473,7 +473,7 @@ func (h *Handler) GetBilling(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "tenant not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Internal server error"})
 		return
 	}
 

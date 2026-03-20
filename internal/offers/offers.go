@@ -293,7 +293,10 @@ func (s *Service) ClaimOffer(ctx context.Context, offerID, buyerAddr string) (*C
 	if time.Now().After(offer.ExpiresAt) {
 		offer.Status = OfferExpired
 		offer.UpdatedAt = time.Now()
-		_ = s.store.UpdateOffer(ctx, offer)
+		if err := s.store.UpdateOffer(ctx, offer); err != nil {
+			s.logger.Warn("failed to mark offer as expired during claim",
+				"offer_id", offer.ID, "error", err)
+		}
 		return nil, ErrOfferExpired
 	}
 
@@ -352,7 +355,10 @@ func (s *Service) ClaimOffer(ctx context.Context, offerID, buyerAddr string) (*C
 		if offer.Status == OfferExhausted {
 			offer.Status = OfferActive
 		}
-		_ = s.store.UpdateOffer(ctx, offer)
+		if rbErr := s.store.UpdateOffer(ctx, offer); rbErr != nil {
+			s.logger.Error("CRITICAL: claim rollback failed — offer capacity may be incorrect",
+				"offer_id", offer.ID, "error", rbErr)
+		}
 		span.RecordError(err)
 		return nil, fmt.Errorf("failed to create claim: %w", err)
 	}
@@ -433,14 +439,17 @@ func (s *Service) CompleteClaim(ctx context.Context, claimID, callerAddr string)
 		return nil, err
 	}
 
-	// Update offer revenue
+	// Update offer revenue (best-effort — funds are already released)
 	offer, err := s.store.GetOffer(ctx, claim.OfferID)
 	if err == nil {
 		revBig, _ := usdc.Parse(offer.TotalRevenue)
 		amtBig, _ := usdc.Parse(claim.Amount)
 		offer.TotalRevenue = usdc.Format(new(big.Int).Add(revBig, amtBig))
 		offer.UpdatedAt = time.Now()
-		_ = s.store.UpdateOffer(ctx, offer)
+		if revErr := s.store.UpdateOffer(ctx, offer); revErr != nil {
+			s.logger.Warn("failed to update offer revenue after claim completion",
+				"offer_id", offer.ID, "claim_id", claim.ID, "error", revErr)
+		}
 	}
 
 	// Record for reputation

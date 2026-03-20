@@ -178,7 +178,7 @@ func (h *Handler) TickStream(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Stream not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Internal server error"})
 		return
 	}
 	if callerAddr != stream.BuyerAddr && callerAddr != stream.SellerAddr {
