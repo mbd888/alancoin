@@ -50,3 +50,8 @@ __pycache__/
 *.egg-info/
 /sdks/python/.venv/
 /experiments/.venv/
+
+# Dashboard frontend
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.tsbuildinfo

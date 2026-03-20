@@ -133,11 +133,16 @@ func (l *Limiter) Middleware() gin.HandlerFunc {
 			return
 		}
 
-		// Use the direct connection IP, not c.ClientIP() which trusts
-		// X-Forwarded-For and can be spoofed to bypass rate limiting.
-		key, _, _ := net.SplitHostPort(c.Request.RemoteAddr)
+		// Use Fly-Client-IP header when behind Fly.io proxy (set by the
+		// platform, cannot be spoofed by clients). Fall back to direct
+		// connection IP otherwise. We intentionally avoid X-Forwarded-For
+		// which is trivially spoofable.
+		key := c.GetHeader("Fly-Client-IP")
 		if key == "" {
-			key = c.Request.RemoteAddr
+			key, _, _ = net.SplitHostPort(c.Request.RemoteAddr)
+			if key == "" {
+				key = c.Request.RemoteAddr
+			}
 		}
 
 		// Allow authenticated requests higher limits.

@@ -74,6 +74,7 @@ type Client struct {
 	send chan []byte
 	mu   sync.RWMutex
 	sub  Subscription
+	ip   string // remote IP for per-IP tracking
 }
 
 // MaxClients is the maximum number of concurrent WebSocket connections.
@@ -91,6 +92,10 @@ type Hub struct {
 	maxClients int
 	connSem    chan struct{} // buffered semaphore; capacity = maxClients
 
+	// Per-IP connection tracking to prevent single-source DoS
+	ipConns  map[string]int
+	maxPerIP int
+
 	// Stats
 	totalEvents  atomic.Int64
 	totalClients atomic.Int64
@@ -104,6 +109,8 @@ func NewHub(logger *slog.Logger) *Hub {
 		broadcast:  make(chan *Event, 256),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
+		ipConns:    make(map[string]int),
+		maxPerIP:   100, // Max 100 WS connections from a single IP
 		logger:     logger,
 		done:       make(chan struct{}),
 		maxClients: MaxClients,
@@ -147,6 +154,12 @@ func (h *Hub) Run(ctx context.Context) {
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
+				if client.ip != "" {
+					h.ipConns[client.ip]--
+					if h.ipConns[client.ip] <= 0 {
+						delete(h.ipConns, client.ip)
+					}
+				}
 				select {
 				case <-h.connSem: // release semaphore slot
 				default:
@@ -313,9 +326,33 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-IP connection limit
+	ip := r.RemoteAddr
+	if idx := len(ip) - 1; idx >= 0 {
+		// Strip port
+		for i := idx; i >= 0; i-- {
+			if ip[i] == ':' {
+				ip = ip[:i]
+				break
+			}
+		}
+	}
+	h.mu.Lock()
+	if h.ipConns[ip] >= h.maxPerIP {
+		h.mu.Unlock()
+		<-h.connSem
+		http.Error(w, "too many connections from this IP", http.StatusTooManyRequests)
+		return
+	}
+	h.ipConns[ip]++
+	h.mu.Unlock()
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		<-h.connSem // release reserved slot
+		h.mu.Lock()
+		h.ipConns[ip]--
+		h.mu.Unlock()
 		h.logger.Error("websocket upgrade failed", "error", err)
 		return
 	}
@@ -325,6 +362,7 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		conn: conn,
 		send: make(chan []byte, 256),
 		sub:  Subscription{AllEvents: true}, // Default: all events
+		ip:   ip,
 	}
 
 	h.register <- client
