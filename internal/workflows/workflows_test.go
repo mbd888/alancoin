@@ -447,7 +447,7 @@ func TestWorkflow_GlobalMaxCostPerStep(t *testing.T) {
 	}
 
 	// Under global cap should work
-	wf, err = svc.CompleteStep(ctx, wf.ID, "intake", "0xOwner", "0.400000")
+	_, err = svc.CompleteStep(ctx, wf.ID, "intake", "0xOwner", "0.400000")
 	if err != nil {
 		t.Fatalf("should accept under global cap: %v", err)
 	}

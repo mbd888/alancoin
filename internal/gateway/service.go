@@ -939,12 +939,12 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			// Legacy fire-and-forget path (no event bus configured)
 			if s.forensics != nil {
 				pf, _ := strconv.ParseFloat(candidate.Price, 64)
-				go func() {
+				go func() { //nolint:gosec // G118: fire-and-forget outlives request context
 					_ = s.forensics.IngestSpend(context.Background(), agentAddr, candidate.AgentAddress, pf, req.ServiceType)
 				}()
 			}
 			if s.chargeback != nil && tenantIDCopy != "" {
-				go func() {
+				go func() { //nolint:gosec // G118: fire-and-forget outlives request context
 					_ = s.chargeback.RecordGatewaySpend(context.Background(), tenantIDCopy, agentAddr, priceStr, req.ServiceType, sessionIDCopy)
 				}()
 			}

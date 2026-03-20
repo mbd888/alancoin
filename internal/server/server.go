@@ -3053,7 +3053,7 @@ func (s *Server) makeForensicsConsumer() eventbus.Handler {
 			if err := json.Unmarshal(e.Payload, &p); err != nil {
 				continue
 			}
-			s.forensicsService.Ingest(ctx, forensics.SpendEvent{
+			_, _ = s.forensicsService.Ingest(ctx, forensics.SpendEvent{
 				AgentAddr:    p.BuyerAddr,
 				Counterparty: p.SellerAddr,
 				Amount:       p.AmountFloat,
