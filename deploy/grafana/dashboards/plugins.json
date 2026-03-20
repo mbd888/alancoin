@@ -1,0 +1,169 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Event Bus — Publish / Consume Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "rate(alancoin_eventbus_published_total[1m])",
+          "legendFormat": "Published/s"
+        },
+        {
+          "expr": "rate(alancoin_eventbus_consumed_total[1m])",
+          "legendFormat": "Consumed/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" }
+      }
+    },
+    {
+      "title": "Event Bus — Pending + Dropped + DLQ",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "alancoin_eventbus_pending",
+          "legendFormat": "Pending"
+        },
+        {
+          "expr": "rate(alancoin_eventbus_dropped_total[5m])",
+          "legendFormat": "Dropped/5m"
+        },
+        {
+          "expr": "alancoin_eventbus_dead_lettered_total",
+          "legendFormat": "Dead-Lettered (total)"
+        }
+      ]
+    },
+    {
+      "title": "KYA Certificates",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "alancoin_kya_certificates_issued_total",
+          "legendFormat": "Issued"
+        },
+        {
+          "expr": "alancoin_kya_certificates_revoked_total",
+          "legendFormat": "Revoked"
+        }
+      ]
+    },
+    {
+      "title": "Chargeback Spend Rate (by service)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "expr": "rate(alancoin_chargeback_spend_total[5m])",
+          "legendFormat": "{{ service_type }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" }
+      }
+    },
+    {
+      "title": "Chargeback Budget Exceeded",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 8 },
+      "targets": [
+        {
+          "expr": "alancoin_chargeback_budget_exceeded_total",
+          "legendFormat": "Budget Exceeded"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "fixed", "fixedColor": "red" } }
+      }
+    },
+    {
+      "title": "Arbitration Cases",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        {
+          "expr": "rate(alancoin_arbitration_cases_filed_total[5m])",
+          "legendFormat": "Filed/5m"
+        },
+        {
+          "expr": "rate(alancoin_arbitration_cases_resolved_total[5m])",
+          "legendFormat": "Resolved ({{ outcome }})/5m"
+        }
+      ]
+    },
+    {
+      "title": "Forensics Alerts (by severity)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "targets": [
+        {
+          "expr": "rate(alancoin_forensics_alerts_total[5m])",
+          "legendFormat": "{{ severity }}"
+        }
+      ]
+    },
+    {
+      "title": "Forensics Events Ingested",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "rate(alancoin_forensics_events_ingested_total[1m])",
+          "legendFormat": "Events/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" }
+      }
+    },
+    {
+      "title": "Materialized View Refresh Duration",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(alancoin_matview_refresh_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95 {{ view }}"
+        },
+        {
+          "expr": "histogram_quantile(0.50, rate(alancoin_matview_refresh_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50 {{ view }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+    {
+      "title": "Event Bus Retries + Errors",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "targets": [
+        {
+          "expr": "rate(alancoin_eventbus_retries_total[5m])",
+          "legendFormat": "Retries/5m"
+        },
+        {
+          "expr": "rate(alancoin_eventbus_consumer_errors_total[5m])",
+          "legendFormat": "Errors/5m"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["alancoin", "plugins", "eventbus"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "Alancoin — Enterprise Plugins & Event Bus",
+  "uid": "alancoin-plugins"
+}
