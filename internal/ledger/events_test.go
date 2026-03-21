@@ -840,3 +840,130 @@ func TestLedger_ReconcileAll_NoEventStore(t *testing.T) {
 }
 
 // assertFundConservation is already defined in ledger_test.go
+
+// ---------------------------------------------------------------------------
+// RebuildBalance additional event types
+// ---------------------------------------------------------------------------
+
+func TestRebuildBalance_SettleHoldEvents(t *testing.T) {
+	buyer := "0xbuyer"
+	seller := "0xseller"
+
+	// Buyer: deposit 100, hold 20, settle_hold_out 20
+	buyerEvents := []*Event{
+		{AgentAddr: buyer, EventType: "deposit", Amount: "100.00"},
+		{AgentAddr: buyer, EventType: "hold", Amount: "20.00"},
+		{AgentAddr: buyer, EventType: "settle_hold_out", Amount: "20.00"},
+	}
+	buyerBal := RebuildBalance(buyer, buyerEvents)
+	if buyerBal.Available != "80.000000" {
+		t.Errorf("buyer available: expected 80.000000, got %s", buyerBal.Available)
+	}
+	if buyerBal.Pending != "0.000000" {
+		t.Errorf("buyer pending: expected 0.000000, got %s", buyerBal.Pending)
+	}
+	if buyerBal.TotalOut != "20.000000" {
+		t.Errorf("buyer totalOut: expected 20.000000, got %s", buyerBal.TotalOut)
+	}
+
+	// Seller: settle_hold_in 20
+	sellerEvents := []*Event{
+		{AgentAddr: seller, EventType: "settle_hold_in", Amount: "20.00"},
+	}
+	sellerBal := RebuildBalance(seller, sellerEvents)
+	if sellerBal.Available != "20.000000" {
+		t.Errorf("seller available: expected 20.000000, got %s", sellerBal.Available)
+	}
+	if sellerBal.TotalIn != "20.000000" {
+		t.Errorf("seller totalIn: expected 20.000000, got %s", sellerBal.TotalIn)
+	}
+}
+
+func TestRebuildBalance_TransferEvents(t *testing.T) {
+	from := "0xfrom"
+	to := "0xto"
+
+	fromEvents := []*Event{
+		{AgentAddr: from, EventType: "deposit", Amount: "50.00"},
+		{AgentAddr: from, EventType: "transfer_out", Amount: "15.00"},
+	}
+	fromBal := RebuildBalance(from, fromEvents)
+	if fromBal.Available != "35.000000" {
+		t.Errorf("from available: expected 35.000000, got %s", fromBal.Available)
+	}
+	if fromBal.TotalOut != "15.000000" {
+		t.Errorf("from totalOut: expected 15.000000, got %s", fromBal.TotalOut)
+	}
+
+	toEvents := []*Event{
+		{AgentAddr: to, EventType: "transfer_in", Amount: "15.00"},
+	}
+	toBal := RebuildBalance(to, toEvents)
+	if toBal.Available != "15.000000" {
+		t.Errorf("to available: expected 15.000000, got %s", toBal.Available)
+	}
+	if toBal.TotalIn != "15.000000" {
+		t.Errorf("to totalIn: expected 15.000000, got %s", toBal.TotalIn)
+	}
+}
+
+func TestRebuildBalance_FeeIn(t *testing.T) {
+	platform := "0xplatform"
+	events := []*Event{
+		{AgentAddr: platform, EventType: "fee_in", Amount: "1.50"},
+		{AgentAddr: platform, EventType: "fee_in", Amount: "0.75"},
+	}
+	bal := RebuildBalance(platform, events)
+	if bal.Available != "2.250000" {
+		t.Errorf("platform available: expected 2.250000, got %s", bal.Available)
+	}
+	if bal.TotalIn != "2.250000" {
+		t.Errorf("platform totalIn: expected 2.250000, got %s", bal.TotalIn)
+	}
+}
+
+func TestRebuildBalance_PartialEscrowEvents(t *testing.T) {
+	buyer := "0xbuyer"
+	seller := "0xseller"
+
+	buyerEvents := []*Event{
+		{AgentAddr: buyer, EventType: "deposit", Amount: "100.00"},
+		{AgentAddr: buyer, EventType: "escrow_lock", Amount: "20.00"},
+		{AgentAddr: buyer, EventType: "escrow_partial_release", Amount: "12.00"},
+		{AgentAddr: buyer, EventType: "escrow_partial_refund", Amount: "8.00"},
+	}
+	buyerBal := RebuildBalance(buyer, buyerEvents)
+	if buyerBal.Available != "88.000000" {
+		t.Errorf("buyer available: expected 88.000000, got %s", buyerBal.Available)
+	}
+	if buyerBal.Escrowed != "0.000000" {
+		t.Errorf("buyer escrowed: expected 0.000000, got %s", buyerBal.Escrowed)
+	}
+	if buyerBal.TotalOut != "12.000000" {
+		t.Errorf("buyer totalOut: expected 12.000000, got %s", buyerBal.TotalOut)
+	}
+
+	sellerEvents := []*Event{
+		{AgentAddr: seller, EventType: "escrow_partial_receive", Amount: "12.00"},
+	}
+	sellerBal := RebuildBalance(seller, sellerEvents)
+	if sellerBal.Available != "12.000000" {
+		t.Errorf("seller available: expected 12.000000, got %s", sellerBal.Available)
+	}
+	if sellerBal.TotalIn != "12.000000" {
+		t.Errorf("seller totalIn: expected 12.000000, got %s", sellerBal.TotalIn)
+	}
+}
+
+func TestRebuildBalance_UnknownEventType(t *testing.T) {
+	agent := "0xtest"
+	events := []*Event{
+		{AgentAddr: agent, EventType: "deposit", Amount: "10.00"},
+		{AgentAddr: agent, EventType: "unknown_type", Amount: "5.00"},
+	}
+	bal := RebuildBalance(agent, events)
+	// Unknown type should be silently ignored
+	if bal.Available != "10.000000" {
+		t.Errorf("expected available 10.000000 (unknown type ignored), got %s", bal.Available)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/mbd888/alancoin/internal/usdc"
 )
@@ -1474,4 +1475,818 @@ func mustParse(s string) *big.Int {
 		panic("failed to parse USDC amount: " + s)
 	}
 	return val
+}
+
+// ---------------------------------------------------------------------------
+// Transfer tests
+// ---------------------------------------------------------------------------
+
+func TestLedger_Transfer_Success(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	from := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	to := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	l.Deposit(ctx, from, "20.00", "0xtx1")
+
+	err := l.Transfer(ctx, from, to, "7.00", "transfer_ref_1")
+	if err != nil {
+		t.Fatalf("Transfer failed: %v", err)
+	}
+
+	fromBal, _ := l.GetBalance(ctx, from)
+	toBal, _ := l.GetBalance(ctx, to)
+
+	if fromBal.Available != "13.000000" {
+		t.Errorf("from available: expected 13.000000, got %s", fromBal.Available)
+	}
+	if fromBal.TotalOut != "7.000000" {
+		t.Errorf("from totalOut: expected 7.000000, got %s", fromBal.TotalOut)
+	}
+	if toBal.Available != "7.000000" {
+		t.Errorf("to available: expected 7.000000, got %s", toBal.Available)
+	}
+	if toBal.TotalIn != "7.000000" {
+		t.Errorf("to totalIn: expected 7.000000, got %s", toBal.TotalIn)
+	}
+
+	assertFundConservation(t, fromBal, "transfer sender")
+	assertFundConservation(t, toBal, "transfer receiver")
+}
+
+func TestLedger_Transfer_InsufficientBalance(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	from := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	to := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	l.Deposit(ctx, from, "5.00", "0xtx1")
+
+	err := l.Transfer(ctx, from, to, "10.00", "transfer_ref_1")
+	if err == nil {
+		t.Fatal("expected error for insufficient balance")
+	}
+}
+
+func TestLedger_Transfer_InvalidAmount(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	tests := []struct {
+		name   string
+		amount string
+	}{
+		{"zero", "0"},
+		{"negative", "-1.00"},
+		{"invalid_string", "abc"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := l.Transfer(ctx, "0xfrom", "0xto", tt.amount, "ref")
+			if err != ErrInvalidAmount {
+				t.Errorf("expected ErrInvalidAmount, got %v", err)
+			}
+		})
+	}
+}
+
+func TestLedger_Transfer_NonexistentSender(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	err := l.Transfer(ctx, "0xghost", "0xto", "1.00", "ref")
+	if err == nil {
+		t.Fatal("expected error for nonexistent sender")
+	}
+}
+
+func TestLedger_Transfer_WithEvents(t *testing.T) {
+	store := NewMemoryStore()
+	es := NewMemoryEventStore()
+	l := NewWithEvents(store, es)
+	ctx := context.Background()
+
+	from := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	to := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	l.Deposit(ctx, from, "20.00", "0xtx1")
+	err := l.Transfer(ctx, from, to, "7.00", "transfer_ref")
+	if err != nil {
+		t.Fatalf("Transfer failed: %v", err)
+	}
+
+	// Events should include transfer_out and transfer_in
+	fromEvents, _ := es.GetEvents(ctx, from, time.Time{})
+	toEvents, _ := es.GetEvents(ctx, to, time.Time{})
+
+	var foundOut, foundIn bool
+	for _, e := range fromEvents {
+		if e.EventType == "transfer_out" {
+			foundOut = true
+		}
+	}
+	for _, e := range toEvents {
+		if e.EventType == "transfer_in" {
+			foundIn = true
+		}
+	}
+
+	if !foundOut {
+		t.Error("expected transfer_out event for sender")
+	}
+	if !foundIn {
+		t.Error("expected transfer_in event for receiver")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SettleHold tests (Ledger layer)
+// ---------------------------------------------------------------------------
+
+func TestLedger_SettleHold_Success(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	buyer := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	seller := "0xssssssssssssssssssssssssssssssssssssssss"
+
+	l.Deposit(ctx, buyer, "20.00", "0xtx1")
+	l.Hold(ctx, buyer, "8.00", "hold1")
+
+	err := l.SettleHold(ctx, buyer, seller, "8.00", "hold1")
+	if err != nil {
+		t.Fatalf("SettleHold failed: %v", err)
+	}
+
+	buyerBal, _ := l.GetBalance(ctx, buyer)
+	sellerBal, _ := l.GetBalance(ctx, seller)
+
+	if buyerBal.Pending != "0.000000" {
+		t.Errorf("buyer pending: expected 0.000000, got %s", buyerBal.Pending)
+	}
+	if buyerBal.TotalOut != "8.000000" {
+		t.Errorf("buyer totalOut: expected 8.000000, got %s", buyerBal.TotalOut)
+	}
+	if sellerBal.Available != "8.000000" {
+		t.Errorf("seller available: expected 8.000000, got %s", sellerBal.Available)
+	}
+	if sellerBal.TotalIn != "8.000000" {
+		t.Errorf("seller totalIn: expected 8.000000, got %s", sellerBal.TotalIn)
+	}
+
+	assertFundConservation(t, buyerBal, "settle hold buyer")
+	assertFundConservation(t, sellerBal, "settle hold seller")
+}
+
+func TestLedger_SettleHold_InsufficientPending(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	buyer := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	seller := "0xssssssssssssssssssssssssssssssssssssssss"
+
+	l.Deposit(ctx, buyer, "20.00", "0xtx1")
+	l.Hold(ctx, buyer, "3.00", "hold1")
+
+	err := l.SettleHold(ctx, buyer, seller, "5.00", "hold1")
+	if err == nil {
+		t.Fatal("expected error for insufficient pending")
+	}
+}
+
+func TestLedger_SettleHold_InvalidAmount(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	err := l.SettleHold(ctx, "0xbuyer", "0xseller", "0", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount, got %v", err)
+	}
+
+	err = l.SettleHold(ctx, "0xbuyer", "0xseller", "-1", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for negative, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PartialEscrowSettle tests
+// ---------------------------------------------------------------------------
+
+func TestLedger_PartialEscrowSettle_Success(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	buyer := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	seller := "0xssssssssssssssssssssssssssssssssssssssss"
+
+	l.Deposit(ctx, buyer, "20.00", "0xtx1")
+	l.EscrowLock(ctx, buyer, "10.00", "esc1")
+
+	// Settle: release $6 to seller, refund $4 to buyer
+	err := l.PartialEscrowSettle(ctx, buyer, seller, "6.00", "4.00", "esc1")
+	if err != nil {
+		t.Fatalf("PartialEscrowSettle failed: %v", err)
+	}
+
+	buyerBal, _ := l.GetBalance(ctx, buyer)
+	sellerBal, _ := l.GetBalance(ctx, seller)
+
+	if buyerBal.Escrowed != "0.000000" {
+		t.Errorf("buyer escrowed: expected 0.000000, got %s", buyerBal.Escrowed)
+	}
+	if buyerBal.Available != "14.000000" {
+		t.Errorf("buyer available: expected 14.000000 (10 remaining + 4 refund), got %s", buyerBal.Available)
+	}
+	if buyerBal.TotalOut != "6.000000" {
+		t.Errorf("buyer totalOut: expected 6.000000, got %s", buyerBal.TotalOut)
+	}
+	if sellerBal.Available != "6.000000" {
+		t.Errorf("seller available: expected 6.000000, got %s", sellerBal.Available)
+	}
+	if sellerBal.TotalIn != "6.000000" {
+		t.Errorf("seller totalIn: expected 6.000000, got %s", sellerBal.TotalIn)
+	}
+
+	assertFundConservation(t, buyerBal, "partial escrow buyer")
+	assertFundConservation(t, sellerBal, "partial escrow seller")
+}
+
+func TestLedger_PartialEscrowSettle_InsufficientEscrow(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	buyer := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	seller := "0xssssssssssssssssssssssssssssssssssssssss"
+
+	l.Deposit(ctx, buyer, "20.00", "0xtx1")
+	l.EscrowLock(ctx, buyer, "5.00", "esc1")
+
+	// Try to settle more than escrowed
+	err := l.PartialEscrowSettle(ctx, buyer, seller, "4.00", "4.00", "esc1")
+	if err == nil {
+		t.Fatal("expected error for insufficient escrowed")
+	}
+}
+
+func TestLedger_PartialEscrowSettle_InvalidAmount(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	// Both zero
+	err := l.PartialEscrowSettle(ctx, "0xbuyer", "0xseller", "0", "0", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for zero amounts, got %v", err)
+	}
+
+	// Negative
+	err = l.PartialEscrowSettle(ctx, "0xbuyer", "0xseller", "-1", "0", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for negative, got %v", err)
+	}
+}
+
+func TestLedger_PartialEscrowSettle_FullRelease(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	buyer := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	seller := "0xssssssssssssssssssssssssssssssssssssssss"
+
+	l.Deposit(ctx, buyer, "20.00", "0xtx1")
+	l.EscrowLock(ctx, buyer, "10.00", "esc1")
+
+	// Full release, no refund
+	err := l.PartialEscrowSettle(ctx, buyer, seller, "10.00", "0.00", "esc1")
+	if err != nil {
+		t.Fatalf("PartialEscrowSettle failed: %v", err)
+	}
+
+	buyerBal, _ := l.GetBalance(ctx, buyer)
+	if buyerBal.Escrowed != "0.000000" {
+		t.Errorf("buyer escrowed: expected 0.000000, got %s", buyerBal.Escrowed)
+	}
+	if buyerBal.Available != "10.000000" {
+		t.Errorf("buyer available: expected 10.000000, got %s", buyerBal.Available)
+	}
+}
+
+func TestLedger_PartialEscrowSettle_FullRefund(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	buyer := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	seller := "0xssssssssssssssssssssssssssssssssssssssss"
+
+	l.Deposit(ctx, buyer, "20.00", "0xtx1")
+	l.EscrowLock(ctx, buyer, "10.00", "esc1")
+
+	// Full refund, no release
+	err := l.PartialEscrowSettle(ctx, buyer, seller, "0.00", "10.00", "esc1")
+	if err != nil {
+		t.Fatalf("PartialEscrowSettle failed: %v", err)
+	}
+
+	buyerBal, _ := l.GetBalance(ctx, buyer)
+	if buyerBal.Available != "20.000000" {
+		t.Errorf("buyer available: expected 20.000000, got %s", buyerBal.Available)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetHistoryPage tests
+// ---------------------------------------------------------------------------
+
+func TestLedger_GetHistoryPage_DefaultLimit(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	agent := "0x1234567890123456789012345678901234567890"
+	l.Deposit(ctx, agent, "10.00", "0xtx1")
+
+	entries, err := l.GetHistoryPage(ctx, agent, 0, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("GetHistoryPage failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("expected 1 entry, got %d", len(entries))
+	}
+}
+
+func TestLedger_GetHistoryPage_WithLimit(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	agent := "0x1234567890123456789012345678901234567890"
+	l.Deposit(ctx, agent, "10.00", "0xtx1")
+	l.Spend(ctx, agent, "1.00", "sk_1")
+	l.Spend(ctx, agent, "2.00", "sk_2")
+
+	entries, err := l.GetHistoryPage(ctx, agent, 2, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("GetHistoryPage failed: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("expected 2 entries with limit 2, got %d", len(entries))
+	}
+}
+
+func TestLedger_GetHistoryPage_CaseInsensitive(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	agent := "0xAABBCCDDEEFF00112233445566778899aabbccdd"
+	l.Deposit(ctx, agent, "10.00", "0xtx1")
+
+	// Query with different case
+	entries, err := l.GetHistoryPage(ctx, "0xAABBCCDDEEFF00112233445566778899AABBCCDD", 10, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("GetHistoryPage failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("expected 1 entry (case insensitive), got %d", len(entries))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional validation coverage
+// ---------------------------------------------------------------------------
+
+func TestLedger_Deposit_InvalidAmount(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	tests := []struct {
+		name   string
+		amount string
+	}{
+		{"zero", "0"},
+		{"negative", "-1.00"},
+		{"invalid_string", "abc"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := l.Deposit(ctx, "0xagent", tt.amount, "0xtx_"+tt.name)
+			if err != ErrInvalidAmount {
+				t.Errorf("expected ErrInvalidAmount, got %v", err)
+			}
+		})
+	}
+}
+
+func TestLedger_Spend_InvalidAmount(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	err := l.Spend(ctx, "0xagent", "0", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for zero, got %v", err)
+	}
+
+	err = l.Spend(ctx, "0xagent", "abc", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for invalid string, got %v", err)
+	}
+}
+
+func TestLedger_Withdraw_InvalidAmount(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	err := l.Withdraw(ctx, "0xagent", "0", "0xhash")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for zero, got %v", err)
+	}
+
+	err = l.Withdraw(ctx, "0xagent", "-5", "0xhash")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for negative, got %v", err)
+	}
+}
+
+func TestLedger_Refund_InvalidAmount(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	err := l.Refund(ctx, "0xagent", "0", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for zero, got %v", err)
+	}
+}
+
+func TestLedger_Hold_InvalidAmount(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	err := l.Hold(ctx, "0xagent", "0", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for zero, got %v", err)
+	}
+}
+
+func TestLedger_ConfirmHold_InvalidAmount(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	err := l.ConfirmHold(ctx, "0xagent", "0", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for zero, got %v", err)
+	}
+}
+
+func TestLedger_ReleaseHold_InvalidAmount(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	err := l.ReleaseHold(ctx, "0xagent", "0", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for zero, got %v", err)
+	}
+}
+
+func TestLedger_EscrowLock_InvalidAmount_Comprehensive(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	err := l.EscrowLock(ctx, "0xagent", "abc", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for invalid string, got %v", err)
+	}
+}
+
+func TestLedger_ReleaseEscrow_InvalidAmount(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	err := l.ReleaseEscrow(ctx, "0xbuyer", "0xseller", "0", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for zero, got %v", err)
+	}
+}
+
+func TestLedger_RefundEscrow_InvalidAmount(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	err := l.RefundEscrow(ctx, "0xagent", "0", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for zero, got %v", err)
+	}
+}
+
+func TestLedger_SettleHoldWithFee_InvalidAmount(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	// invalid seller amount
+	err := l.SettleHoldWithFee(ctx, "0xbuyer", "0xseller", "abc", "0xplatform", "1.00", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for invalid seller amount, got %v", err)
+	}
+
+	// invalid fee amount
+	err = l.SettleHoldWithFee(ctx, "0xbuyer", "0xseller", "1.00", "0xplatform", "abc", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for invalid fee amount, got %v", err)
+	}
+
+	// zero seller amount
+	err = l.SettleHoldWithFee(ctx, "0xbuyer", "0xseller", "0", "0xplatform", "0", "ref")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount for zero amounts, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// StoreRef and EventStoreRef
+// ---------------------------------------------------------------------------
+
+func TestLedger_StoreRef(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	if l.StoreRef() != store {
+		t.Error("StoreRef should return the underlying store")
+	}
+}
+
+func TestLedger_EventStoreRef(t *testing.T) {
+	es := NewMemoryEventStore()
+	l := NewWithEvents(NewMemoryStore(), es)
+	if l.EventStoreRef() != es {
+		t.Error("EventStoreRef should return the event store")
+	}
+
+	l2 := New(NewMemoryStore())
+	if l2.EventStoreRef() != nil {
+		t.Error("EventStoreRef should return nil when no event store")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CanSpend with credit
+// ---------------------------------------------------------------------------
+
+func TestLedger_CanSpend_WithCredit(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	agent := "0x1234567890123456789012345678901234567890"
+	l.Deposit(ctx, agent, "5.00", "0xtx1")
+	store.SetCreditLimit(ctx, agent, "10.00")
+
+	// Can spend up to available + credit = 15
+	canSpend, err := l.CanSpend(ctx, agent, "12.00")
+	if err != nil {
+		t.Fatalf("CanSpend failed: %v", err)
+	}
+	if !canSpend {
+		t.Error("should be able to spend 12 with 5 available + 10 credit")
+	}
+
+	// Cannot exceed total
+	canSpend, err = l.CanSpend(ctx, agent, "16.00")
+	if err != nil {
+		t.Fatalf("CanSpend failed: %v", err)
+	}
+	if canSpend {
+		t.Error("should not be able to spend 16 with 5 available + 10 credit")
+	}
+}
+
+func TestLedger_CanSpend_InvalidAmount(t *testing.T) {
+	l := New(NewMemoryStore())
+	ctx := context.Background()
+
+	_, err := l.CanSpend(ctx, "0xagent", "abc")
+	if err != ErrInvalidAmount {
+		t.Errorf("expected ErrInvalidAmount, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetHistory default limit
+// ---------------------------------------------------------------------------
+
+func TestLedger_GetHistory_DefaultLimit(t *testing.T) {
+	store := NewMemoryStore()
+	l := New(store)
+	ctx := context.Background()
+
+	agent := "0x1234567890123456789012345678901234567890"
+	l.Deposit(ctx, agent, "10.00", "0xtx1")
+
+	entries, err := l.GetHistory(ctx, agent, -1)
+	if err != nil {
+		t.Fatalf("GetHistory failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("expected 1 entry with default limit, got %d", len(entries))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Audit context helpers
+// ---------------------------------------------------------------------------
+
+func TestWithAuditRequestID(t *testing.T) {
+	ctx := context.Background()
+	ctx = WithAuditRequestID(ctx, "req_12345")
+
+	_, _, _, reqID := actorFromCtx(ctx)
+	if reqID != "req_12345" {
+		t.Errorf("expected requestID req_12345, got %q", reqID)
+	}
+}
+
+func TestActorFromCtx_Defaults(t *testing.T) {
+	ctx := context.Background()
+
+	actorType, actorID, ip, requestID := actorFromCtx(ctx)
+	if actorType != "system" {
+		t.Errorf("expected default actorType 'system', got %q", actorType)
+	}
+	if actorID != "" {
+		t.Errorf("expected empty actorID, got %q", actorID)
+	}
+	if ip != "" {
+		t.Errorf("expected empty ip, got %q", ip)
+	}
+	if requestID != "" {
+		t.Errorf("expected empty requestID, got %q", requestID)
+	}
+}
+
+func TestBalanceSnapshot_NilBalance(t *testing.T) {
+	snap := balanceSnapshot(nil)
+	if snap != "{}" {
+		t.Errorf("expected '{}' for nil balance, got %q", snap)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MemoryStore direct tests (UseCredit, RepayCredit, SumAllBalances, GetEntry)
+// ---------------------------------------------------------------------------
+
+func TestMemoryStore_UseCredit(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	agent := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	// UseCredit for nonexistent agent
+	err := store.UseCredit(ctx, agent, "1.00")
+	if err != ErrAgentNotFound {
+		t.Errorf("expected ErrAgentNotFound, got %v", err)
+	}
+
+	// Set up agent with credit limit
+	store.Credit(ctx, agent, "10.00", "0xtx1", "deposit")
+	store.SetCreditLimit(ctx, agent, "5.00")
+
+	// Use some credit
+	err = store.UseCredit(ctx, agent, "3.00")
+	if err != nil {
+		t.Fatalf("UseCredit failed: %v", err)
+	}
+
+	_, creditUsed, _ := store.GetCreditInfo(ctx, agent)
+	if creditUsed != "3.000000" {
+		t.Errorf("expected creditUsed 3.000000, got %s", creditUsed)
+	}
+
+	// Exceed credit limit
+	err = store.UseCredit(ctx, agent, "5.00")
+	if err != ErrInsufficientBalance {
+		t.Errorf("expected ErrInsufficientBalance, got %v", err)
+	}
+}
+
+func TestMemoryStore_RepayCredit(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	agent := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	// RepayCredit for nonexistent agent
+	err := store.RepayCredit(ctx, agent, "1.00")
+	if err != ErrAgentNotFound {
+		t.Errorf("expected ErrAgentNotFound, got %v", err)
+	}
+
+	// Set up agent with credit usage
+	store.Credit(ctx, agent, "10.00", "0xtx1", "deposit")
+	store.SetCreditLimit(ctx, agent, "10.00")
+	store.UseCredit(ctx, agent, "5.00")
+
+	// Repay partial
+	err = store.RepayCredit(ctx, agent, "2.00")
+	if err != nil {
+		t.Fatalf("RepayCredit failed: %v", err)
+	}
+
+	_, creditUsed, _ := store.GetCreditInfo(ctx, agent)
+	if creditUsed != "3.000000" {
+		t.Errorf("expected creditUsed 3.000000, got %s", creditUsed)
+	}
+
+	// Repay more than owed (should cap at what's owed)
+	err = store.RepayCredit(ctx, agent, "10.00")
+	if err != nil {
+		t.Fatalf("RepayCredit (over) failed: %v", err)
+	}
+
+	_, creditUsed, _ = store.GetCreditInfo(ctx, agent)
+	if creditUsed != "0.000000" {
+		t.Errorf("expected creditUsed 0.000000 after full repay, got %s", creditUsed)
+	}
+}
+
+func TestMemoryStore_SumAllBalances(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	l := New(store)
+
+	agent1 := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	agent2 := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	l.Deposit(ctx, agent1, "10.00", "0xtx1")
+	l.Deposit(ctx, agent2, "20.00", "0xtx2")
+	l.Hold(ctx, agent1, "3.00", "hold1")
+	l.EscrowLock(ctx, agent2, "5.00", "esc1")
+
+	avail, pending, escrowed, err := store.SumAllBalances(ctx)
+	if err != nil {
+		t.Fatalf("SumAllBalances failed: %v", err)
+	}
+
+	// agent1: avail=7, pend=3, esc=0
+	// agent2: avail=15, pend=0, esc=5
+	// totals: avail=22, pend=3, esc=5
+	if avail != "22.000000" {
+		t.Errorf("expected total available 22.000000, got %s", avail)
+	}
+	if pending != "3.000000" {
+		t.Errorf("expected total pending 3.000000, got %s", pending)
+	}
+	if escrowed != "5.000000" {
+		t.Errorf("expected total escrowed 5.000000, got %s", escrowed)
+	}
+}
+
+func TestMemoryStore_GetEntry(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	l := New(store)
+
+	agent := "0x1234567890123456789012345678901234567890"
+	l.Deposit(ctx, agent, "10.00", "0xtx1")
+
+	entries, _ := l.GetHistory(ctx, agent, 10)
+	if len(entries) == 0 {
+		t.Fatal("expected at least one entry")
+	}
+
+	// Get existing entry
+	entry, err := store.GetEntry(ctx, entries[0].ID)
+	if err != nil {
+		t.Fatalf("GetEntry failed: %v", err)
+	}
+	if entry.ID != entries[0].ID {
+		t.Errorf("entry ID mismatch")
+	}
+
+	// Get nonexistent entry
+	_, err = store.GetEntry(ctx, "nonexistent")
+	if err != ErrEntryNotFound {
+		t.Errorf("expected ErrEntryNotFound, got %v", err)
+	}
+}
+
+func TestMemoryStore_GetCreditInfo_NonexistentAgent(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	limit, used, err := store.GetCreditInfo(ctx, "0xnonexistent")
+	if err != nil {
+		t.Fatalf("GetCreditInfo failed: %v", err)
+	}
+	if limit != "0" || used != "0" {
+		t.Errorf("expected 0/0 for nonexistent agent, got %s/%s", limit, used)
+	}
 }
