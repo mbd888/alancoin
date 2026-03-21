@@ -78,6 +78,13 @@ type Config struct {
 	// Observability
 	OTLPEndpoint string // OpenTelemetry collector endpoint (e.g. "localhost:4317"), empty = disabled
 
+	// Operational tuning
+	CircuitBreakerThreshold int           // Failure count before circuit opens
+	CircuitBreakerDuration  time.Duration // How long circuit stays open
+	DrainDeadline           time.Duration // Max time to wait for in-flight requests during shutdown
+	EventBusBufferSize      int           // Event bus channel buffer size
+	RateLimitBurst          int           // Token bucket burst size for rate limiter
+
 	// Stripe billing
 	StripeSecretKey         string // Stripe secret key (sk_test_... or sk_live_...)
 	StripeWebhookSecret     string // Stripe webhook signing secret (whsec_...)
@@ -110,6 +117,13 @@ const (
 	DefaultHTTPWriteTimeout = 30 * time.Second
 	DefaultHTTPIdleTimeout  = 60 * time.Second
 	DefaultRequestTimeout   = 30 * time.Second
+
+	// Operational defaults
+	DefaultCircuitBreakerThreshold = 5
+	DefaultCircuitBreakerDuration  = 30 * time.Second
+	DefaultDrainDeadline           = 15 * time.Second
+	DefaultEventBusBufferSize      = 10000
+	DefaultRateLimitBurst          = 10
 )
 
 // Load reads configuration from environment variables
@@ -165,6 +179,12 @@ func Load() (*Config, error) {
 
 		AllowLocalEndpoints: os.Getenv("ALLOW_LOCAL_ENDPOINTS") == "true",
 		CORSAllowedOrigins:  os.Getenv("CORS_ALLOWED_ORIGINS"),
+
+		CircuitBreakerThreshold: int(getEnvInt64("CB_THRESHOLD", int64(DefaultCircuitBreakerThreshold))),
+		CircuitBreakerDuration:  getEnvDuration("CB_DURATION", DefaultCircuitBreakerDuration),
+		DrainDeadline:           getEnvDuration("DRAIN_DEADLINE", DefaultDrainDeadline),
+		EventBusBufferSize:      int(getEnvInt64("EVENT_BUS_BUFFER_SIZE", int64(DefaultEventBusBufferSize))),
+		RateLimitBurst:          int(getEnvInt64("RATE_LIMIT_BURST", int64(DefaultRateLimitBurst))),
 
 		StripeSecretKey:         os.Getenv("STRIPE_SECRET_KEY"),
 		StripeWebhookSecret:     os.Getenv("STRIPE_WEBHOOK_SECRET"),
@@ -233,6 +253,11 @@ func (c *Config) Validate() error {
 	// Reject ALLOW_LOCAL_ENDPOINTS in production — prevents SSRF to internal services.
 	if c.IsProduction() && c.AllowLocalEndpoints {
 		return fmt.Errorf("ALLOW_LOCAL_ENDPOINTS=true is not allowed when ENV=production")
+	}
+
+	// Reject sentinel platform address in production — must be a real address.
+	if c.IsProduction() && c.PlatformAddress == "0x0000000000000000000000000000000000000001" {
+		return fmt.Errorf("PLATFORM_ADDRESS must be set to a real address in production")
 	}
 
 	// Warn if production database connection doesn't use SSL

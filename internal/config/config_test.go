@@ -184,3 +184,63 @@ func TestGetEnvInt64(t *testing.T) {
 	assert.Equal(t, int64(99), getEnvInt64("NONEXISTENT_VAR", 99))
 	assert.Equal(t, int64(99), getEnvInt64("TEST_INVALID", 99)) // Falls back on parse error
 }
+
+func TestConfig_Validate_ProductionPlatformAddress(t *testing.T) {
+	base := Config{
+		PrivateKey:         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		RPCURL:             "https://sepolia.base.org",
+		Port:               "8080",
+		RateLimitRPM:       100,
+		DBStatementTimeout: 30000,
+		Env:                "production",
+		AdminSecret:        "secret",
+	}
+
+	// Sentinel address rejected in production
+	cfg := base
+	cfg.PlatformAddress = "0x0000000000000000000000000000000000000001"
+	err := cfg.Validate()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "PLATFORM_ADDRESS must be set to a real address")
+
+	// Real address accepted in production
+	cfg.PlatformAddress = "0x1234567890abcdef1234567890abcdef12345678"
+	err = cfg.Validate()
+	assert.NoError(t, err)
+
+	// Sentinel address accepted in development (default env)
+	cfg.Env = "development"
+	cfg.PlatformAddress = "0x0000000000000000000000000000000000000001"
+	err = cfg.Validate()
+	assert.NoError(t, err)
+}
+
+func TestConfig_OperationalDefaults(t *testing.T) {
+	setEnv(t, "PRIVATE_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, DefaultCircuitBreakerThreshold, cfg.CircuitBreakerThreshold)
+	assert.Equal(t, DefaultCircuitBreakerDuration, cfg.CircuitBreakerDuration)
+	assert.Equal(t, DefaultDrainDeadline, cfg.DrainDeadline)
+	assert.Equal(t, DefaultEventBusBufferSize, cfg.EventBusBufferSize)
+	assert.Equal(t, DefaultRateLimitBurst, cfg.RateLimitBurst)
+}
+
+func TestConfig_OperationalOverrides(t *testing.T) {
+	setEnv(t, "PRIVATE_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	setEnv(t, "CB_THRESHOLD", "10")
+	setEnv(t, "CB_DURATION", "1m")
+	setEnv(t, "DRAIN_DEADLINE", "30s")
+	setEnv(t, "EVENT_BUS_BUFFER_SIZE", "50000")
+	setEnv(t, "RATE_LIMIT_BURST", "20")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, 10, cfg.CircuitBreakerThreshold)
+	assert.Equal(t, time.Minute, cfg.CircuitBreakerDuration)
+	assert.Equal(t, 30*time.Second, cfg.DrainDeadline)
+	assert.Equal(t, 50000, cfg.EventBusBufferSize)
+	assert.Equal(t, 20, cfg.RateLimitBurst)
+}
