@@ -10,10 +10,11 @@ import (
 )
 
 type mockLedger struct {
-	mu       sync.Mutex
-	locked   map[string]string
-	released map[string]string
-	refunded map[string]string
+	mu        sync.Mutex
+	locked    map[string]string
+	released  map[string]string
+	refunded  map[string]string
+	refundErr error // inject error for RefundEscrow
 }
 
 func newMockLedger() *mockLedger {
@@ -41,6 +42,9 @@ func (m *mockLedger) ReleaseEscrow(_ context.Context, _, _, amount, reference st
 func (m *mockLedger) RefundEscrow(_ context.Context, _, amount, reference string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.refundErr != nil {
+		return m.refundErr
+	}
 	m.refunded[reference] = amount
 	return nil
 }
@@ -470,4 +474,35 @@ func TestWorkflow_OperationsAfterCompleted(t *testing.T) {
 	if !errors.Is(err, ErrWorkflowCompleted) {
 		t.Fatalf("expected ErrWorkflowCompleted, got %v", err)
 	}
+}
+
+func TestWorkflow_CreateStoreFailRefundError(t *testing.T) {
+	// Verify that a store.Create failure followed by a refund failure
+	// does not panic and still returns the store error to the caller.
+	ml := newMockLedger()
+	ml.refundErr = errors.New("ledger unavailable")
+
+	// Use a store that fails on Create
+	store := &failingStore{MemoryStore: NewMemoryStore(), createErr: errors.New("db down")}
+	svc := NewService(store, ml).WithLogger(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	ctx := context.Background()
+	req := defaultReq()
+	_, err := svc.Create(ctx, "0xOwner", req)
+	if err == nil {
+		t.Fatal("expected error from store.Create")
+	}
+	if err.Error() != "db down" {
+		t.Fatalf("expected store error, got: %v", err)
+	}
+}
+
+// failingStore wraps MemoryStore and fails on Create.
+type failingStore struct {
+	*MemoryStore
+	createErr error
+}
+
+func (f *failingStore) Create(_ context.Context, _ *Workflow) error {
+	return f.createErr
 }

@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/idgen"
 	"github.com/mbd888/alancoin/internal/metrics"
 	"github.com/mbd888/alancoin/internal/retry"
 	"github.com/mbd888/alancoin/internal/traces"
@@ -314,7 +315,7 @@ func (s *Service) Create(ctx context.Context, ownerAddr string, req CreateWorkfl
 
 	now := time.Now()
 	wf := &Workflow{
-		ID:             generateWorkflowID(),
+		ID:             idgen.WithPrefix("wfl_"),
 		OwnerAddr:      strings.ToLower(ownerAddr),
 		Name:           req.Name,
 		Description:    req.Description,
@@ -345,7 +346,12 @@ func (s *Service) Create(ctx context.Context, ownerAddr string, req CreateWorkfl
 	}
 
 	if err := s.store.Create(ctx, wf); err != nil {
-		_ = s.ledger.RefundEscrow(ctx, wf.OwnerAddr, wf.BudgetTotal, wf.EscrowRef)
+		if refundErr := s.ledger.RefundEscrow(ctx, wf.OwnerAddr, wf.BudgetTotal, wf.EscrowRef); refundErr != nil {
+			s.logger.Error("CRITICAL: workflow store create failed and refund also failed — funds stuck in escrow",
+				"workflow_id", wf.ID, "owner", wf.OwnerAddr, "amount", wf.BudgetTotal,
+				"escrow_ref", wf.EscrowRef, "store_error", err, "refund_error", refundErr,
+				"action", "manual_review_needed")
+		}
 		return nil, err
 	}
 
@@ -476,7 +482,10 @@ func (s *Service) CompleteStep(ctx context.Context, wfID, stepName, callerAddr, 
 			wf.ClosedAt = &now
 			wf.UpdatedAt = now
 			wf.AuditTrail = append(wf.AuditTrail, s.auditEntry(wf, "circuit_broken", callerAddr, stepName, actualCost, err.Error()))
-			_ = s.store.Update(ctx, wf)
+			if updateErr := s.store.Update(ctx, wf); updateErr != nil {
+				s.logger.Error("workflow circuit breaker state update failed",
+					"workflow_id", wfID, "step", stepName, "error", updateErr)
+			}
 			metrics.WorkflowBreakerTotal.Inc()
 			s.cleanupLock(wfID)
 			return wf, err
@@ -578,7 +587,12 @@ func (s *Service) FailStep(ctx context.Context, wfID, stepName, callerAddr, reas
 		remainBig, _ := usdc.Parse(wf.BudgetRemain)
 		if remainBig.Sign() > 0 {
 			refRef := wf.EscrowRef + ":refund"
-			_ = s.ledger.RefundEscrow(ctx, wf.OwnerAddr, wf.BudgetRemain, refRef)
+			if refundErr := s.ledger.RefundEscrow(ctx, wf.OwnerAddr, wf.BudgetRemain, refRef); refundErr != nil {
+				s.logger.Error("CRITICAL: workflow completion refund failed — funds stuck in escrow",
+					"workflow_id", wf.ID, "owner", wf.OwnerAddr, "amount", wf.BudgetRemain,
+					"escrow_ref", refRef, "error", refundErr,
+					"action", "manual_review_needed")
+			}
 		}
 		s.cleanupLock(wfID)
 	}
@@ -737,12 +751,4 @@ func validateAmount(amount string) error {
 		return fmt.Errorf("%w: must be positive", ErrInvalidAmount)
 	}
 	return nil
-}
-
-func generateWorkflowID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return fmt.Sprintf("wfl_%x", b)
 }
