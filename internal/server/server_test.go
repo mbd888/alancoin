@@ -18,9 +18,11 @@ func init() {
 // testConfig returns a minimal config for testing
 func testConfig() *config.Config {
 	return &config.Config{
-		Port:     "0",
-		Env:      "development",
-		LogLevel: "error",
+		Port:           "0",
+		Env:            "development",
+		LogLevel:       "error",
+		RateLimitRPM:   10000,
+		RateLimitBurst: 1000,
 	}
 }
 

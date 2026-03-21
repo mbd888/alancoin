@@ -10,9 +10,66 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/lib/pq"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/modules/postgres"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+// PGTestContainer spins up a Postgres container via testcontainers-go, runs all
+// migrations, and returns the *sql.DB. The container is terminated on test cleanup.
+// If Docker is unavailable the test is skipped.
+func PGTestContainer(t *testing.T) *sql.DB {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	ctr, err := postgres.Run(ctx, "postgres:16-alpine",
+		postgres.WithDatabase("alancoin_test"),
+		postgres.WithUsername("test"),
+		postgres.WithPassword("test"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60*time.Second),
+		),
+	)
+	if err != nil {
+		t.Skipf("pgtest: start container (Docker available?): %v", err)
+	}
+
+	dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		t.Fatalf("pgtest: connection string: %v", err)
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("pgtest: open: %v", err)
+	}
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatalf("pgtest: ping: %v", err)
+	}
+
+	// Run all migrations.
+	migrationsDir := findMigrationsDir(t)
+	if err := runMigrations(ctx, db, migrationsDir); err != nil {
+		_ = db.Close()
+		t.Fatalf("pgtest: migrations: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_ = db.Close()
+		if err := ctr.Terminate(context.Background()); err != nil {
+			t.Logf("pgtest: terminate container: %v", err)
+		}
+	})
+
+	return db
+}
 
 // PGTest opens a test database connection, runs all migrations from the
 // migrations/ directory, and returns the *sql.DB plus a cleanup function.
@@ -105,7 +162,12 @@ func runMigrations(ctx context.Context, db *sql.DB, dir string) error {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", name, err)
 		}
-		if _, err := db.ExecContext(ctx, string(data)); err != nil {
+		// Only execute the "up" portion: strip everything from "-- +goose Down" onward.
+		sql := string(data)
+		if idx := strings.Index(sql, "-- +goose Down"); idx >= 0 {
+			sql = sql[:idx]
+		}
+		if _, err := db.ExecContext(ctx, sql); err != nil {
 			return fmt.Errorf("execute %s: %w", name, err)
 		}
 	}
