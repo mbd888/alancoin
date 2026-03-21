@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -277,6 +278,433 @@ func TestIsKnownServiceType(t *testing.T) {
 	assert.True(t, IsKnownServiceType("code"))
 	assert.False(t, IsKnownServiceType("unknown_type"))
 	assert.False(t, IsKnownServiceType(""))
+}
+
+// --- ListAgents tests ---
+
+func TestMemoryStore_ListAgents_Basic(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	// Empty store
+	agents, err := store.ListAgents(ctx, AgentQuery{})
+	require.NoError(t, err)
+	assert.Empty(t, agents)
+
+	// Add agents
+	for i := 0; i < 5; i++ {
+		addr := fmt.Sprintf("0x%040d", i)
+		agent := &Agent{Address: addr, Name: fmt.Sprintf("Agent%d", i)}
+		require.NoError(t, store.CreateAgent(ctx, agent))
+	}
+
+	agents, err = store.ListAgents(ctx, AgentQuery{})
+	require.NoError(t, err)
+	assert.Len(t, agents, 5)
+}
+
+func TestMemoryStore_ListAgents_Pagination(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	for i := 0; i < 10; i++ {
+		addr := fmt.Sprintf("0x%040d", i)
+		agent := &Agent{Address: addr, Name: fmt.Sprintf("Agent%d", i)}
+		require.NoError(t, store.CreateAgent(ctx, agent))
+	}
+
+	// Page 1
+	agents, err := store.ListAgents(ctx, AgentQuery{Limit: 3, Offset: 0})
+	require.NoError(t, err)
+	assert.Len(t, agents, 3)
+
+	// Page 2
+	agents, err = store.ListAgents(ctx, AgentQuery{Limit: 3, Offset: 3})
+	require.NoError(t, err)
+	assert.Len(t, agents, 3)
+
+	// Offset past end
+	agents, err = store.ListAgents(ctx, AgentQuery{Limit: 10, Offset: 100})
+	require.NoError(t, err)
+	assert.Empty(t, agents)
+
+	// Negative offset treated as 0
+	agents, err = store.ListAgents(ctx, AgentQuery{Limit: 5, Offset: -5})
+	require.NoError(t, err)
+	assert.Len(t, agents, 5)
+}
+
+func TestMemoryStore_ListAgents_LimitCap(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	// Limit 0 defaults to 100, limit > 1000 capped to 1000
+	agents, err := store.ListAgents(ctx, AgentQuery{Limit: 0})
+	require.NoError(t, err)
+	assert.Empty(t, agents) // no agents, just testing it doesn't panic
+
+	agents, err = store.ListAgents(ctx, AgentQuery{Limit: 5000})
+	require.NoError(t, err)
+	assert.Empty(t, agents)
+}
+
+func TestMemoryStore_ListAgents_FilterByServiceType(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	addr1 := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	addr2 := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	addr3 := "0xcccccccccccccccccccccccccccccccccccccccc"
+
+	require.NoError(t, store.CreateAgent(ctx, &Agent{Address: addr1, Name: "Agent1"}))
+	require.NoError(t, store.CreateAgent(ctx, &Agent{Address: addr2, Name: "Agent2"}))
+	require.NoError(t, store.CreateAgent(ctx, &Agent{Address: addr3, Name: "Agent3"}))
+
+	require.NoError(t, store.AddService(ctx, addr1, &Service{Type: "inference", Name: "GPT", Price: "0.01"}))
+	require.NoError(t, store.AddService(ctx, addr2, &Service{Type: "translation", Name: "Trans", Price: "0.005"}))
+	require.NoError(t, store.AddService(ctx, addr3, &Service{Type: "inference", Name: "Claude", Price: "0.02"}))
+
+	// Filter by inference
+	agents, err := store.ListAgents(ctx, AgentQuery{ServiceType: "inference"})
+	require.NoError(t, err)
+	assert.Len(t, agents, 2)
+
+	// Filter by translation
+	agents, err = store.ListAgents(ctx, AgentQuery{ServiceType: "translation"})
+	require.NoError(t, err)
+	assert.Len(t, agents, 1)
+
+	// Filter by nonexistent type
+	agents, err = store.ListAgents(ctx, AgentQuery{ServiceType: "nonexistent"})
+	require.NoError(t, err)
+	assert.Empty(t, agents)
+}
+
+func TestMemoryStore_ListAgents_FilterByActiveService(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	addr := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	require.NoError(t, store.CreateAgent(ctx, &Agent{Address: addr, Name: "Agent1"}))
+
+	svc := &Service{Type: "inference", Name: "GPT", Price: "0.01"}
+	require.NoError(t, store.AddService(ctx, addr, svc))
+
+	// Filter by service type + active=true should find it (services are active by default)
+	active := true
+	agents, err := store.ListAgents(ctx, AgentQuery{ServiceType: "inference", Active: &active})
+	require.NoError(t, err)
+	assert.Len(t, agents, 1)
+
+	// Deactivate the service
+	svc.Active = false
+	require.NoError(t, store.UpdateService(ctx, addr, svc))
+
+	// Now filter active=true should not find it
+	agents, err = store.ListAgents(ctx, AgentQuery{ServiceType: "inference", Active: &active})
+	require.NoError(t, err)
+	assert.Empty(t, agents)
+}
+
+func TestMemoryStore_ListAgents_SortedByTxCount(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	addr1 := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	addr2 := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	addr3 := "0xcccccccccccccccccccccccccccccccccccccccc"
+	// external addresses (not registered) so receivers don't accumulate counts
+	ext := "0xdddddddddddddddddddddddddddddddddddddddd"
+
+	require.NoError(t, store.CreateAgent(ctx, &Agent{Address: addr1, Name: "Low"}))
+	require.NoError(t, store.CreateAgent(ctx, &Agent{Address: addr2, Name: "High"}))
+	require.NoError(t, store.CreateAgent(ctx, &Agent{Address: addr3, Name: "Mid"}))
+
+	// addr2 sends 5 txs to an external address -> addr2 gets 5 tx count
+	for i := 0; i < 5; i++ {
+		store.RecordTransaction(ctx, &Transaction{From: addr2, To: ext, Amount: "0.01", Status: "confirmed"})
+	}
+	// addr3 sends 2 txs -> addr3 gets 2 tx count
+	for i := 0; i < 2; i++ {
+		store.RecordTransaction(ctx, &Transaction{From: addr3, To: ext, Amount: "0.01", Status: "confirmed"})
+	}
+	// addr1 sends 1 tx -> addr1 gets 1 tx count
+	store.RecordTransaction(ctx, &Transaction{From: addr1, To: ext, Amount: "0.01", Status: "confirmed"})
+
+	agents, err := store.ListAgents(ctx, AgentQuery{})
+	require.NoError(t, err)
+	require.Len(t, agents, 3)
+	// Sorted by tx count descending: High(5) > Mid(2) > Low(1)
+	assert.Equal(t, "High", agents[0].Name)
+	assert.Equal(t, "Mid", agents[1].Name)
+	assert.Equal(t, "Low", agents[2].Name)
+}
+
+// --- GetRecentTransactions tests ---
+
+func TestMemoryStore_GetRecentTransactions(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	// Empty
+	txs, err := store.GetRecentTransactions(ctx, 10)
+	require.NoError(t, err)
+	assert.Empty(t, txs)
+
+	// Add some transactions
+	for i := 0; i < 5; i++ {
+		tx := &Transaction{
+			From:   fmt.Sprintf("0x%040d", i),
+			To:     fmt.Sprintf("0x%040d", i+10),
+			Amount: "1.00",
+			Status: "confirmed",
+		}
+		require.NoError(t, store.RecordTransaction(ctx, tx))
+	}
+
+	// Get all
+	txs, err = store.GetRecentTransactions(ctx, 10)
+	require.NoError(t, err)
+	assert.Len(t, txs, 5)
+
+	// Get limited
+	txs, err = store.GetRecentTransactions(ctx, 2)
+	require.NoError(t, err)
+	assert.Len(t, txs, 2)
+
+	// Default limit (0 -> 50)
+	txs, err = store.GetRecentTransactions(ctx, 0)
+	require.NoError(t, err)
+	assert.Len(t, txs, 5)
+}
+
+// --- UpdateAgentStats tests ---
+
+func TestMemoryStore_UpdateAgentStats(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	addr := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	require.NoError(t, store.CreateAgent(ctx, &Agent{Address: addr, Name: "Agent1"}))
+
+	// Update stats
+	err := store.UpdateAgentStats(ctx, addr, func(stats *AgentStats) {
+		stats.TransactionCount = 42
+		stats.SuccessRate = 0.95
+	})
+	require.NoError(t, err)
+
+	// Verify
+	agent, err := store.GetAgent(ctx, addr)
+	require.NoError(t, err)
+	assert.Equal(t, int64(42), agent.Stats.TransactionCount)
+	assert.Equal(t, 0.95, agent.Stats.SuccessRate)
+}
+
+func TestMemoryStore_UpdateAgentStats_NotFound(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	err := store.UpdateAgentStats(ctx, "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead", func(stats *AgentStats) {
+		stats.TransactionCount = 1
+	})
+	assert.ErrorIs(t, err, ErrAgentNotFound)
+}
+
+func TestMemoryStore_UpdateAgentStats_CaseInsensitive(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	addr := "0xAbCdEf1234567890123456789012345678901234"
+	require.NoError(t, store.CreateAgent(ctx, &Agent{Address: addr, Name: "CaseAgent"}))
+
+	err := store.UpdateAgentStats(ctx, "0xABCDEF1234567890123456789012345678901234", func(stats *AgentStats) {
+		stats.TransactionCount = 10
+	})
+	require.NoError(t, err)
+}
+
+// --- Additional edge cases for existing methods ---
+
+func TestMemoryStore_UpdateAgent_NotFound(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	err := store.UpdateAgent(ctx, &Agent{Address: "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"})
+	assert.ErrorIs(t, err, ErrAgentNotFound)
+}
+
+func TestMemoryStore_DeleteAgent_NotFound(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	err := store.DeleteAgent(ctx, "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead")
+	assert.ErrorIs(t, err, ErrAgentNotFound)
+}
+
+func TestMemoryStore_AddService_AgentNotFound(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	err := store.AddService(ctx, "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead", &Service{Type: "code", Name: "Test", Price: "1.00"})
+	assert.ErrorIs(t, err, ErrAgentNotFound)
+}
+
+func TestMemoryStore_UpdateService_AgentNotFound(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	err := store.UpdateService(ctx, "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead", &Service{ID: "svc_123"})
+	assert.ErrorIs(t, err, ErrAgentNotFound)
+}
+
+func TestMemoryStore_UpdateService_ServiceNotFound(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	addr := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	require.NoError(t, store.CreateAgent(ctx, &Agent{Address: addr, Name: "Agent1"}))
+
+	err := store.UpdateService(ctx, addr, &Service{ID: "svc_nonexistent"})
+	assert.ErrorIs(t, err, ErrServiceNotFound)
+}
+
+func TestMemoryStore_RemoveService_AgentNotFound(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	err := store.RemoveService(ctx, "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead", "svc_123")
+	assert.ErrorIs(t, err, ErrAgentNotFound)
+}
+
+func TestMemoryStore_RemoveService_ServiceNotFound(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	addr := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	require.NoError(t, store.CreateAgent(ctx, &Agent{Address: addr, Name: "Agent1"}))
+
+	err := store.RemoveService(ctx, addr, "svc_nonexistent")
+	assert.ErrorIs(t, err, ErrServiceNotFound)
+}
+
+func TestMemoryStore_GetTransaction_NotFound(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	_, err := store.GetTransaction(ctx, "nonexistent_id")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestMemoryStore_ListTransactions_DefaultLimit(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	addr := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	// limit=0 defaults to 100
+	txs, err := store.ListTransactions(ctx, addr, 0)
+	require.NoError(t, err)
+	assert.Empty(t, txs)
+}
+
+func TestMemoryStore_ListServices_MinPrice(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	addr := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	require.NoError(t, store.CreateAgent(ctx, &Agent{Address: addr, Name: "Agent1"}))
+	require.NoError(t, store.AddService(ctx, addr, &Service{Type: "inference", Name: "Cheap", Price: "0.001"}))
+	require.NoError(t, store.AddService(ctx, addr, &Service{Type: "inference", Name: "Expensive", Price: "1.000"}))
+
+	// Min price filter
+	services, err := store.ListServices(ctx, AgentQuery{MinPrice: "0.5"})
+	require.NoError(t, err)
+	assert.Len(t, services, 1)
+	assert.Equal(t, "Expensive", services[0].Name)
+}
+
+func TestMemoryStore_ListServices_Pagination(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		addr := fmt.Sprintf("0x%040d", i)
+		require.NoError(t, store.CreateAgent(ctx, &Agent{Address: addr, Name: fmt.Sprintf("Agent%d", i)}))
+		require.NoError(t, store.AddService(ctx, addr, &Service{
+			Type:  "inference",
+			Name:  fmt.Sprintf("Service%d", i),
+			Price: fmt.Sprintf("0.%03d", i+1),
+		}))
+	}
+
+	// First page
+	services, err := store.ListServices(ctx, AgentQuery{Limit: 2, Offset: 0})
+	require.NoError(t, err)
+	assert.Len(t, services, 2)
+
+	// Second page
+	services, err = store.ListServices(ctx, AgentQuery{Limit: 2, Offset: 2})
+	require.NoError(t, err)
+	assert.Len(t, services, 2)
+
+	// Past end
+	services, err = store.ListServices(ctx, AgentQuery{Limit: 10, Offset: 100})
+	require.NoError(t, err)
+	assert.Empty(t, services)
+}
+
+func TestMemoryStore_ListServices_ActiveFilter(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	addr := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	require.NoError(t, store.CreateAgent(ctx, &Agent{Address: addr, Name: "Agent1"}))
+
+	svc := &Service{Type: "inference", Name: "GPT", Price: "0.01"}
+	require.NoError(t, store.AddService(ctx, addr, svc))
+
+	// Deactivate the service
+	svc.Active = false
+	require.NoError(t, store.UpdateService(ctx, addr, svc))
+
+	// Active=true should not return the inactive service
+	active := true
+	services, err := store.ListServices(ctx, AgentQuery{Active: &active})
+	require.NoError(t, err)
+	assert.Empty(t, services)
+
+	// Active=false should return it
+	inactive := false
+	services, err = store.ListServices(ctx, AgentQuery{Active: &inactive})
+	require.NoError(t, err)
+	assert.Len(t, services, 1)
+}
+
+func TestMemoryStore_RecordTransaction_PendingDoesNotUpdateVolume(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	// Record a pending transaction - should NOT update volume
+	tx := &Transaction{
+		From:   "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		To:     "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Amount: "10.00",
+		Status: "pending",
+	}
+	require.NoError(t, store.RecordTransaction(ctx, tx))
+
+	stats, err := store.GetNetworkStats(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "0", stats.TotalVolume)
+	assert.Equal(t, int64(1), stats.TotalTransactions) // counted but volume not added
+}
+
+// --- Partition helper tests ---
+
+func TestQuoteIdentifier(t *testing.T) {
+	assert.Equal(t, `"transactions_2024_01"`, quoteIdentifier("transactions_2024_01"))
+	assert.Equal(t, `"has""quote"`, quoteIdentifier(`has"quote`))
 }
 
 // Benchmark

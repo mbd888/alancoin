@@ -3,9 +3,11 @@ package streams
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // mockLedger records calls for verification.
@@ -721,5 +723,814 @@ func TestConcurrentTicks(t *testing.T) {
 	}
 	if updated.SpentAmount != "0.020000" {
 		t.Errorf("expected spent 0.020000, got %s", updated.SpentAmount)
+	}
+}
+
+// --- Tick sequence validation tests ---
+
+func TestTickDuplicateSeq(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+
+	ctx := context.Background()
+	stream, _ := svc.Open(ctx, OpenRequest{
+		BuyerAddr:    "0x1111111111111111111111111111111111111111",
+		SellerAddr:   "0x2222222222222222222222222222222222222222",
+		HoldAmount:   "1.000000",
+		PricePerTick: "0.001000",
+	})
+
+	// First tick with seq=1
+	_, _, err := svc.RecordTick(ctx, stream.ID, TickRequest{Seq: 1})
+	if err != nil {
+		t.Fatalf("first tick failed: %v", err)
+	}
+
+	// Duplicate seq=1 should fail
+	_, _, err = svc.RecordTick(ctx, stream.ID, TickRequest{Seq: 1})
+	if !errors.Is(err, ErrDuplicateTickSeq) {
+		t.Errorf("expected ErrDuplicateTickSeq, got %v", err)
+	}
+}
+
+func TestTickOutOfOrderSeq(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+
+	ctx := context.Background()
+	stream, _ := svc.Open(ctx, OpenRequest{
+		BuyerAddr:    "0x1111111111111111111111111111111111111111",
+		SellerAddr:   "0x2222222222222222222222222222222222222222",
+		HoldAmount:   "1.000000",
+		PricePerTick: "0.001000",
+	})
+
+	// First tick with seq=1
+	_, _, err := svc.RecordTick(ctx, stream.ID, TickRequest{Seq: 1})
+	if err != nil {
+		t.Fatalf("first tick failed: %v", err)
+	}
+
+	// Seq=3 (skip 2) should fail
+	_, _, err = svc.RecordTick(ctx, stream.ID, TickRequest{Seq: 3})
+	if !errors.Is(err, ErrInvalidTickSeq) {
+		t.Errorf("expected ErrInvalidTickSeq, got %v", err)
+	}
+}
+
+func TestTickInvalidAmount(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+
+	ctx := context.Background()
+	stream, _ := svc.Open(ctx, OpenRequest{
+		BuyerAddr:    "0x1111111111111111111111111111111111111111",
+		SellerAddr:   "0x2222222222222222222222222222222222222222",
+		HoldAmount:   "1.000000",
+		PricePerTick: "0.001000",
+	})
+
+	tests := []struct {
+		name   string
+		amount string
+	}{
+		{"zero amount", "0.000000"},
+		{"invalid format", "abc"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := svc.RecordTick(ctx, stream.ID, TickRequest{Amount: tt.amount})
+			if !errors.Is(err, ErrInvalidAmount) {
+				t.Errorf("expected ErrInvalidAmount, got %v", err)
+			}
+		})
+	}
+}
+
+// --- Service options (WithRevenueAccumulator, WithReceiptIssuer, WithWebhookEmitter) ---
+
+type mockRevenue struct {
+	mu    sync.Mutex
+	calls []struct{ addr, amount, ref string }
+}
+
+func (m *mockRevenue) AccumulateRevenue(_ context.Context, agentAddr, amount, txRef string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, struct{ addr, amount, ref string }{agentAddr, amount, txRef})
+	return nil
+}
+
+type mockReceipt struct {
+	mu    sync.Mutex
+	calls []struct{ path, reference, from, to, amount string }
+}
+
+func (m *mockReceipt) IssueReceipt(_ context.Context, path, reference, from, to, amount, serviceID, status, metadata string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, struct{ path, reference, from, to, amount string }{path, reference, from, to, amount})
+	return nil
+}
+
+type mockWebhook struct {
+	mu          sync.Mutex
+	openEvents  int
+	closeEvents int
+}
+
+func (m *mockWebhook) EmitStreamOpened(_, _, _, _ string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.openEvents++
+}
+
+func (m *mockWebhook) EmitStreamClosed(_, _, _, _, _ string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closeEvents++
+}
+
+func TestRevenueAccumulatorCalledOnClose(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	rev := &mockRevenue{}
+	svc := NewService(store, ledger).WithRevenueAccumulator(rev)
+
+	ctx := context.Background()
+	stream, _ := svc.Open(ctx, OpenRequest{
+		BuyerAddr:    "0x1111111111111111111111111111111111111111",
+		SellerAddr:   "0x2222222222222222222222222222222222222222",
+		HoldAmount:   "1.000000",
+		PricePerTick: "0.001000",
+	})
+
+	svc.RecordTick(ctx, stream.ID, TickRequest{})
+	svc.Close(ctx, stream.ID, "0x1111111111111111111111111111111111111111", "done")
+
+	rev.mu.Lock()
+	defer rev.mu.Unlock()
+	if len(rev.calls) != 1 {
+		t.Fatalf("expected 1 revenue call, got %d", len(rev.calls))
+	}
+	if rev.calls[0].addr != "0x2222222222222222222222222222222222222222" {
+		t.Errorf("expected seller addr, got %s", rev.calls[0].addr)
+	}
+}
+
+func TestReceiptIssuerCalledOnClose(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	rcpt := &mockReceipt{}
+	svc := NewService(store, ledger).WithReceiptIssuer(rcpt)
+
+	ctx := context.Background()
+	stream, _ := svc.Open(ctx, OpenRequest{
+		BuyerAddr:    "0x1111111111111111111111111111111111111111",
+		SellerAddr:   "0x2222222222222222222222222222222222222222",
+		HoldAmount:   "1.000000",
+		PricePerTick: "0.001000",
+	})
+
+	svc.RecordTick(ctx, stream.ID, TickRequest{})
+	svc.Close(ctx, stream.ID, "0x1111111111111111111111111111111111111111", "done")
+
+	rcpt.mu.Lock()
+	defer rcpt.mu.Unlock()
+	if len(rcpt.calls) != 1 {
+		t.Fatalf("expected 1 receipt call, got %d", len(rcpt.calls))
+	}
+	if rcpt.calls[0].path != "stream" {
+		t.Errorf("expected path 'stream', got %s", rcpt.calls[0].path)
+	}
+}
+
+func TestWebhookEmitterCalledOnOpenAndClose(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	wh := &mockWebhook{}
+	svc := NewService(store, ledger).WithWebhookEmitter(wh)
+
+	ctx := context.Background()
+	stream, _ := svc.Open(ctx, OpenRequest{
+		BuyerAddr:    "0x1111111111111111111111111111111111111111",
+		SellerAddr:   "0x2222222222222222222222222222222222222222",
+		HoldAmount:   "1.000000",
+		PricePerTick: "0.001000",
+	})
+
+	// Webhook emitters fire in goroutines; give them a moment
+	time.Sleep(50 * time.Millisecond)
+
+	wh.mu.Lock()
+	if wh.openEvents != 1 {
+		t.Errorf("expected 1 open webhook, got %d", wh.openEvents)
+	}
+	wh.mu.Unlock()
+
+	svc.RecordTick(ctx, stream.ID, TickRequest{})
+	svc.Close(ctx, stream.ID, "0x1111111111111111111111111111111111111111", "done")
+
+	time.Sleep(50 * time.Millisecond)
+
+	wh.mu.Lock()
+	if wh.closeEvents != 1 {
+		t.Errorf("expected 1 close webhook, got %d", wh.closeEvents)
+	}
+	wh.mu.Unlock()
+}
+
+// --- ForceCloseStale ---
+
+func TestForceCloseStale(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+
+	ctx := context.Background()
+
+	// Open a stream with very short stale timeout
+	stream, _ := svc.Open(ctx, OpenRequest{
+		BuyerAddr:       "0x1111111111111111111111111111111111111111",
+		SellerAddr:      "0x2222222222222222222222222222222222222222",
+		HoldAmount:      "1.000000",
+		PricePerTick:    "0.001000",
+		StaleTimeoutSec: 1,
+	})
+
+	// Manually backdate the stream so it appears stale
+	stored, _ := store.Get(ctx, stream.ID)
+	stored.CreatedAt = time.Now().Add(-2 * time.Minute)
+	stored.UpdatedAt = stored.CreatedAt
+	store.Update(ctx, stored)
+
+	closed, err := svc.ForceCloseStale(ctx)
+	if err != nil {
+		t.Fatalf("ForceCloseStale failed: %v", err)
+	}
+	if closed != 1 {
+		t.Errorf("expected 1 closed, got %d", closed)
+	}
+
+	result, _ := svc.Get(ctx, stream.ID)
+	if result.Status != StatusStaleClosed {
+		t.Errorf("expected stale_closed, got %s", result.Status)
+	}
+}
+
+func TestForceCloseStaleSkipsTerminal(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+
+	ctx := context.Background()
+	stream, _ := svc.Open(ctx, OpenRequest{
+		BuyerAddr:       "0x1111111111111111111111111111111111111111",
+		SellerAddr:      "0x2222222222222222222222222222222222222222",
+		HoldAmount:      "1.000000",
+		PricePerTick:    "0.001000",
+		StaleTimeoutSec: 1,
+	})
+
+	// Close it normally first
+	svc.Close(ctx, stream.ID, "0x1111111111111111111111111111111111111111", "done")
+
+	closed, err := svc.ForceCloseStale(ctx)
+	if err != nil {
+		t.Fatalf("ForceCloseStale failed: %v", err)
+	}
+	if closed != 0 {
+		t.Errorf("expected 0 closed (already terminal), got %d", closed)
+	}
+}
+
+// --- ListByAgent with default limit ---
+
+func TestListByAgentDefaultLimit(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+
+	ctx := context.Background()
+	svc.Open(ctx, OpenRequest{
+		BuyerAddr:    "0x1111111111111111111111111111111111111111",
+		SellerAddr:   "0x2222222222222222222222222222222222222222",
+		HoldAmount:   "1.000000",
+		PricePerTick: "0.001000",
+	})
+
+	// Pass zero/negative limit to trigger default
+	streams, err := svc.ListByAgent(ctx, "0x1111111111111111111111111111111111111111", 0)
+	if err != nil {
+		t.Fatalf("ListByAgent failed: %v", err)
+	}
+	if len(streams) != 1 {
+		t.Errorf("expected 1 stream, got %d", len(streams))
+	}
+}
+
+// --- ListTicks with default limit ---
+
+func TestListTicksDefaultLimit(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+
+	ctx := context.Background()
+	stream, _ := svc.Open(ctx, OpenRequest{
+		BuyerAddr:    "0x1111111111111111111111111111111111111111",
+		SellerAddr:   "0x2222222222222222222222222222222222222222",
+		HoldAmount:   "1.000000",
+		PricePerTick: "0.001000",
+	})
+
+	svc.RecordTick(ctx, stream.ID, TickRequest{})
+
+	// Pass zero limit to trigger default
+	ticks, err := svc.ListTicks(ctx, stream.ID, 0)
+	if err != nil {
+		t.Fatalf("ListTicks failed: %v", err)
+	}
+	if len(ticks) != 1 {
+		t.Errorf("expected 1 tick, got %d", len(ticks))
+	}
+}
+
+// --- MemoryStore edge cases ---
+
+func TestMemoryStore_ListByStatus(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	now := time.Now()
+	store.Create(ctx, &Stream{ID: "s1", BuyerAddr: "a", SellerAddr: "b", Status: StatusOpen, CreatedAt: now, UpdatedAt: now})
+	store.Create(ctx, &Stream{ID: "s2", BuyerAddr: "a", SellerAddr: "b", Status: StatusClosed, CreatedAt: now, UpdatedAt: now})
+	store.Create(ctx, &Stream{ID: "s3", BuyerAddr: "a", SellerAddr: "b", Status: StatusOpen, CreatedAt: now, UpdatedAt: now})
+
+	result, err := store.ListByStatus(ctx, StatusOpen, 10)
+	if err != nil {
+		t.Fatalf("ListByStatus failed: %v", err)
+	}
+	if len(result) != 2 {
+		t.Errorf("expected 2 open streams, got %d", len(result))
+	}
+
+	// Test limit
+	result, err = store.ListByStatus(ctx, StatusOpen, 1)
+	if err != nil {
+		t.Fatalf("ListByStatus failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Errorf("expected 1 stream with limit=1, got %d", len(result))
+	}
+}
+
+func TestMemoryStore_ListStale(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	past := time.Now().Add(-5 * time.Minute)
+	store.Create(ctx, &Stream{
+		ID: "stale1", BuyerAddr: "a", SellerAddr: "b",
+		Status: StatusOpen, StaleTimeoutSec: 60,
+		CreatedAt: past, UpdatedAt: past,
+	})
+
+	// Non-stale stream (created recently)
+	now := time.Now()
+	store.Create(ctx, &Stream{
+		ID: "fresh1", BuyerAddr: "a", SellerAddr: "b",
+		Status: StatusOpen, StaleTimeoutSec: 60,
+		CreatedAt: now, UpdatedAt: now,
+	})
+
+	// Closed stream should not appear
+	store.Create(ctx, &Stream{
+		ID: "closed1", BuyerAddr: "a", SellerAddr: "b",
+		Status: StatusClosed, StaleTimeoutSec: 60,
+		CreatedAt: past, UpdatedAt: past,
+	})
+
+	result, err := store.ListStale(ctx, time.Now(), 100)
+	if err != nil {
+		t.Fatalf("ListStale failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Errorf("expected 1 stale stream, got %d", len(result))
+	}
+	if result[0].ID != "stale1" {
+		t.Errorf("expected stale1, got %s", result[0].ID)
+	}
+}
+
+func TestMemoryStore_ListStaleWithLastTick(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	pastTick := time.Now().Add(-5 * time.Minute)
+	store.Create(ctx, &Stream{
+		ID: "stale_ticked", BuyerAddr: "a", SellerAddr: "b",
+		Status: StatusOpen, StaleTimeoutSec: 60,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+		LastTickAt: &pastTick,
+	})
+
+	result, err := store.ListStale(ctx, time.Now(), 100)
+	if err != nil {
+		t.Fatalf("ListStale failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Errorf("expected 1 stale stream (based on LastTickAt), got %d", len(result))
+	}
+}
+
+func TestMemoryStore_GetLastTick(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	// No ticks
+	tick, err := store.GetLastTick(ctx, "str_123")
+	if err != nil {
+		t.Fatalf("GetLastTick failed: %v", err)
+	}
+	if tick != nil {
+		t.Error("expected nil tick for empty stream")
+	}
+
+	// Add ticks
+	store.CreateTick(ctx, &Tick{ID: "t1", StreamID: "str_123", Seq: 1, Amount: "0.001000", Cumulative: "0.001000", CreatedAt: time.Now()})
+	store.CreateTick(ctx, &Tick{ID: "t2", StreamID: "str_123", Seq: 2, Amount: "0.001000", Cumulative: "0.002000", CreatedAt: time.Now()})
+
+	tick, err = store.GetLastTick(ctx, "str_123")
+	if err != nil {
+		t.Fatalf("GetLastTick failed: %v", err)
+	}
+	if tick == nil {
+		t.Fatal("expected a tick, got nil")
+	}
+	if tick.Seq != 2 {
+		t.Errorf("expected last tick seq 2, got %d", tick.Seq)
+	}
+}
+
+func TestMemoryStore_UpdateNonExistent(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	err := store.Update(ctx, &Stream{ID: "str_nonexistent"})
+	if err != ErrStreamNotFound {
+		t.Errorf("expected ErrStreamNotFound, got %v", err)
+	}
+}
+
+func TestMemoryStore_CreateTickDuplicate(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	tick := &Tick{ID: "t1", StreamID: "str_1", Seq: 1, Amount: "0.001000", Cumulative: "0.001000", CreatedAt: time.Now()}
+	if err := store.CreateTick(ctx, tick); err != nil {
+		t.Fatalf("first tick failed: %v", err)
+	}
+
+	dup := &Tick{ID: "t2", StreamID: "str_1", Seq: 1, Amount: "0.001000", Cumulative: "0.001000", CreatedAt: time.Now()}
+	err := store.CreateTick(ctx, dup)
+	if err != ErrDuplicateTickSeq {
+		t.Errorf("expected ErrDuplicateTickSeq, got %v", err)
+	}
+}
+
+// --- Timer tests ---
+
+func TestTimerStartStop(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	logger := slog.Default()
+
+	timer := NewTimer(svc, store, logger)
+
+	if timer.Running() {
+		t.Error("timer should not be running before Start")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		timer.Start(ctx)
+		close(done)
+	}()
+
+	// Wait for the timer to mark itself as running
+	time.Sleep(50 * time.Millisecond)
+	if !timer.Running() {
+		t.Error("timer should be running after Start")
+	}
+
+	cancel()
+	<-done
+
+	if timer.Running() {
+		t.Error("timer should not be running after context cancel")
+	}
+}
+
+func TestTimerStop(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	logger := slog.Default()
+
+	timer := NewTimer(svc, store, logger)
+
+	ctx := context.Background()
+	done := make(chan struct{})
+	go func() {
+		timer.Start(ctx)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	timer.Stop()
+
+	select {
+	case <-done:
+		// Success
+	case <-time.After(2 * time.Second):
+		t.Fatal("timer did not stop within timeout")
+	}
+}
+
+func TestTimerClosesStaleStreams(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	logger := slog.Default()
+
+	ctx := context.Background()
+
+	// Create a stream that's already stale
+	past := time.Now().Add(-5 * time.Minute)
+	store.Create(ctx, &Stream{
+		ID: "stale_timer", BuyerAddr: "0x1111111111111111111111111111111111111111",
+		SellerAddr:      "0x2222222222222222222222222222222222222222",
+		Status:          StatusOpen,
+		HoldAmount:      "1.000000",
+		SpentAmount:     "0.000000",
+		PricePerTick:    "0.001000",
+		StaleTimeoutSec: 1,
+		CreatedAt:       past,
+		UpdatedAt:       past,
+	})
+
+	timer := NewTimer(svc, store, logger)
+	// Directly call closeStale instead of running the full timer loop
+	timer.closeStale(ctx)
+
+	result, _ := store.Get(ctx, "stale_timer")
+	if result.Status != StatusStaleClosed {
+		t.Errorf("expected stale_closed, got %s", result.Status)
+	}
+}
+
+func TestTimerReconcileStuck(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+	logger := slog.Default()
+
+	ctx := context.Background()
+
+	now := time.Now()
+	store.Create(ctx, &Stream{
+		ID: "stuck1", BuyerAddr: "a", SellerAddr: "b",
+		Status: StatusSettlementFailed, HoldAmount: "1.000000",
+		SpentAmount: "0.001000", PricePerTick: "0.001000",
+		CreatedAt: now, UpdatedAt: now,
+	})
+
+	timer := NewTimer(svc, store, logger)
+	timer.reconcileStuck(ctx)
+
+	result, _ := store.Get(ctx, "stuck1")
+	if result.Status != StatusClosed {
+		t.Errorf("expected reconciled to closed, got %s", result.Status)
+	}
+	if result.CloseReason != "reconciled" {
+		t.Errorf("expected reason 'reconciled', got %s", result.CloseReason)
+	}
+}
+
+// --- IsTerminal tests ---
+
+func TestIsTerminal(t *testing.T) {
+	tests := []struct {
+		status   Status
+		terminal bool
+	}{
+		{StatusOpen, false},
+		{StatusClosed, true},
+		{StatusStaleClosed, true},
+		{StatusDisputed, true},
+		{StatusSettlementFailed, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.status), func(t *testing.T) {
+			s := &Stream{Status: tt.status}
+			if got := s.IsTerminal(); got != tt.terminal {
+				t.Errorf("IsTerminal() for %s = %v, want %v", tt.status, got, tt.terminal)
+			}
+		})
+	}
+}
+
+// --- AutoClose already-closed stream ---
+
+func TestAutoCloseAlreadyClosed(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+
+	ctx := context.Background()
+	stream, _ := svc.Open(ctx, OpenRequest{
+		BuyerAddr:    "0x1111111111111111111111111111111111111111",
+		SellerAddr:   "0x2222222222222222222222222222222222222222",
+		HoldAmount:   "1.000000",
+		PricePerTick: "0.001000",
+	})
+
+	svc.Close(ctx, stream.ID, "0x1111111111111111111111111111111111111111", "done")
+
+	err := svc.AutoClose(ctx, stream)
+	if !errors.Is(err, ErrAlreadyClosed) {
+		t.Errorf("expected ErrAlreadyClosed, got %v", err)
+	}
+}
+
+// --- Open with custom stale timeout ---
+
+func TestOpenCustomStaleTimeout(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+
+	stream, err := svc.Open(context.Background(), OpenRequest{
+		BuyerAddr:       "0x1111111111111111111111111111111111111111",
+		SellerAddr:      "0x2222222222222222222222222222222222222222",
+		HoldAmount:      "1.000000",
+		PricePerTick:    "0.001000",
+		StaleTimeoutSec: 120,
+	})
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	if stream.StaleTimeoutSec != 120 {
+		t.Errorf("expected stale timeout 120, got %d", stream.StaleTimeoutSec)
+	}
+}
+
+func TestOpenDefaultStaleTimeout(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+
+	stream, err := svc.Open(context.Background(), OpenRequest{
+		BuyerAddr:    "0x1111111111111111111111111111111111111111",
+		SellerAddr:   "0x2222222222222222222222222222222222222222",
+		HoldAmount:   "1.000000",
+		PricePerTick: "0.001000",
+	})
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	if stream.StaleTimeoutSec != int(DefaultStaleTimeout.Seconds()) {
+		t.Errorf("expected default stale timeout %d, got %d", int(DefaultStaleTimeout.Seconds()), stream.StaleTimeoutSec)
+	}
+}
+
+// --- Close with settle failure mock ---
+
+type failSettleLedger struct {
+	mockLedger
+	settleErr error
+}
+
+func (f *failSettleLedger) SettleHold(_ context.Context, _, _, _, _ string) error {
+	if f.settleErr != nil {
+		return f.settleErr
+	}
+	return nil
+}
+
+func TestCloseSettleHoldFailure(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := &failSettleLedger{
+		mockLedger: *newMockLedger(),
+		settleErr:  errors.New("db error"),
+	}
+	svc := NewService(store, ledger)
+
+	ctx := context.Background()
+	stream, _ := svc.Open(ctx, OpenRequest{
+		BuyerAddr:    "0x1111111111111111111111111111111111111111",
+		SellerAddr:   "0x2222222222222222222222222222222222222222",
+		HoldAmount:   "1.000000",
+		PricePerTick: "0.001000",
+	})
+	svc.RecordTick(ctx, stream.ID, TickRequest{})
+
+	_, err := svc.Close(ctx, stream.ID, "0x1111111111111111111111111111111111111111", "done")
+	if err == nil {
+		t.Fatal("expected error when settle fails")
+	}
+
+	// Stream should be marked as settlement_failed
+	result, _ := svc.Get(ctx, stream.ID)
+	if result.Status != StatusSettlementFailed {
+		t.Errorf("expected settlement_failed, got %s", result.Status)
+	}
+}
+
+// --- Close with release failure mock ---
+
+type failReleaseLedger struct {
+	mockLedger
+	releaseErr error
+}
+
+func (f *failReleaseLedger) ReleaseHold(_ context.Context, _, _, _ string) error {
+	if f.releaseErr != nil {
+		return f.releaseErr
+	}
+	return nil
+}
+
+func TestCloseReleaseHoldFailure(t *testing.T) {
+	store := NewMemoryStore()
+	ledger := &failReleaseLedger{
+		mockLedger: *newMockLedger(),
+		releaseErr: errors.New("release failed"),
+	}
+	svc := NewService(store, ledger)
+
+	ctx := context.Background()
+	stream, _ := svc.Open(ctx, OpenRequest{
+		BuyerAddr:    "0x1111111111111111111111111111111111111111",
+		SellerAddr:   "0x2222222222222222222222222222222222222222",
+		HoldAmount:   "1.000000",
+		PricePerTick: "0.001000",
+	})
+
+	// Record a tick so there's both spent + unused
+	svc.RecordTick(ctx, stream.ID, TickRequest{})
+
+	_, err := svc.Close(ctx, stream.ID, "0x1111111111111111111111111111111111111111", "done")
+	if err == nil {
+		t.Fatal("expected error when release fails")
+	}
+	if !strings.Contains(err.Error(), "release") {
+		t.Errorf("expected release error, got: %v", err)
+	}
+}
+
+// --- Store create failure after hold ---
+
+type failCreateStore struct {
+	MemoryStore
+	createErr error
+}
+
+func (f *failCreateStore) Create(_ context.Context, _ *Stream) error {
+	return f.createErr
+}
+
+func TestOpenStoreCreateFailureReleasesHold(t *testing.T) {
+	store := &failCreateStore{
+		MemoryStore: *NewMemoryStore(),
+		createErr:   errors.New("db down"),
+	}
+	ledger := newMockLedger()
+	svc := NewService(store, ledger)
+
+	_, err := svc.Open(context.Background(), OpenRequest{
+		BuyerAddr:    "0x1111111111111111111111111111111111111111",
+		SellerAddr:   "0x2222222222222222222222222222222222222222",
+		HoldAmount:   "1.000000",
+		PricePerTick: "0.001000",
+	})
+	if err == nil {
+		t.Fatal("expected error when store create fails")
+	}
+
+	// Verify that the hold was released as best-effort cleanup
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	if len(ledger.releases) == 0 {
+		t.Error("expected hold to be released after store failure")
 	}
 }

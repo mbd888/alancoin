@@ -140,15 +140,15 @@ func (p *PostgresStore) GetProfiles(ctx context.Context, addresses []string) (ma
 		args[i] = strings.ToLower(addr)
 	}
 
-	q := `SELECT address, credit_score, risk_score, composite_score, tier,
-			   tracerank_input, reputation_input, dispute_rate, tx_success_rate, total_volume,
+	q := `SELECT address, credit_score, risk_score, composite_score, tier,` + //nolint:gosec // placeholders are $1,$2,... not user input
+		`	   tracerank_input, reputation_input, dispute_rate, tx_success_rate, total_volume,
 			   anomaly_count_30d, critical_alerts, mean_amount, stddev_amount, forensic_score,
 			   in_degree, out_degree, clustering_coeff, bridge_score,
 			   total_txns, days_on_network,
 			   credit_delta_7d, credit_delta_30d, risk_delta_7d, risk_delta_30d,
 			   compute_run_id, computed_at
 		  FROM intelligence_profiles
-		  WHERE address IN (` + strings.Join(placeholders, ",") + `)` //nolint:gosec // placeholders are $1,$2,... not user input
+		  WHERE address IN (` + strings.Join(placeholders, ",") + `)`
 
 	rows, err := p.db.QueryContext(ctx, q, args...)
 	if err != nil {
