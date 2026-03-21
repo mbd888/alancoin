@@ -108,7 +108,8 @@ const (
 	defaultMaxRetries      = 3
 	defaultRetryBaseMs     = 100
 	defaultDrainTimeout    = 5 * time.Second
-	healthPendingThreshold = 5000 // events pending before health degrades
+	defaultHandlerTimeout  = 30 * time.Second // max time a handler can run before being cancelled
+	healthPendingThreshold = 5000             // events pending before health degrades
 )
 
 // --- In-Memory Implementation ---
@@ -127,6 +128,7 @@ type MemoryBus struct {
 	subscriptions []subscription
 	logger        *slog.Logger
 	drainTimeout  time.Duration
+	wal           *WALStore // optional: write-ahead log for crash recovery
 
 	// Dead letter queue
 	dlq   []Event
@@ -153,7 +155,23 @@ func NewMemoryBus(bufferSize int, logger *slog.Logger) *MemoryBus {
 	}
 }
 
-func (b *MemoryBus) Publish(_ context.Context, event Event) error {
+// WithWAL adds a write-ahead log for crash recovery.
+// When configured, events are persisted to postgres before entering the buffer.
+// On startup, pending events are automatically recovered and republished.
+func (b *MemoryBus) WithWAL(wal *WALStore) *MemoryBus {
+	b.wal = wal
+	return b
+}
+
+func (b *MemoryBus) Publish(ctx context.Context, event Event) error {
+	// WAL: persist before buffering for crash recovery
+	if b.wal != nil {
+		if err := b.wal.Write(ctx, event); err != nil {
+			b.logger.Error("eventbus: WAL write failed", "event_id", event.ID, "error", err)
+			// Continue — don't block the bus if WAL is down
+		}
+	}
+
 	select {
 	case b.buffer <- event:
 		b.published.Add(1)
@@ -185,6 +203,37 @@ func (b *MemoryBus) Subscribe(topic, consumerGroup string, batchSize int, flushI
 }
 
 func (b *MemoryBus) Start(ctx context.Context) {
+	// WAL recovery: replay events that were in-flight when the process last crashed.
+	if b.wal != nil {
+		recovered, err := b.wal.RecoverPending(ctx)
+		if err != nil {
+			b.logger.Error("eventbus: WAL recovery failed", "error", err)
+		} else if len(recovered) > 0 {
+			for _, e := range recovered {
+				select {
+				case b.buffer <- e:
+					b.published.Add(1)
+				default:
+					b.logger.Warn("eventbus: WAL recovery dropped event (buffer full)", "event_id", e.ID)
+				}
+			}
+			b.logger.Info("eventbus: WAL recovery complete", "recovered", len(recovered))
+		}
+	}
+
+	// Periodic metrics gauge update
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				metrics.EventBusPending.Set(float64(b.published.Load() - b.consumed.Load()))
+			}
+		}
+	}()
 	subChans := make([]chan Event, len(b.subscriptions))
 	for i := range b.subscriptions {
 		subChans[i] = make(chan Event, 1000)
@@ -276,7 +325,7 @@ func (b *MemoryBus) consumeLoop(ctx context.Context, ch <-chan Event, sub subscr
 		copy(toProcess, batch)
 		batch = batch[:0]
 
-		// Retry with exponential backoff
+		// Retry with exponential backoff + handler timeout
 		var lastErr error
 		for attempt := 0; attempt < defaultMaxRetries; attempt++ {
 			if attempt > 0 {
@@ -290,12 +339,22 @@ func (b *MemoryBus) consumeLoop(ctx context.Context, ch <-chan Event, sub subscr
 				}
 			}
 
-			lastErr = sub.handler(ctx, toProcess)
+			// Handler timeout: prevent a single slow handler from blocking the consumer forever.
+			handlerCtx, handlerCancel := context.WithTimeout(ctx, defaultHandlerTimeout)
+			lastErr = sub.handler(handlerCtx, toProcess)
+			handlerCancel()
+
 			if lastErr == nil {
 				b.consumed.Add(int64(len(toProcess)))
 				b.batchesProc.Add(1)
 				metrics.EventBusBatchesProcessed.Inc()
 				metrics.EventBusConsumed.Add(float64(len(toProcess)))
+				// WAL: mark events as processed
+				if b.wal != nil {
+					for _, e := range toProcess {
+						_ = b.wal.MarkProcessed(ctx, e.ID)
+					}
+				}
 				return
 			}
 		}
@@ -312,6 +371,10 @@ func (b *MemoryBus) consumeLoop(ctx context.Context, ch <-chan Event, sub subscr
 		for i := range toProcess {
 			toProcess[i].Attempt = defaultMaxRetries
 			b.dlq = append(b.dlq, toProcess[i])
+			// WAL: mark as dead-lettered
+			if b.wal != nil {
+				_ = b.wal.MarkDeadLettered(ctx, toProcess[i].ID)
+			}
 		}
 		b.deadLettered.Add(int64(len(toProcess)))
 		b.dlqMu.Unlock()

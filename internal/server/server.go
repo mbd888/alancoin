@@ -369,6 +369,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Event bus: replaces fire-and-forget goroutines with durable, batched processing.
 		s.eventBus = eventbus.NewMemoryBus(10000, s.logger)
+		if db != nil {
+			s.eventBus.WithWAL(eventbus.NewWALStore(db, s.logger))
+			s.logger.Info("event bus WAL enabled (postgres)")
+		}
 		s.eventBus.Subscribe(eventbus.TopicSettlement, "forensics", 50, time.Second,
 			s.makeForensicsConsumer())
 		s.eventBus.Subscribe(eventbus.TopicSettlement, "chargeback", 50, time.Second,

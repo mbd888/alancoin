@@ -50,7 +50,18 @@ func (r *MatviewRefresher) Start(ctx context.Context) {
 }
 
 func (r *MatviewRefresher) refreshAll(ctx context.Context) {
-	for _, view := range r.views {
+	for i, view := range r.views {
+		// Advisory lock prevents concurrent refreshes of the same view
+		// (e.g. multiple server instances running the same refresher).
+		// Lock ID is derived from view index + a fixed namespace.
+		lockID := int64(900000 + i)
+		var acquired bool
+		_ = r.db.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", lockID).Scan(&acquired)
+		if !acquired {
+			r.logger.Debug("matview refresh skipped (lock held)", "view", view)
+			continue
+		}
+
 		start := time.Now()
 		_, err := r.db.ExecContext(ctx, "REFRESH MATERIALIZED VIEW CONCURRENTLY "+view)
 		elapsed := time.Since(start)
@@ -60,9 +71,12 @@ func (r *MatviewRefresher) refreshAll(ctx context.Context) {
 			_, err = r.db.ExecContext(ctx, "REFRESH MATERIALIZED VIEW "+view)
 			if err != nil {
 				r.logger.Error("matview refresh failed", "view", view, "error", err)
+				_, _ = r.db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", lockID)
 				continue
 			}
 		}
+
+		_, _ = r.db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", lockID)
 
 		metrics.MatviewRefreshDuration.WithLabelValues(view).Observe(elapsed.Seconds())
 		r.logger.Debug("matview refreshed", "view", view, "duration", elapsed)
