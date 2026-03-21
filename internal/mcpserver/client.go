@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/retry"
 	"github.com/mbd888/alancoin/internal/security"
 )
 
@@ -64,42 +65,59 @@ func (c *AlancoinClient) doRequest(ctx context.Context, method, path string, que
 		u.RawQuery = query.Encode()
 	}
 
-	var reqBody io.Reader
+	var bodyData []byte
 	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("marshal request body: %w", err)
+		var marshalErr error
+		bodyData, marshalErr = json.Marshal(body)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("marshal request body: %w", marshalErr)
 		}
-		reqBody = bytes.NewReader(data)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, u.String(), reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	resp, err := c.httpClient.Do(req) //nolint:gosec // URL constructed from trusted cfg.APIURL + path
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		var apiErr apiError
-		if json.Unmarshal(respBody, &apiErr) == nil && apiErr.Message != "" {
-			return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, apiErr.Message)
+	var respBody []byte
+	err = retry.Do(ctx, 3, 200*time.Millisecond, func() error {
+		// Recreate body reader for each attempt (consumed after first read).
+		var attemptBody io.Reader
+		if bodyData != nil {
+			attemptBody = bytes.NewReader(bodyData)
 		}
-		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(respBody))
+
+		req, reqErr := http.NewRequestWithContext(ctx, method, u.String(), attemptBody)
+		if reqErr != nil {
+			return retry.Permanent(fmt.Errorf("create request: %w", reqErr))
+		}
+
+		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+
+		resp, doErr := c.httpClient.Do(req) //nolint:gosec // URL constructed from trusted cfg.APIURL + path
+		if doErr != nil {
+			return fmt.Errorf("request failed: %w", doErr)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		respBody, doErr = io.ReadAll(resp.Body)
+		if doErr != nil {
+			return fmt.Errorf("read response: %w", doErr)
+		}
+
+		if resp.StatusCode >= 500 {
+			return fmt.Errorf("server error (%d)", resp.StatusCode)
+		}
+		if resp.StatusCode >= 400 {
+			var apiErr apiError
+			if json.Unmarshal(respBody, &apiErr) == nil && apiErr.Message != "" {
+				return retry.Permanent(fmt.Errorf("API error (%d): %s", resp.StatusCode, apiErr.Message))
+			}
+			return retry.Permanent(fmt.Errorf("API error (%d): %s", resp.StatusCode, string(respBody)))
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return json.RawMessage(respBody), nil

@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -372,7 +373,9 @@ func (d *Dispatcher) updateSuccess(ctx context.Context, sub *Subscription) {
 	sub.LastError = ""
 	sub.ConsecutiveFailures = 0
 	sub.SuspendedUntil = nil
-	_ = d.store.Update(ctx, sub)
+	if err := d.store.Update(ctx, sub); err != nil {
+		slog.Warn("webhook subscription success update failed", "subscription_id", sub.ID, "error", err)
+	}
 }
 
 func (d *Dispatcher) updateError(ctx context.Context, sub *Subscription, errMsg string) {
@@ -400,7 +403,9 @@ func (d *Dispatcher) updateError(ctx context.Context, sub *Subscription, errMsg 
 		}
 	}
 
-	_ = d.store.Update(ctx, sub)
+	if err := d.store.Update(ctx, sub); err != nil {
+		slog.Warn("webhook subscription error update failed", "subscription_id", sub.ID, "error", err)
+	}
 }
 
 // isSuspended returns true if the subscription is temporarily paused.

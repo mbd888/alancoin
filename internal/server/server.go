@@ -314,7 +314,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		}
 		gwLedger := &gatewayLedgerAdapter{s.ledgerService}
 		s.gatewayStore = gwStore
-		gwCB := circuitbreaker.New(5, 30*time.Second)
+		gwCB := circuitbreaker.New(s.cfg.CircuitBreakerThreshold, s.cfg.CircuitBreakerDuration)
 		s.gatewayService = gateway.NewService(gwStore, gwResolver, gwForwarder, gwLedger, s.logger).
 			WithCircuitBreaker(gwCB)
 		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore, s.logger)
@@ -376,7 +376,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		}
 
 		// Event bus: replaces fire-and-forget goroutines with durable, batched processing.
-		s.eventBus = eventbus.NewMemoryBus(10000, s.logger)
+		s.eventBus = eventbus.NewMemoryBus(s.cfg.EventBusBufferSize, s.logger)
 		if db != nil {
 			s.eventBus.WithWAL(eventbus.NewWALStore(db, s.logger))
 			s.logger.Info("event bus WAL enabled (postgres)")
@@ -543,7 +543,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			gwForwarder2 = gwForwarder2.WithAllowLocalEndpoints()
 		}
 		s.gatewayStore = gwStore2
-		gwCB2 := circuitbreaker.New(5, 30*time.Second)
+		gwCB2 := circuitbreaker.New(s.cfg.CircuitBreakerThreshold, s.cfg.CircuitBreakerDuration)
 		s.gatewayService = gateway.NewService(gwStore2, gwResolver2, gwForwarder2, &gatewayLedgerAdapter{s.ledgerService}, s.logger).
 			WithCircuitBreaker(gwCB2)
 		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore2, s.logger)
@@ -602,7 +602,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		}
 
 		// Event bus (in-memory mode).
-		s.eventBus = eventbus.NewMemoryBus(10000, s.logger)
+		s.eventBus = eventbus.NewMemoryBus(s.cfg.EventBusBufferSize, s.logger)
 		s.eventBus.Subscribe(eventbus.TopicSettlement, "forensics", 50, time.Second,
 			s.makeForensicsConsumer())
 		s.eventBus.Subscribe(eventbus.TopicSettlement, "chargeback", 50, time.Second,
@@ -863,7 +863,7 @@ func (s *Server) setupMiddleware() {
 	// Rate limiting
 	s.rateLimiter = ratelimit.New(ratelimit.Config{
 		RequestsPerMinute: s.cfg.RateLimitRPM,
-		BurstSize:         10,
+		BurstSize:         s.cfg.RateLimitBurst,
 		CleanupInterval:   time.Minute,
 	})
 	s.router.Use(s.rateLimiter.Middleware())
@@ -2029,7 +2029,7 @@ func (s *Server) Shutdown() error {
 	s.logger.Info("starting graceful shutdown (phase 1: draining)")
 
 	// Phase 2: Wait for in-flight requests to finish.
-	deadline := time.After(15 * time.Second)
+	deadline := time.After(s.cfg.DrainDeadline)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 drainLoop:
@@ -2508,7 +2508,10 @@ func (a *gatewayRegistryAdapter) ListServices(ctx context.Context, serviceType, 
 		for _, l := range listings {
 			addrs = append(addrs, l.AgentAddress)
 		}
-		trScores, _ = a.traceRankStore.GetScores(ctx, addrs)
+		trScores, err = a.traceRankStore.GetScores(ctx, addrs)
+		if err != nil {
+			slog.Debug("tracerank scores unavailable for gateway enrichment", "error", err)
+		}
 	}
 
 	var candidates []gateway.ServiceCandidate
@@ -3007,8 +3010,25 @@ func (a *arbitrationEscrowAdapter) ReleaseSeller(ctx context.Context, escrowID s
 	return err
 }
 
-func (a *arbitrationEscrowAdapter) SplitFunds(_ context.Context, _ string, _ int) error {
-	return nil // TODO: implement partial split via escrow
+func (a *arbitrationEscrowAdapter) SplitFunds(ctx context.Context, escrowID string, buyerPct int) error {
+	esc, err := a.svc.Get(ctx, escrowID)
+	if err != nil {
+		return fmt.Errorf("get escrow for split: %w", err)
+	}
+	totalBig, ok := usdc.Parse(esc.Amount)
+	if !ok {
+		return fmt.Errorf("invalid escrow amount: %s", esc.Amount)
+	}
+	sellerPct := 100 - buyerPct
+	releaseAmt := new(big.Int).Mul(totalBig, big.NewInt(int64(sellerPct)))
+	releaseAmt.Div(releaseAmt, big.NewInt(100))
+
+	_, err = a.svc.ResolveArbitration(ctx, escrowID, esc.ArbitratorAddr, escrow.ResolveRequest{
+		Resolution:    "partial",
+		ReleaseAmount: usdc.Format(releaseAmt),
+		Reason:        fmt.Sprintf("arbitration split: %d%% buyer / %d%% seller", buyerPct, sellerPct),
+	})
+	return err
 }
 
 // --- Forensics adapter ---
@@ -3161,7 +3181,9 @@ func (s *Server) makeChargebackConsumer() eventbus.Handler {
 				continue
 			}
 			adapter := &chargebackGatewayAdapter{s.chargebackService}
-			_ = adapter.RecordGatewaySpend(ctx, p.TenantID, p.BuyerAddr, p.Amount, p.ServiceType, p.SessionID)
+			if err := adapter.RecordGatewaySpend(ctx, p.TenantID, p.BuyerAddr, p.Amount, p.ServiceType, p.SessionID); err != nil {
+				return fmt.Errorf("chargeback record spend for tenant %s buyer %s: %w", p.TenantID, p.BuyerAddr, err)
+			}
 		}
 		return nil
 	}

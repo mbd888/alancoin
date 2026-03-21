@@ -25,8 +25,9 @@ func HeadersMiddleware() gin.HandlerFunc {
 		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
 
 		// Content Security Policy
-		// Allow inline scripts/styles for dashboard pages, restrict framing
-		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'")
+		// No unsafe-inline for scripts (React SPA served as static bundles).
+		// Keep unsafe-inline for styles (CSS-in-JS / Google Fonts inline styles).
+		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'")
 
 		// Permissions Policy
 		c.Header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")

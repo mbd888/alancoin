@@ -352,7 +352,10 @@ func (b *MemoryBus) consumeLoop(ctx context.Context, ch <-chan Event, sub subscr
 				// WAL: mark events as processed
 				if b.wal != nil {
 					for _, e := range toProcess {
-						_ = b.wal.MarkProcessed(ctx, e.ID)
+						if err := b.wal.MarkProcessed(ctx, e.ID); err != nil {
+							b.logger.Warn("eventbus: WAL mark processed failed (event may be reprocessed on restart)",
+								"event_id", e.ID, "error", err)
+						}
 					}
 				}
 				return
@@ -373,7 +376,10 @@ func (b *MemoryBus) consumeLoop(ctx context.Context, ch <-chan Event, sub subscr
 			b.dlq = append(b.dlq, toProcess[i])
 			// WAL: mark as dead-lettered
 			if b.wal != nil {
-				_ = b.wal.MarkDeadLettered(ctx, toProcess[i].ID)
+				if err := b.wal.MarkDeadLettered(ctx, toProcess[i].ID); err != nil {
+					b.logger.Warn("eventbus: WAL mark dead-lettered failed",
+						"event_id", toProcess[i].ID, "error", err)
+				}
 			}
 		}
 		b.deadLettered.Add(int64(len(toProcess)))

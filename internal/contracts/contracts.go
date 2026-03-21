@@ -14,7 +14,6 @@ package contracts
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/idgen"
 )
 
 var (
@@ -212,7 +213,7 @@ func (s *Service) Create(ctx context.Context, req CreateContractRequest) (*Contr
 
 	now := time.Now()
 	contract := &Contract{
-		ID:            generateContractID(),
+		ID:            idgen.WithPrefix("abc_"),
 		Name:          req.Name,
 		Description:   req.Description,
 		Preconditions: req.Preconditions,
@@ -543,12 +544,4 @@ func condParamString(c Condition, key string) (string, bool) {
 	}
 	s, ok := v.(string)
 	return s, ok
-}
-
-func generateContractID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return fmt.Sprintf("abc_%x", b)
 }

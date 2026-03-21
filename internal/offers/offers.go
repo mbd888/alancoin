@@ -9,7 +9,6 @@ package offers
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/idgen"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
 	"go.opentelemetry.io/otel/attribute"
@@ -232,7 +232,7 @@ func (s *Service) PostOffer(ctx context.Context, sellerAddr string, req CreateOf
 
 	now := time.Now()
 	offer := &Offer{
-		ID:           generateOfferID(),
+		ID:           idgen.WithPrefix("ofr_"),
 		SellerAddr:   strings.ToLower(sellerAddr),
 		ServiceType:  req.ServiceType,
 		Description:  req.Description,
@@ -314,7 +314,7 @@ func (s *Service) ClaimOffer(ctx context.Context, offerID, buyerAddr string) (*C
 	}
 
 	// Lock buyer funds
-	claimID := generateClaimID()
+	claimID := idgen.WithPrefix("clm_")
 	claim := &Claim{
 		ID:         claimID,
 		OfferID:    offer.ID,
@@ -631,20 +631,4 @@ func validatePrice(price string) error {
 		return fmt.Errorf("%w: price must be positive", ErrInvalidPrice)
 	}
 	return nil
-}
-
-func generateOfferID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return fmt.Sprintf("ofr_%x", b)
-}
-
-func generateClaimID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return fmt.Sprintf("clm_%x", b)
 }

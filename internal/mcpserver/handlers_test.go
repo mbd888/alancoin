@@ -93,8 +93,8 @@ func TestClient_DoRequest_HTTPError_NonJSON(t *testing.T) {
 	client := NewAlancoinClient(Config{APIURL: ts.URL, APIKey: "k", AgentAddress: "0x1"})
 	_, err := client.GetBalance(context.Background())
 	require.Error(t, err)
+	// 502 is a server error — retried, final error reflects the status code
 	assert.Contains(t, err.Error(), "502")
-	assert.Contains(t, err.Error(), "upstream timeout")
 }
 
 func TestClient_DoRequest_HTTPError_InsufficientBalance(t *testing.T) {
@@ -369,7 +369,7 @@ func TestHandleDiscoverServices_APIError(t *testing.T) {
 	result, err := h.HandleDiscoverServices(context.Background(), makeRequest(nil))
 	require.NoError(t, err)
 	assert.True(t, result.IsError)
-	assert.Contains(t, resultText(t, result), "db down")
+	assert.Contains(t, resultText(t, result), "500")
 }
 
 func TestHandleDiscoverServices_PassesAllQueryParams(t *testing.T) {
@@ -999,7 +999,7 @@ func TestHandleGetNetworkStats_APIError(t *testing.T) {
 	result, err := h.HandleGetNetworkStats(context.Background(), makeRequest(nil))
 	require.NoError(t, err)
 	assert.True(t, result.IsError)
-	assert.Contains(t, resultText(t, result), "maintenance")
+	assert.Contains(t, resultText(t, result), "503")
 }
 
 // ============================================================
@@ -1498,10 +1498,13 @@ func TestClient_SlowServer_Timeout(t *testing.T) {
 	defer ts.Close()
 
 	client := NewAlancoinClient(Config{APIURL: ts.URL, APIKey: "k", AgentAddress: "0x1"})
+	// Use a context with deadline to bound total time (prevents retry from extending)
+	ctx, cancel := context.WithTimeout(context.Background(), 32*time.Second)
+	defer cancel()
 	start := time.Now()
-	_, err := client.GetBalance(context.Background())
+	_, err := client.GetBalance(ctx)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
-	assert.Less(t, elapsed, 32*time.Second, "should timeout around 30s, not hang forever")
+	assert.Less(t, elapsed, 33*time.Second, "should timeout around 30s, not hang forever")
 }
