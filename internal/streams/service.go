@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/idgen"
 	"github.com/mbd888/alancoin/internal/logging"
 	"github.com/mbd888/alancoin/internal/retry"
 	"github.com/mbd888/alancoin/internal/syncutil"
@@ -103,7 +104,7 @@ func (s *Service) Open(ctx context.Context, req OpenRequest) (_ *Stream, retErr 
 
 	now := time.Now()
 	stream := &Stream{
-		ID:              generateStreamID(),
+		ID:              idgen.WithPrefix("str_"),
 		BuyerAddr:       strings.ToLower(req.BuyerAddr),
 		SellerAddr:      strings.ToLower(req.SellerAddr),
 		ServiceID:       req.ServiceID,
@@ -201,7 +202,7 @@ func (s *Service) RecordTick(ctx context.Context, streamID string, req TickReque
 
 	now := time.Now()
 	tick := &Tick{
-		ID:         generateTickID(),
+		ID:         idgen.WithPrefix("tick_"),
 		StreamID:   streamID,
 		Seq:        nextSeq,
 		Amount:     tickAmount,

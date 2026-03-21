@@ -9,9 +9,7 @@ package streams
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -137,20 +135,4 @@ type TickRequest struct {
 // CloseRequest contains optional close parameters.
 type CloseRequest struct {
 	Reason string `json:"reason"`
-}
-
-func generateStreamID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return fmt.Sprintf("str_%x", b)
-}
-
-func generateTickID() string {
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return fmt.Sprintf("tick_%x", b)
 }
