@@ -19,9 +19,10 @@ CREATE TABLE IF NOT EXISTS agent_spend_events (
 CREATE INDEX IF NOT EXISTS idx_spend_events_agent_time
     ON agent_spend_events (agent_addr, created_at DESC);
 
+-- Index on created_at for recent event queries (non-partial; Postgres requires
+-- immutable predicates in partial indexes, and NOW() is volatile).
 CREATE INDEX IF NOT EXISTS idx_spend_events_recent
-    ON agent_spend_events (created_at)
-    WHERE created_at > NOW() - INTERVAL '8 days';
+    ON agent_spend_events (created_at);
 
 -- Cross-tenant denial feature vectors
 CREATE TABLE IF NOT EXISTS agent_denial_log (

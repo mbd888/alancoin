@@ -23,10 +23,14 @@ CREATE TABLE transactions (
 CREATE UNIQUE INDEX idx_transactions_tx_hash ON transactions(tx_hash, created_at)
     WHERE tx_hash IS NOT NULL;
 
--- Step 4: Recreate original indexes on partitioned table
-CREATE INDEX idx_transactions_from ON transactions(from_address);
-CREATE INDEX idx_transactions_to ON transactions(to_address);
-CREATE INDEX idx_transactions_created_at ON transactions(created_at DESC);
+-- Step 4: Drop old indexes (still attached to transactions_old) and recreate on partitioned table.
+-- Use CASCADE to ensure dependent objects are handled.
+DROP INDEX IF EXISTS idx_transactions_from CASCADE;
+DROP INDEX IF EXISTS idx_transactions_to CASCADE;
+DROP INDEX IF EXISTS idx_transactions_created_at CASCADE;
+CREATE INDEX IF NOT EXISTS idx_transactions_from ON transactions(from_address);
+CREATE INDEX IF NOT EXISTS idx_transactions_to ON transactions(to_address);
+CREATE INDEX IF NOT EXISTS idx_transactions_created_at ON transactions(created_at DESC);
 
 -- Step 5: Create monthly partitions (2025-01 through 2026-12)
 CREATE TABLE transactions_2025_01 PARTITION OF transactions

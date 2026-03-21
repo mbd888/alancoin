@@ -8,6 +8,13 @@
 -- AGENT BALANCES: VARCHAR → NUMERIC(20,6)
 -- ============================================================================
 
+-- Drop VARCHAR defaults before type conversion (PG16+ rejects implicit text→numeric cast).
+ALTER TABLE agent_balances
+    ALTER COLUMN available DROP DEFAULT,
+    ALTER COLUMN pending   DROP DEFAULT,
+    ALTER COLUMN total_in  DROP DEFAULT,
+    ALTER COLUMN total_out DROP DEFAULT;
+
 ALTER TABLE agent_balances
     ALTER COLUMN available TYPE NUMERIC(20,6) USING COALESCE(NULLIF(available, ''), '0')::NUMERIC(20,6),
     ALTER COLUMN pending   TYPE NUMERIC(20,6) USING COALESCE(NULLIF(pending, ''), '0')::NUMERIC(20,6),
@@ -44,6 +51,10 @@ ALTER TABLE transactions
 -- ============================================================================
 
 ALTER TABLE agent_stats
+    ALTER COLUMN total_received DROP DEFAULT,
+    ALTER COLUMN total_spent    DROP DEFAULT;
+
+ALTER TABLE agent_stats
     ALTER COLUMN total_received TYPE NUMERIC(20,6) USING COALESCE(NULLIF(total_received, ''), '0')::NUMERIC(20,6),
     ALTER COLUMN total_spent    TYPE NUMERIC(20,6) USING COALESCE(NULLIF(total_spent, ''), '0')::NUMERIC(20,6);
 
@@ -61,6 +72,10 @@ ALTER TABLE services
 -- ============================================================================
 -- SESSION KEYS: spending limits VARCHAR → NUMERIC(20,6)
 -- ============================================================================
+
+ALTER TABLE session_keys
+    ALTER COLUMN total_spent  DROP DEFAULT,
+    ALTER COLUMN spent_today  DROP DEFAULT;
 
 ALTER TABLE session_keys
     ALTER COLUMN max_per_transaction TYPE NUMERIC(20,6) USING NULLIF(max_per_transaction, '')::NUMERIC(20,6),

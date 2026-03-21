@@ -7,7 +7,7 @@ SELECT
     tenant_id,
     date_trunc('hour', created_at) AS period,
     COUNT(*) AS request_count,
-    COALESCE(SUM(amount_settled), 0) AS volume,
+    COALESCE(SUM(amount), 0) AS volume,
     COALESCE(SUM(fee_amount), 0) AS fees
 FROM gateway_request_logs
 WHERE tenant_id IS NOT NULL
