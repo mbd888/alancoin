@@ -436,6 +436,14 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr, tenantID string,
 		rpmLimit = 1000
 	}
 
+	// Risk-gated rate limiting: high-risk agents get reduced rate limits.
+	// This protects the platform from anomalous behavior without blocking entirely.
+	if s.intelligence != nil {
+		if tier, _, err := s.intelligence.GetCreditTier(ctx, agentAddr); err == nil && tier != "" {
+			rpmLimit = adjustRPMByRisk(tier, rpmLimit)
+		}
+	}
+
 	now := time.Now()
 	session := &Session{
 		ID:                   idgen.WithPrefix("gw_"),

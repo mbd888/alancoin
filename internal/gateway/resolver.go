@@ -11,8 +11,9 @@ import (
 
 // Resolver discovers and ranks service candidates.
 type Resolver struct {
-	registry RegistryProvider
-	booster  DiscoveryBooster // flywheel: reputation-based discovery boost
+	registry     RegistryProvider
+	booster      DiscoveryBooster     // flywheel: reputation-based discovery boost
+	intelligence IntelligenceProvider // intelligence: credit-based discovery boost
 }
 
 // NewResolver creates a new service resolver.
@@ -23,6 +24,14 @@ func NewResolver(registry RegistryProvider) *Resolver {
 // WithDiscoveryBooster adds flywheel-based discovery score boosting.
 func (r *Resolver) WithDiscoveryBooster(b DiscoveryBooster) *Resolver {
 	r.booster = b
+	return r
+}
+
+// WithIntelligenceRanker adds intelligence-based discovery boost.
+// Agents with higher intelligence tiers get boosted in discovery results,
+// directly closing the flywheel: better score → more visibility → more transactions.
+func (r *Resolver) WithIntelligenceRanker(ip IntelligenceProvider) *Resolver {
+	r.intelligence = ip
 	return r
 }
 
@@ -59,6 +68,17 @@ func (r *Resolver) Resolve(ctx context.Context, req ProxyRequest, strategy, maxP
 		for i := range filtered {
 			tier := scoreTier(filtered[i].ReputationScore)
 			filtered[i].ReputationScore = r.booster.BoostScore(ctx, tier, filtered[i].ReputationScore)
+		}
+	}
+
+	// Apply intelligence-based discovery boost: agents with higher credit tiers
+	// get an additional boost, creating switching costs (leave = lose ranking).
+	if r.intelligence != nil {
+		for i := range filtered {
+			tier, _, err := r.intelligence.GetCreditTier(ctx, filtered[i].AgentAddress)
+			if err == nil && tier != "" {
+				filtered[i].ReputationScore += intelligenceDiscoveryBoost(tier)
+			}
 		}
 	}
 
@@ -130,6 +150,44 @@ func valueScore(c ServiceCandidate) float64 {
 	repComponent := repWeight * c.ReputationScore
 	priceComponent := priceWeight * (100.0 / (priceF / 1e6)) // normalize: cheaper = higher score
 	return repComponent + priceComponent
+}
+
+// intelligenceDiscoveryBoost returns a reputation score boost based on
+// the agent's intelligence tier. This ensures high-intelligence agents
+// appear earlier in discovery results regardless of sorting strategy.
+func intelligenceDiscoveryBoost(tier string) float64 {
+	switch tier {
+	case "diamond":
+		return 15.0 // +15 reputation points
+	case "platinum":
+		return 10.0
+	case "gold":
+		return 5.0
+	case "silver":
+		return 2.0
+	default:
+		return 0
+	}
+}
+
+// adjustRPMByRisk adjusts the per-session rate limit based on intelligence tier.
+// High-risk (low-tier) agents get reduced limits; high-credit agents get a boost.
+// This creates a graduated throttle: bronze/unknown get halved, diamond gets 50% more.
+func adjustRPMByRisk(tier string, baseRPM int) int {
+	switch tier {
+	case "diamond":
+		return baseRPM + baseRPM/2 // +50%: trusted agents get headroom
+	case "platinum":
+		return baseRPM + baseRPM/4 // +25%
+	case "gold":
+		return baseRPM // unchanged
+	case "silver":
+		return baseRPM * 3 / 4 // -25%
+	case "bronze":
+		return baseRPM / 2 // -50%: untrusted agents throttled
+	default:
+		return baseRPM // unknown = no adjustment
+	}
 }
 
 // scoreTier converts a 0-100 reputation score to a tier string.

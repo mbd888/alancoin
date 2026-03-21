@@ -1,0 +1,181 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Intelligence — Avg Credit Score",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "alancoin_intelligence_avg_credit_score",
+          "legendFormat": "Avg Credit"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": 0 },
+              { "color": "orange", "value": 25 },
+              { "color": "yellow", "value": 50 },
+              { "color": "green", "value": 75 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Intelligence — Avg Risk Score",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "expr": "alancoin_intelligence_avg_risk_score",
+          "legendFormat": "Avg Risk"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "yellow", "value": 30 },
+              { "color": "orange", "value": 60 },
+              { "color": "red", "value": 80 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Profiles Computed (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "rate(alancoin_intelligence_profiles_computed_total[5m])",
+          "legendFormat": "Profiles/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" }
+      }
+    },
+    {
+      "title": "Real-Time Updates (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        {
+          "expr": "rate(alancoin_intelligence_realtime_updates_total[5m])",
+          "legendFormat": "RT Updates/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" }
+      }
+    },
+    {
+      "title": "Credit & Risk Score Trend",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "expr": "alancoin_intelligence_avg_credit_score",
+          "legendFormat": "Avg Credit Score"
+        },
+        {
+          "expr": "alancoin_intelligence_avg_risk_score",
+          "legendFormat": "Avg Risk Score"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100
+        }
+      }
+    },
+    {
+      "title": "Computation Duration",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(alancoin_intelligence_compute_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(alancoin_intelligence_compute_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(alancoin_intelligence_compute_duration_seconds_bucket[5m]))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+    {
+      "title": "Total Profiles Computed",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 14 },
+      "targets": [
+        {
+          "expr": "alancoin_intelligence_profiles_computed_total",
+          "legendFormat": "Total"
+        }
+      ]
+    },
+    {
+      "title": "Total Real-Time Updates",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 14 },
+      "targets": [
+        {
+          "expr": "alancoin_intelligence_realtime_updates_total",
+          "legendFormat": "RT Total"
+        }
+      ]
+    },
+    {
+      "title": "Tier Transition Webhooks",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 14 },
+      "targets": [
+        {
+          "expr": "alancoin_webhook_emit_total{event_type=\"intelligence.tier.transition\"}",
+          "legendFormat": "Tier Transitions"
+        }
+      ]
+    },
+    {
+      "title": "Score Alert Webhooks",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 14 },
+      "targets": [
+        {
+          "expr": "alancoin_webhook_emit_total{event_type=\"intelligence.score.alert\"}",
+          "legendFormat": "Score Alerts"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["alancoin", "intelligence"],
+  "templating": { "list": [] },
+  "time": { "from": "now-3h", "to": "now" },
+  "title": "Alancoin — Agent Intelligence",
+  "uid": "alancoin-intelligence"
+}

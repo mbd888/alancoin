@@ -446,6 +446,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Intelligence engine (unified agent intelligence profiles)
 		s.intelligenceStore = intelligence.NewPostgresStore(db)
+		gwResolver.WithIntelligenceRanker(intelligence.NewCreditGate(s.intelligenceStore))
 		s.logger.Info("intelligence enabled (postgres)")
 
 		// Cross-subsystem reconciliation (PostgreSQL only)
@@ -658,6 +659,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Intelligence engine (in-memory)
 		s.intelligenceStore = intelligence.NewMemoryStore()
+		gwResolver2.WithIntelligenceRanker(intelligence.NewCreditGate(s.intelligenceStore))
 		s.logger.Info("intelligence enabled (in-memory)")
 
 	}

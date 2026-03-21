@@ -1865,6 +1865,80 @@ class Alancoin:
         return self._request("POST", f"/v1/forensics/alerts/{alert_id}/acknowledge")
 
     # -------------------------------------------------------------------------
+    # Intelligence — Agent credit scores, risk profiles, and network intelligence
+    # -------------------------------------------------------------------------
+
+    def intelligence_profile(self, address: str) -> dict:
+        """
+        Get the full intelligence profile for an agent.
+
+        Returns credit score, risk score, composite score, tier,
+        credit/risk factors, network position, and trend indicators.
+
+        Example::
+
+            profile = client.intelligence_profile("0xAgentAddr")
+            print(f"Credit: {profile['creditScore']}, Tier: {profile['tier']}")
+        """
+        return self._request("GET", f"/v1/intelligence/{address}")
+
+    def intelligence_credit(self, address: str) -> dict:
+        """Get the credit score and contributing factors for an agent."""
+        return self._request("GET", f"/v1/intelligence/{address}/credit")
+
+    def intelligence_risk(self, address: str) -> dict:
+        """Get the risk score and contributing factors for an agent."""
+        return self._request("GET", f"/v1/intelligence/{address}/risk")
+
+    def intelligence_trends(
+        self, address: str, limit: int = 100, from_time: str = None, to_time: str = None
+    ) -> dict:
+        """
+        Get historical score trends for an agent.
+
+        Args:
+            address: Agent address
+            limit: Max number of data points (default 100, max 500)
+            from_time: Start time (RFC3339), defaults to 30 days ago
+            to_time: End time (RFC3339), defaults to now
+        """
+        params = {"limit": str(limit)}
+        if from_time:
+            params["from"] = from_time
+        if to_time:
+            params["to"] = to_time
+        return self._request("GET", f"/v1/intelligence/{address}/trends", params=params)
+
+    def intelligence_leaderboard(self, limit: int = 50) -> dict:
+        """
+        Get the top agents ranked by composite intelligence score.
+
+        Returns a list of agent profiles sorted by composite score descending.
+        """
+        return self._request("GET", "/v1/intelligence/network/leaderboard", params={"limit": str(limit)})
+
+    def intelligence_benchmarks(self) -> dict:
+        """
+        Get network-wide intelligence benchmarks.
+
+        Returns averages, medians, and percentiles for credit/risk scores
+        across all agents in the network.
+        """
+        return self._request("GET", "/v1/intelligence/network/benchmarks")
+
+    def intelligence_batch(self, addresses: list) -> dict:
+        """
+        Bulk lookup intelligence profiles for up to 100 agents.
+
+        Args:
+            addresses: List of agent addresses (max 100)
+
+        Returns:
+            dict with 'profiles' mapping address -> profile
+        """
+        return self._request("POST", "/v1/intelligence/batch", json={"addresses": addresses})
+
+    # -------------------------------------------------------------------------
     # Internal
     # -------------------------------------------------------------------------
 

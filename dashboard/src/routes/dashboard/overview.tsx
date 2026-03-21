@@ -7,12 +7,16 @@ import {
   TrendingUp,
   AlertTriangle,
   Percent,
+  Brain,
+  Shield,
 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { KpiCard } from "@/components/ui/kpi-card";
 import { SkeletonCard, Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Tabs } from "@/components/ui/tabs";
 import { useOverview, useUsage, useTopServices, useDenials } from "@/hooks/api/use-dashboard";
+import { api } from "@/lib/api-client";
 import { formatCurrency, formatCompact, relativeTime } from "@/lib/utils";
 import {
   AreaChart,
@@ -55,8 +59,21 @@ export function OverviewPage() {
   const usage = useUsage(interval);
   const topServices = useTopServices(5);
   const denials = useDenials(5);
+  const intelligence = useQuery({
+    queryKey: ["intelligence", "benchmarks"],
+    queryFn: () => api.get<{
+      totalAgents: number;
+      avgCreditScore: number;
+      medianCreditScore: number;
+      avgRiskScore: number;
+      avgCompositeScore: number;
+      p90CreditScore: number;
+      p10CreditScore: number;
+    }>("/intelligence/network/benchmarks"),
+  });
 
   const o = overview.data;
+  const intel = intelligence.data;
 
   const intervalLabel =
     interval === "hour" ? "24 hours" : interval === "day" ? "30 days" : "12 weeks";
@@ -219,6 +236,39 @@ export function OverviewPage() {
             )}
           </div>
         </div>
+
+        {/* Intelligence summary */}
+        {intel && intel.totalAgents > 0 && (
+          <div className="mt-4 grid grid-cols-4 gap-3">
+            <KpiCard
+              label="Avg Credit Score"
+              value={intel.avgCreditScore.toFixed(1)}
+              icon={Brain}
+              change={`median ${intel.medianCreditScore.toFixed(1)}`}
+              changeType="neutral"
+            />
+            <KpiCard
+              label="Avg Risk Score"
+              value={intel.avgRiskScore.toFixed(1)}
+              icon={Shield}
+              change={intel.avgRiskScore < 30 ? "Low risk" : intel.avgRiskScore < 60 ? "Moderate" : "Elevated"}
+              changeType={intel.avgRiskScore < 30 ? "positive" : intel.avgRiskScore < 60 ? "neutral" : "negative"}
+            />
+            <KpiCard
+              label="Avg Composite"
+              value={intel.avgCompositeScore.toFixed(1)}
+              icon={TrendingUp}
+              change={`${intel.totalAgents} agents scored`}
+              changeType="neutral"
+            />
+            <KpiCard
+              label="Credit Spread"
+              value={`${intel.p90CreditScore.toFixed(0)} — ${intel.p10CreditScore.toFixed(0)}`}
+              change="P90 vs P10"
+              changeType="neutral"
+            />
+          </div>
+        )}
 
         {/* Bottom row */}
         <div className="mt-4 grid grid-cols-5 gap-4">

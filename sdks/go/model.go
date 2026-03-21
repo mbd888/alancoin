@@ -1363,6 +1363,120 @@ type RealtimeSubscription struct {
 
 // --- Service Type Constants ---
 
+// --- Intelligence Models ---
+
+// IntelCreditFactors are the inputs to the credit score.
+type IntelCreditFactors struct {
+	TraceRankInput  float64 `json:"traceRankInput"`
+	ReputationInput float64 `json:"reputationInput"`
+	DisputeRate     float64 `json:"disputeRate"`
+	TxSuccessRate   float64 `json:"txSuccessRate"`
+	TotalVolume     float64 `json:"totalVolume"`
+}
+
+// IntelRiskFactors are the inputs to the risk score.
+type IntelRiskFactors struct {
+	AnomalyCount30d      int     `json:"anomalyCount30d"`
+	CriticalAlerts       int     `json:"criticalAlerts"`
+	MeanAmount           float64 `json:"meanAmount"`
+	StdDevAmount         float64 `json:"stdDevAmount"`
+	ForensicScore        float64 `json:"forensicScore"`
+	BehavioralVolatility float64 `json:"behavioralVolatility"`
+}
+
+// IntelNetworkPosition captures the agent's position in the payment graph.
+type IntelNetworkPosition struct {
+	InDegree              int     `json:"inDegree"`
+	OutDegree             int     `json:"outDegree"`
+	ClusteringCoefficient float64 `json:"clusteringCoefficient"`
+	BridgeScore           float64 `json:"bridgeScore"`
+}
+
+// IntelTrends shows score movement over time.
+type IntelTrends struct {
+	CreditDelta7d  float64 `json:"creditDelta7d"`
+	CreditDelta30d float64 `json:"creditDelta30d"`
+	RiskDelta7d    float64 `json:"riskDelta7d"`
+	RiskDelta30d   float64 `json:"riskDelta30d"`
+}
+
+// IntelProfile is the full intelligence profile for an agent.
+type IntelProfile struct {
+	Address        string               `json:"address"`
+	CreditScore    float64              `json:"creditScore"`
+	RiskScore      float64              `json:"riskScore"`
+	CompositeScore float64              `json:"compositeScore"`
+	Tier           string               `json:"tier"`
+	ComputeRunID   string               `json:"computeRunId"`
+	ComputedAt     time.Time            `json:"computedAt"`
+	Credit         IntelCreditFactors   `json:"credit"`
+	Risk           IntelRiskFactors     `json:"risk"`
+	Network        IntelNetworkPosition `json:"network"`
+	Operational    struct {
+		TotalTxns     int `json:"totalTxns"`
+		DaysOnNetwork int `json:"daysOnNetwork"`
+	} `json:"operational"`
+	Trends IntelTrends `json:"trends"`
+}
+
+// IntelCreditResponse is the response for GET /v1/intelligence/:address/credit.
+type IntelCreditResponse struct {
+	Address     string             `json:"address"`
+	CreditScore float64            `json:"creditScore"`
+	Tier        string             `json:"tier"`
+	Factors     IntelCreditFactors `json:"factors"`
+	ComputedAt  time.Time          `json:"computedAt"`
+}
+
+// IntelRiskResponse is the response for GET /v1/intelligence/:address/risk.
+type IntelRiskResponse struct {
+	Address    string           `json:"address"`
+	RiskScore  float64          `json:"riskScore"`
+	Tier       string           `json:"tier"`
+	Factors    IntelRiskFactors `json:"factors"`
+	ComputedAt time.Time        `json:"computedAt"`
+}
+
+// IntelScoreHistoryPoint is a single point in the score time-series.
+type IntelScoreHistoryPoint struct {
+	Address        string    `json:"address"`
+	CreditScore    float64   `json:"creditScore"`
+	RiskScore      float64   `json:"riskScore"`
+	CompositeScore float64   `json:"compositeScore"`
+	Tier           string    `json:"tier"`
+	CreatedAt      time.Time `json:"createdAt"`
+}
+
+// IntelTrendsResponse is the response for GET /v1/intelligence/:address/trends.
+type IntelTrendsResponse struct {
+	Address string                   `json:"address"`
+	Points  []IntelScoreHistoryPoint `json:"points"`
+	Count   int                      `json:"count"`
+}
+
+// IntelBenchmarks holds network-wide intelligence statistics.
+type IntelBenchmarks struct {
+	TotalAgents       int       `json:"totalAgents"`
+	AvgCreditScore    float64   `json:"avgCreditScore"`
+	MedianCreditScore float64   `json:"medianCreditScore"`
+	AvgRiskScore      float64   `json:"avgRiskScore"`
+	P90CreditScore    float64   `json:"p90CreditScore"`
+	P10CreditScore    float64   `json:"p10CreditScore"`
+	AvgCompositeScore float64   `json:"avgCompositeScore"`
+	ComputeRunID      string    `json:"computeRunId"`
+	ComputedAt        time.Time `json:"computedAt"`
+}
+
+type intelLeaderboardResponse struct {
+	Agents []IntelProfile `json:"agents"`
+	Count  int            `json:"count"`
+}
+
+type intelBatchResponse struct {
+	Profiles map[string]*IntelProfile `json:"profiles"`
+	Count    int                      `json:"count"`
+}
+
 const (
 	ServiceTypeInference   = "inference"
 	ServiceTypeEmbedding   = "embedding"
