@@ -8,8 +8,16 @@ import type {
   SessionsResponse,
 } from "@/lib/types";
 
-// TODO: replace with real tenant ID from auth context
-const TENANT_ID = "default";
+// Tenant ID from localStorage (set during login) or environment, falling back to "default".
+// When a proper auth context is added, this should read from it instead.
+function getTenantId(): string {
+  if (typeof window !== "undefined") {
+    const stored = localStorage.getItem("alancoin_tenant_id");
+    if (stored) return stored;
+  }
+  return import.meta.env.VITE_TENANT_ID || "default";
+}
+const TENANT_ID = getTenantId();
 
 export function useOverview() {
   return useQuery({
