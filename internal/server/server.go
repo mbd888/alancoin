@@ -45,6 +45,7 @@ import (
 	"github.com/mbd888/alancoin/internal/forensics"
 	"github.com/mbd888/alancoin/internal/gateway"
 	"github.com/mbd888/alancoin/internal/health"
+	"github.com/mbd888/alancoin/internal/intelligence"
 	"github.com/mbd888/alancoin/internal/kya"
 	"github.com/mbd888/alancoin/internal/ledger"
 	"github.com/mbd888/alancoin/internal/logging"
@@ -128,6 +129,8 @@ type Server struct {
 	chargebackService      *chargeback.Service    // FinOps cost attribution
 	arbitrationService     *arbitration.Service   // Dispute resolution
 	forensicsService       *forensics.Service     // Spend anomaly detection
+	intelligenceStore      intelligence.Store     // Unified agent intelligence profiles
+	intelligenceWorker     *intelligence.Worker   // Periodic intelligence computation
 	eventBus               *eventbus.MemoryBus    // Settlement event bus
 	db                     *sql.DB                // nil if using in-memory
 	router                 *gin.Engine
@@ -436,6 +439,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.flywheelStore = flywheel.NewPostgresStore(db)
 		s.logger.Info("flywheel enabled (postgres)")
 
+		// Intelligence engine (unified agent intelligence profiles)
+		s.intelligenceStore = intelligence.NewPostgresStore(db)
+		s.logger.Info("intelligence enabled (postgres)")
+
 		// Cross-subsystem reconciliation (PostgreSQL only)
 		s.reconcileRunner = reconciliation.NewRunner(s.logger).
 			WithLedger(&reconcileLedgerAdapter{eventStore: eventStore, ledgerStore: ledgerStore}).
@@ -639,6 +646,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.flywheelStore = flywheel.NewMemoryStore()
 		s.logger.Info("flywheel enabled (in-memory)")
 
+		// Intelligence engine (in-memory)
+		s.intelligenceStore = intelligence.NewMemoryStore()
+		s.logger.Info("intelligence enabled (in-memory)")
+
 	}
 
 	// Register subsystem health checkers.
@@ -686,6 +697,13 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 				stats.InUse, stats.Idle, stats.OpenConnections, maxOpen, stats.WaitCount)
 			healthy := maxOpen == 0 || float64(stats.InUse) < 0.9*float64(maxOpen)
 			return health.Status{Name: "db_pool", Healthy: healthy, Detail: detail}
+		})
+	}
+
+	// Intelligence health check
+	if s.intelligenceStore != nil {
+		s.healthRegistry.Register("intelligence", func(_ context.Context) health.Status {
+			return health.Status{Name: "intelligence", Healthy: true, Detail: "ok"}
 		})
 	}
 
@@ -1325,6 +1343,30 @@ func (s *Server) setupRoutes() {
 			WithRevenueAccumulator(s.revenueAccumulator)
 	}
 
+	// Intelligence engine and periodic worker
+	if s.intelligenceStore != nil {
+		intelEngine := intelligence.NewEngine(
+			&intelligenceTraceRankAdapter{s.traceRankStore},
+			&intelligenceForensicsAdapter{s.forensicsService},
+			&intelligenceReputationAdapter{reputationProvider},
+			&intelligenceAgentSourceAdapter{s.registry},
+			s.intelligenceStore,
+			s.logger,
+		)
+
+		intelInterval := 5 * time.Minute
+		if s.db == nil {
+			intelInterval = 30 * time.Second
+		}
+		s.intelligenceWorker = intelligence.NewWorker(intelEngine, s.intelligenceStore, intelInterval, s.logger)
+
+		// Subscribe to settlement events for real-time profile updates
+		if s.eventBus != nil {
+			s.eventBus.Subscribe(eventbus.TopicSettlement, "intelligence", 50, time.Second,
+				intelligence.MakeSettlementConsumer(intelEngine, s.intelligenceStore, s.logger))
+		}
+	}
+
 	// Create matview refresher for service discovery (Postgres only)
 	if s.db != nil {
 		s.matviewRefresher = registry.NewMatviewRefresher(s.db, 30*time.Second, s.logger)
@@ -1338,6 +1380,12 @@ func (s *Server) setupRoutes() {
 	if s.traceRankStore != nil {
 		trHandler := tracerank.NewHandler(s.traceRankStore)
 		trHandler.RegisterRoutes(v1)
+	}
+
+	// Intelligence routes (unified agent intelligence profiles)
+	if s.intelligenceStore != nil {
+		intelHandler := intelligence.NewHandler(s.intelligenceStore)
+		intelHandler.RegisterRoutes(v1)
 	}
 
 	// Flywheel routes (network health and incentive observability)
@@ -1906,6 +1954,11 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.flywheelWorker.Start(runCtx)
 	}
 
+	// Start intelligence computation worker
+	if s.intelligenceWorker != nil {
+		go s.intelligenceWorker.Start(runCtx)
+	}
+
 	// Start materialized view refresher for service discovery
 	if s.matviewRefresher != nil {
 		go s.matviewRefresher.Start(runCtx)
@@ -2053,6 +2106,12 @@ drainLoop:
 	if s.traceRankWorker != nil {
 		s.traceRankWorker.Stop()
 		s.logger.Info("tracerank worker stopped")
+	}
+
+	// Stop intelligence worker
+	if s.intelligenceWorker != nil {
+		s.intelligenceWorker.Stop()
+		s.logger.Info("intelligence worker stopped")
 	}
 
 	// Stop matview refresher
@@ -3108,4 +3167,141 @@ func (s *Server) makeWebhookConsumer() eventbus.Handler {
 		}
 		return nil
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Intelligence engine adapters
+// ---------------------------------------------------------------------------
+
+// intelligenceTraceRankAdapter bridges tracerank.Store → intelligence.TraceRankProvider.
+type intelligenceTraceRankAdapter struct {
+	store tracerank.Store
+}
+
+func (a *intelligenceTraceRankAdapter) GetScore(ctx context.Context, address string) (graphScore float64, inDegree, outDegree int, inVolume, outVolume float64, err error) {
+	if a.store == nil {
+		return 0, 0, 0, 0, 0, nil
+	}
+	s, err := a.store.GetScore(ctx, address)
+	if err != nil || s == nil {
+		return 0, 0, 0, 0, 0, err
+	}
+	return s.GraphScore, s.InDegree, s.OutDegree, s.InVolume, s.OutVolume, nil
+}
+
+func (a *intelligenceTraceRankAdapter) GetAllScores(ctx context.Context) (map[string]intelligence.TraceRankData, error) {
+	if a.store == nil {
+		return map[string]intelligence.TraceRankData{}, nil
+	}
+	scores, err := a.store.GetTopScores(ctx, 10000)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]intelligence.TraceRankData, len(scores))
+	for _, s := range scores {
+		result[s.Address] = intelligence.TraceRankData{
+			GraphScore: s.GraphScore,
+			InDegree:   s.InDegree,
+			OutDegree:  s.OutDegree,
+			InVolume:   s.InVolume,
+			OutVolume:  s.OutVolume,
+		}
+	}
+	return result, nil
+}
+
+// intelligenceForensicsAdapter bridges forensics.Service → intelligence.ForensicsProvider.
+type intelligenceForensicsAdapter struct {
+	svc *forensics.Service
+}
+
+func (a *intelligenceForensicsAdapter) GetBaseline(ctx context.Context, agentAddr string) (txCount int, meanAmount, stdDevAmount float64, err error) {
+	if a.svc == nil {
+		return 0, 0, 0, nil
+	}
+	b, err := a.svc.GetBaseline(ctx, agentAddr)
+	if err != nil || b == nil {
+		return 0, 0, 0, err
+	}
+	return b.TxCount, b.MeanAmount, b.StdDevAmount, nil
+}
+
+func (a *intelligenceForensicsAdapter) CountAlerts30d(ctx context.Context, agentAddr string) (total, critical int, err error) {
+	if a.svc == nil {
+		return 0, 0, nil
+	}
+	alerts, err := a.svc.ListAlerts(ctx, agentAddr, 1000)
+	if err != nil {
+		return 0, 0, err
+	}
+	cutoff := time.Now().Add(-30 * 24 * time.Hour)
+	for _, alert := range alerts {
+		if alert.DetectedAt.After(cutoff) {
+			total++
+			if alert.Severity == forensics.SeverityCritical {
+				critical++
+			}
+		}
+	}
+	return total, critical, nil
+}
+
+// intelligenceReputationAdapter bridges reputation.RegistryProvider → intelligence.ReputationProvider.
+type intelligenceReputationAdapter struct {
+	provider *reputation.RegistryProvider
+}
+
+func (a *intelligenceReputationAdapter) GetMetrics(ctx context.Context, address string) (*intelligence.ReputationData, error) {
+	m, err := a.provider.GetAgentMetrics(ctx, address)
+	if err != nil || m == nil {
+		return nil, err
+	}
+	score, _, _ := a.provider.GetScore(ctx, address)
+	return &intelligence.ReputationData{
+		Score:                score,
+		TotalTransactions:    m.TotalTransactions,
+		SuccessfulTxns:       m.SuccessfulTxns,
+		FailedTxns:           m.FailedTxns,
+		TotalVolumeUSD:       m.TotalVolumeUSD,
+		UniqueCounterparties: m.UniqueCounterparties,
+		DaysOnNetwork:        m.DaysOnNetwork,
+	}, nil
+}
+
+func (a *intelligenceReputationAdapter) GetAllMetrics(ctx context.Context) (map[string]*intelligence.ReputationData, error) {
+	metrics, err := a.provider.GetAllAgentMetrics(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]*intelligence.ReputationData, len(metrics))
+	for addr, m := range metrics {
+		score, _, _ := a.provider.GetScore(ctx, addr)
+		result[addr] = &intelligence.ReputationData{
+			Score:                score,
+			TotalTransactions:    m.TotalTransactions,
+			SuccessfulTxns:       m.SuccessfulTxns,
+			FailedTxns:           m.FailedTxns,
+			TotalVolumeUSD:       m.TotalVolumeUSD,
+			UniqueCounterparties: m.UniqueCounterparties,
+			DaysOnNetwork:        m.DaysOnNetwork,
+		}
+	}
+	return result, nil
+}
+
+// intelligenceAgentSourceAdapter bridges registry.Store → intelligence.AgentSource.
+type intelligenceAgentSourceAdapter struct {
+	store registry.Store
+}
+
+func (a *intelligenceAgentSourceAdapter) ListAllAddresses(ctx context.Context) ([]string, error) {
+	agents, err := a.store.ListAgents(ctx, registry.AgentQuery{Limit: 10000})
+	if err != nil {
+		return nil, err
+	}
+	addrs := make([]string, len(agents))
+	for i, agent := range agents {
+		addrs[i] = agent.Address
+	}
+	return addrs, nil
 }
