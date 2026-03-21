@@ -243,6 +243,24 @@ type IncentiveProvider interface {
 	AdjustFeeBPS(ctx context.Context, tier string, baseBPS int) (int, error)
 }
 
+// IntelligenceProvider supplies agent intelligence scores for credit-gated
+// escrow thresholds and dynamic fee adjustments. When configured, high-credit
+// agents (platinum/diamond) get reduced escrow requirements and lower fees,
+// creating a tangible incentive to build intelligence score on the platform.
+type IntelligenceProvider interface {
+	// GetCreditTier returns the intelligence tier for an agent (e.g. "diamond", "platinum").
+	// Returns empty string if no intelligence profile exists.
+	GetCreditTier(ctx context.Context, agentAddr string) (tier string, creditScore float64, err error)
+
+	// FeeDiscountBPS returns the fee discount in basis points for the given intelligence tier.
+	// Diamond: 50bps discount, Platinum: 30bps, Gold: 15bps, others: 0.
+	FeeDiscountBPS(tier string) int
+
+	// EscrowThresholdUSDC returns the transaction amount below which escrow can be
+	// skipped for the given tier. Diamond: $10, Platinum: $5, Gold: $1, others: $0.
+	EscrowThresholdUSDC(tier string) float64
+}
+
 // DiscoveryBooster applies reputation-based score boosts to discovery ranking.
 // Part of the flywheel: higher reputation → better discovery placement → more traffic.
 type DiscoveryBooster interface {

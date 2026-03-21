@@ -364,6 +364,11 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			s.gatewayService.WithForensics(&forensicsGatewayAdapter{s.forensicsService})
 		}
 
+		// Wire intelligence into gateway for credit-gated escrow + dynamic fees.
+		if s.intelligenceStore != nil {
+			s.gatewayService.WithIntelligence(intelligence.NewCreditGate(s.intelligenceStore))
+		}
+
 		// Wire chargeback into gateway for automatic cost attribution + pre-flight budget check.
 		if s.chargebackService != nil {
 			s.gatewayService.WithChargeback(&chargebackGatewayAdapter{s.chargebackService})
@@ -582,6 +587,11 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		// Wire forensics into gateway (in-memory mode).
 		if s.forensicsService != nil {
 			s.gatewayService.WithForensics(&forensicsGatewayAdapter{s.forensicsService})
+		}
+
+		// Wire intelligence into gateway (in-memory mode).
+		if s.intelligenceStore != nil {
+			s.gatewayService.WithIntelligence(intelligence.NewCreditGate(s.intelligenceStore))
 		}
 
 		// Wire chargeback into gateway (in-memory mode).
@@ -1359,6 +1369,11 @@ func (s *Server) setupRoutes() {
 			intelInterval = 30 * time.Second
 		}
 		s.intelligenceWorker = intelligence.NewWorker(intelEngine, s.intelligenceStore, intelInterval, s.logger)
+
+		// Wire tier transition notifications into webhooks
+		if s.webhookEmitter != nil {
+			s.intelligenceWorker.WithNotifier(s.webhookEmitter)
+		}
 
 		// Subscribe to settlement events for real-time profile updates
 		if s.eventBus != nil {

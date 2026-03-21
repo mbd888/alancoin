@@ -258,3 +258,31 @@ func (e *Emitter) EmitForensicsCriticalAlert(agentAddr, alertID, alertType strin
 		"score":   score,
 	})
 }
+
+// --- Intelligence events ---
+
+// EmitTierTransition emits an intelligence.tier.transition event when an agent
+// moves between intelligence tiers. Critical for EU AI Act compliance monitoring.
+func (e *Emitter) EmitTierTransition(agentAddr, oldTier, newTier string, oldScore, newScore float64) {
+	e.emit(agentAddr, EventIntelligenceTierTransition, map[string]interface{}{
+		"agentAddr":      agentAddr,
+		"previousTier":   oldTier,
+		"newTier":        newTier,
+		"previousScore":  oldScore,
+		"newScore":       newScore,
+		"scoreChange":    newScore - oldScore,
+		"transitionedAt": time.Now().UTC(),
+	})
+}
+
+// EmitScoreAlert emits an intelligence.score.alert event when an agent's
+// credit score drops significantly (>10 points in a single computation).
+func (e *Emitter) EmitScoreAlert(agentAddr string, oldScore, newScore float64, reason string) {
+	e.emit(agentAddr, EventIntelligenceScoreAlert, map[string]interface{}{
+		"agentAddr":   agentAddr,
+		"oldScore":    oldScore,
+		"newScore":    newScore,
+		"scoreChange": newScore - oldScore,
+		"reason":      reason,
+	})
+}

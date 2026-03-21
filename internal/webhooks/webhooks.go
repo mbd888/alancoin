@@ -77,6 +77,10 @@ const (
 
 	// Forensics events
 	EventForensicsAlertCritical EventType = "forensics.alert.critical"
+
+	// Intelligence events
+	EventIntelligenceTierTransition EventType = "intelligence.tier.transition"
+	EventIntelligenceScoreAlert     EventType = "intelligence.score.alert"
 )
 
 // Event represents a webhook event

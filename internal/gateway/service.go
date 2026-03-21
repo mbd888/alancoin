@@ -191,15 +191,16 @@ type Service struct {
 	revenue         RevenueAccumulator
 	circuitBreaker  *circuitbreaker.Breaker
 	usageMeter      UsageMeter
-	incentives      IncentiveProvider  // flywheel: reputation-based fee discounts
-	healthMonitor   *HealthMonitor     // per-provider health tracking
-	healthRouter    *HealthAwareRouter // graph-based health-aware routing
-	racer           *RACER             // RACER calibrated expansion routing
-	forensics       ForensicsIngestor  // spend anomaly detection
-	chargeback      ChargebackRecorder // FinOps cost attribution
-	eventBus        EventPublisher     // settlement event bus (replaces fire-and-forget goroutines)
-	budgetCheck     BudgetPreFlight    // pre-flight budget check before proxy
-	platformAddr    string             // ledger address collecting platform fees
+	incentives      IncentiveProvider    // flywheel: reputation-based fee discounts
+	healthMonitor   *HealthMonitor       // per-provider health tracking
+	healthRouter    *HealthAwareRouter   // graph-based health-aware routing
+	racer           *RACER               // RACER calibrated expansion routing
+	forensics       ForensicsIngestor    // spend anomaly detection
+	chargeback      ChargebackRecorder   // FinOps cost attribution
+	intelligence    IntelligenceProvider // credit-gated escrow + dynamic fees
+	eventBus        EventPublisher       // settlement event bus (replaces fire-and-forget goroutines)
+	budgetCheck     BudgetPreFlight      // pre-flight budget check before proxy
+	platformAddr    string               // ledger address collecting platform fees
 	logger          *slog.Logger
 	locks           syncutil.ShardedMutex
 	idemCache       *idempotencyCache
@@ -311,6 +312,14 @@ func (s *Service) WithEventBus(ep EventPublisher) *Service {
 // WithIncentives adds flywheel incentive support (fee discounts by reputation).
 func (s *Service) WithIncentives(ip IncentiveProvider) *Service {
 	s.incentives = ip
+	return s
+}
+
+// WithIntelligence adds credit-gated escrow and dynamic fee adjustments.
+// High-credit agents get reduced escrow requirements and lower fees,
+// creating switching costs and rewarding trusted behavior.
+func (s *Service) WithIntelligence(ip IntelligenceProvider) *Service {
+	s.intelligence = ip
 	return s
 }
 
@@ -826,6 +835,14 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		// Compute platform fee with flywheel incentive discount.
 		// Higher-reputation sellers pay lower platform fees.
 		sellerTier := scoreTier(candidate.ReputationScore)
+
+		// Override with intelligence tier if available (more accurate than reputation alone).
+		if s.intelligence != nil {
+			if intelTier, _, err := s.intelligence.GetCreditTier(ctx, candidate.AgentAddress); err == nil && intelTier != "" {
+				sellerTier = intelTier
+			}
+		}
+
 		sellerAmountStr, feeAmountStr := s.computeFee(ctx, session.TenantID, priceBig, sellerTier)
 
 		// Settle payment with retry (handles transient DB errors).
@@ -1301,6 +1318,13 @@ func (s *Service) computeFee(ctx context.Context, tenantID string, priceBig *big
 		if adjusted, err := s.incentives.AdjustFeeBPS(ctx, sellerTier[0], bps); err == nil {
 			bps = adjusted
 		}
+	}
+
+	// Apply intelligence-based fee discount (credit-gated flywheel).
+	// Higher intelligence tier → lower fees → more transactions → better score.
+	if s.intelligence != nil && len(sellerTier) > 0 && sellerTier[0] != "" {
+		discount := s.intelligence.FeeDiscountBPS(sellerTier[0])
+		bps -= discount
 	}
 
 	if bps <= 0 {
