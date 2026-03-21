@@ -10,7 +10,6 @@ package escrow
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/idgen"
 	"github.com/mbd888/alancoin/internal/metrics"
 	"github.com/mbd888/alancoin/internal/pagination"
 	"github.com/mbd888/alancoin/internal/retry"
@@ -410,7 +410,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Escrow, error
 
 	now := time.Now()
 	escrow := &Escrow{
-		ID:            generateEscrowID(),
+		ID:            idgen.WithPrefix("esc_"),
 		BuyerAddr:     strings.ToLower(req.BuyerAddr),
 		SellerAddr:    strings.ToLower(req.SellerAddr),
 		Amount:        req.Amount,
@@ -1047,12 +1047,4 @@ func (s *Service) ListByAgent(ctx context.Context, agentAddr string, limit int, 
 		limit = 50
 	}
 	return s.store.ListByAgent(ctx, strings.ToLower(agentAddr), limit, opts...)
-}
-
-func generateEscrowID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return fmt.Sprintf("esc_%x", b)
 }

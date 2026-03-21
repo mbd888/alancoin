@@ -2,7 +2,6 @@ package escrow
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/idgen"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
 	"go.opentelemetry.io/otel/attribute"
@@ -152,7 +152,7 @@ func (s *MultiStepService) LockSteps(ctx context.Context, buyerAddr, totalAmount
 
 	now := time.Now()
 	mse := &MultiStepEscrow{
-		ID:           generateMultiStepID(),
+		ID:           idgen.WithPrefix("mse_"),
 		BuyerAddr:    strings.ToLower(buyerAddr),
 		TotalAmount:  totalAmount,
 		SpentAmount:  "0",
@@ -346,12 +346,4 @@ func (s *MultiStepService) RefundRemaining(ctx context.Context, id, callerAddr s
 // Get returns a multistep escrow by ID.
 func (s *MultiStepService) Get(ctx context.Context, id string) (*MultiStepEscrow, error) {
 	return s.store.Get(ctx, id)
-}
-
-func generateMultiStepID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return fmt.Sprintf("mse_%x", b)
 }

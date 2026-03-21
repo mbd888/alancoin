@@ -1302,9 +1302,9 @@ func TestEscrow_IDFormat(t *testing.T) {
 		t.Errorf("Expected ID to start with 'esc_', got %s", esc.ID)
 	}
 
-	// ID should be reasonably long (esc_ + 32 hex chars)
-	if len(esc.ID) != 36 { // "esc_" (4) + 32 hex chars
-		t.Errorf("Expected ID length 36, got %d (%s)", len(esc.ID), esc.ID)
+	// ID should be reasonably long (esc_ + 24 hex chars from idgen.WithPrefix)
+	if len(esc.ID) != 28 { // "esc_" (4) + 24 hex chars
+		t.Errorf("Expected ID length 28, got %d (%s)", len(esc.ID), esc.ID)
 	}
 }
 

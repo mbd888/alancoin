@@ -15,7 +15,6 @@ package escrow
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -24,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/idgen"
 	"github.com/mbd888/alancoin/internal/metrics"
 	"github.com/mbd888/alancoin/internal/retry"
 	"github.com/mbd888/alancoin/internal/traces"
@@ -313,7 +313,7 @@ func (s *CoalitionService) Create(ctx context.Context, req CreateCoalitionReques
 
 	now := time.Now()
 	ce := &CoalitionEscrow{
-		ID:            generateCoalitionID(),
+		ID:            idgen.WithPrefix("coa_"),
 		BuyerAddr:     buyer,
 		OracleAddr:    oracle,
 		TotalAmount:   req.TotalAmount,
@@ -1028,12 +1028,4 @@ func sortTiersDesc(tiers []QualityTier) {
 			tiers[j], tiers[j-1] = tiers[j-1], tiers[j]
 		}
 	}
-}
-
-func generateCoalitionID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return fmt.Sprintf("coa_%x", b)
 }
