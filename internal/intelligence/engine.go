@@ -94,6 +94,9 @@ func NewEngine(
 	store Store,
 	logger *slog.Logger,
 ) *Engine {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Engine{
 		traceRank:  tr,
 		forensics:  fr,
@@ -338,15 +341,17 @@ func (e *Engine) computeProfile(
 func (e *Engine) computeTrends(ctx context.Context, profile *AgentProfile) {
 	now := time.Now().UTC()
 
-	// 7-day lookback
-	history7d, err := e.store.GetScoreHistory(ctx, profile.Address, now.Add(-7*24*time.Hour), now, 1)
+	// 7-day lookback: find the score from ~7 days ago by querying a narrow
+	// window (6-8 days ago). This avoids the bug where limit=1 + ORDER DESC
+	// returns the most recent point instead of the one from 7 days ago.
+	history7d, err := e.store.GetScoreHistory(ctx, profile.Address, now.Add(-8*24*time.Hour), now.Add(-6*24*time.Hour), 1)
 	if err == nil && len(history7d) > 0 {
-		profile.Trends.CreditDelta7d = round1(profile.CreditScore - history7d[len(history7d)-1].CreditScore)
-		profile.Trends.RiskDelta7d = round1(profile.RiskScore - history7d[len(history7d)-1].RiskScore)
+		profile.Trends.CreditDelta7d = round1(profile.CreditScore - history7d[0].CreditScore)
+		profile.Trends.RiskDelta7d = round1(profile.RiskScore - history7d[0].RiskScore)
 	}
 
-	// 30-day lookback
-	history30d, err := e.store.GetScoreHistory(ctx, profile.Address, now.Add(-30*24*time.Hour), now.Add(-29*24*time.Hour), 1)
+	// 30-day lookback: narrow window around 30 days ago
+	history30d, err := e.store.GetScoreHistory(ctx, profile.Address, now.Add(-31*24*time.Hour), now.Add(-29*24*time.Hour), 1)
 	if err == nil && len(history30d) > 0 {
 		profile.Trends.CreditDelta30d = round1(profile.CreditScore - history30d[0].CreditScore)
 		profile.Trends.RiskDelta30d = round1(profile.RiskScore - history30d[0].RiskScore)

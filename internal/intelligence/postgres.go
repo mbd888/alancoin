@@ -333,6 +333,15 @@ func (p *PostgresStore) GetLatestBenchmarks(ctx context.Context) (*NetworkBenchm
 	return b, nil
 }
 
+func (p *PostgresStore) DeleteBenchmarksBefore(ctx context.Context, before time.Time) (int64, error) {
+	res, err := p.db.ExecContext(ctx,
+		`DELETE FROM intelligence_benchmarks WHERE computed_at < $1`, before)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // itoa converts an integer to its decimal string representation.
 func itoa(n int) string {
 	if n == 0 {

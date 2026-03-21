@@ -36,4 +36,7 @@ type Store interface {
 
 	// GetLatestBenchmarks returns the most recent network benchmarks.
 	GetLatestBenchmarks(ctx context.Context) (*NetworkBenchmarks, error)
+
+	// DeleteBenchmarksBefore removes benchmark entries older than the given time.
+	DeleteBenchmarksBefore(ctx context.Context, before time.Time) (int64, error)
 }

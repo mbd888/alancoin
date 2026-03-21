@@ -39,6 +39,9 @@ type Worker struct {
 // NewWorker creates an intelligence computation worker.
 // interval is typically 5 minutes in production, 30 seconds in demo mode.
 func NewWorker(engine *Engine, store Store, interval time.Duration, logger *slog.Logger) *Worker {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Worker{
 		engine:   engine,
 		store:    store,
@@ -143,13 +146,20 @@ func (w *Worker) compute(ctx context.Context) {
 		}
 	}
 
-	// Retention cleanup: delete history older than 90 days
+	// Retention cleanup: delete history and benchmarks older than 90 days
 	cutoff := time.Now().UTC().Add(-historyRetention)
 	deleted, err := w.store.DeleteScoreHistoryBefore(ctx, cutoff)
 	if err != nil {
 		w.logger.Warn("intelligence: history cleanup failed", "error", err)
 	} else if deleted > 0 {
 		w.logger.Info("intelligence: cleaned up old history", "deleted", deleted)
+	}
+
+	deletedBench, err := w.store.DeleteBenchmarksBefore(ctx, cutoff)
+	if err != nil {
+		w.logger.Warn("intelligence: benchmark cleanup failed", "error", err)
+	} else if deletedBench > 0 {
+		w.logger.Info("intelligence: cleaned up old benchmarks", "deleted", deletedBench)
 	}
 
 	// Record metrics

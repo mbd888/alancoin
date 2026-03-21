@@ -157,6 +157,11 @@ func (m *MemoryStore) SaveBenchmarks(_ context.Context, b *NetworkBenchmarks) er
 	return nil
 }
 
+func (m *MemoryStore) DeleteBenchmarksBefore(_ context.Context, _ time.Time) (int64, error) {
+	// Memory store only keeps the latest benchmark, no cleanup needed.
+	return 0, nil
+}
+
 func (m *MemoryStore) GetLatestBenchmarks(_ context.Context) (*NetworkBenchmarks, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

@@ -3273,9 +3273,11 @@ func (a *intelligenceReputationAdapter) GetMetrics(ctx context.Context, address 
 	if err != nil || m == nil {
 		return nil, err
 	}
-	score, _, _ := a.provider.GetScore(ctx, address)
+	// Compute score in-memory from metrics to avoid double-fetching.
+	calc := reputation.NewCalculatorWithTraceRank()
+	repScore := calc.Calculate(address, *m)
 	return &intelligence.ReputationData{
-		Score:                score,
+		Score:                repScore.Score,
 		TotalTransactions:    m.TotalTransactions,
 		SuccessfulTxns:       m.SuccessfulTxns,
 		FailedTxns:           m.FailedTxns,
@@ -3290,11 +3292,14 @@ func (a *intelligenceReputationAdapter) GetAllMetrics(ctx context.Context) (map[
 	if err != nil {
 		return nil, err
 	}
+	// Use a local calculator to compute scores from metrics in-memory,
+	// avoiding N+1 calls to GetScore (which re-fetches metrics per agent).
+	calc := reputation.NewCalculatorWithTraceRank()
 	result := make(map[string]*intelligence.ReputationData, len(metrics))
 	for addr, m := range metrics {
-		score, _, _ := a.provider.GetScore(ctx, addr)
+		repScore := calc.Calculate(addr, *m)
 		result[addr] = &intelligence.ReputationData{
-			Score:                score,
+			Score:                repScore.Score,
 			TotalTransactions:    m.TotalTransactions,
 			SuccessfulTxns:       m.SuccessfulTxns,
 			FailedTxns:           m.FailedTxns,

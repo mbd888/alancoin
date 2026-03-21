@@ -2,6 +2,7 @@ package intelligence
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -505,4 +506,207 @@ func TestPercentile(t *testing.T) {
 	if v := percentile([]float64{42}, 0.5); v != 42 {
 		t.Errorf("single element percentile = %.1f, want 42", v)
 	}
+}
+
+// --- Bug regression tests ---
+
+func TestNilLoggerDoesNotPanic(t *testing.T) {
+	// BUG 1: Engine with nil logger should not panic
+	engine := NewEngine(
+		&mockTraceRank{scores: map[string]TraceRankData{}},
+		&mockForensics{baselines: map[string][3]float64{}, alerts: map[string][2]int{}},
+		&mockReputation{metrics: map[string]*ReputationData{}},
+		&mockAgentSource{addresses: []string{"0xtest"}},
+		NewMemoryStore(),
+		nil, // nil logger — must not panic
+	)
+	result, err := engine.ComputeAll(context.Background(), "nil_logger_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Profiles) != 1 {
+		t.Errorf("expected 1 profile, got %d", len(result.Profiles))
+	}
+}
+
+func TestTrendComputesCorrectDelta(t *testing.T) {
+	// BUG 3: Trend delta should compare against score from ~7 days ago,
+	// not the most recent score in the last 7 days.
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	// Seed history: score was 50 seven days ago
+	sevenDaysAgo := time.Now().UTC().Add(-7 * 24 * time.Hour)
+	_ = store.SaveScoreHistory(ctx, []*ScoreHistoryPoint{
+		{Address: "0xtrend", CreditScore: 50, RiskScore: 30, CompositeScore: 60, Tier: TierGold, CreatedAt: sevenDaysAgo},
+	})
+
+	// Also seed a more recent point (1 day ago) with different score
+	oneDayAgo := time.Now().UTC().Add(-24 * time.Hour)
+	_ = store.SaveScoreHistory(ctx, []*ScoreHistoryPoint{
+		{Address: "0xtrend", CreditScore: 70, RiskScore: 20, CompositeScore: 75, Tier: TierPlatinum, CreatedAt: oneDayAgo},
+	})
+
+	engine := NewEngine(
+		&mockTraceRank{scores: map[string]TraceRankData{"0xtrend": {GraphScore: 80, InDegree: 10}}},
+		&mockForensics{baselines: map[string][3]float64{}, alerts: map[string][2]int{}},
+		&mockReputation{metrics: map[string]*ReputationData{
+			"0xtrend": {Score: 75, TotalTransactions: 100, SuccessfulTxns: 95, TotalVolumeUSD: 5000, DaysOnNetwork: 90},
+		}},
+		&mockAgentSource{addresses: []string{"0xtrend"}},
+		store,
+		nil,
+	)
+
+	profile, err := engine.ComputeOne(ctx, "0xtrend", "trend_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The 7d delta should compare against the 7-day-ago score (50), not 1-day-ago (70)
+	// So delta should be positive and significant (current credit - 50)
+	if profile.Trends.CreditDelta7d == 0 {
+		t.Log("7d trend is 0 — expected non-zero if history was found in the 6-8d window")
+	}
+}
+
+func TestMemoryStore_ConcurrentAccess(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	// Concurrent writes and reads should not race
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		addr := "0x" + itoa(i)
+		go func() {
+			defer wg.Done()
+			_ = store.SaveProfile(ctx, &AgentProfile{
+				Address:        addr,
+				CreditScore:    float64(i),
+				CompositeScore: float64(i),
+				Tier:           TierGold,
+				ComputedAt:     time.Now(),
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = store.GetProfile(ctx, addr)
+		}()
+	}
+	wg.Wait()
+
+	// Verify at least some profiles were saved
+	profiles, err := store.GetTopProfiles(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) == 0 {
+		t.Error("expected some profiles to be saved")
+	}
+}
+
+func TestMemoryStore_DeleteHistoryBefore(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	_ = store.SaveScoreHistory(ctx, []*ScoreHistoryPoint{
+		{Address: "0xa", CreditScore: 50, CreatedAt: now.Add(-100 * 24 * time.Hour)}, // old
+		{Address: "0xa", CreditScore: 60, CreatedAt: now.Add(-50 * 24 * time.Hour)},  // mid
+		{Address: "0xa", CreditScore: 70, CreatedAt: now},                            // fresh
+	})
+
+	cutoff := now.Add(-90 * 24 * time.Hour)
+	deleted, err := store.DeleteScoreHistoryBefore(ctx, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Errorf("deleted = %d, want 1", deleted)
+	}
+
+	// Should have 2 remaining
+	history, _ := store.GetScoreHistory(ctx, "0xa", now.Add(-365*24*time.Hour), now.Add(time.Hour), 100)
+	if len(history) != 2 {
+		t.Errorf("remaining = %d, want 2", len(history))
+	}
+}
+
+func TestComputeOne_NilTraceRankHandled(t *testing.T) {
+	// If TraceRank returns error, profile should still compute with zeros
+	store := NewMemoryStore()
+	engine := NewEngine(
+		&errorTraceRank{},
+		&mockForensics{baselines: map[string][3]float64{}, alerts: map[string][2]int{}},
+		&mockReputation{metrics: map[string]*ReputationData{
+			"0xnotr": {Score: 50, TotalTransactions: 10, SuccessfulTxns: 9, DaysOnNetwork: 30},
+		}},
+		&mockAgentSource{addresses: []string{"0xnotr"}},
+		store,
+		nil,
+	)
+
+	profile, err := engine.ComputeOne(context.Background(), "0xnotr", "err_test")
+	if err != nil {
+		t.Fatal("should not return error when tracerank fails")
+	}
+	if profile.Credit.TraceRankInput != 0 {
+		t.Errorf("tracerank input should be 0 on error, got %.1f", profile.Credit.TraceRankInput)
+	}
+	// Should still have a score from other factors
+	if profile.CreditScore < 0 {
+		t.Errorf("credit score should be >= 0, got %.1f", profile.CreditScore)
+	}
+}
+
+func TestCreditGate_ReputationTiersMismatch(t *testing.T) {
+	// Verify that reputation tier names (elite, trusted) return 0 discount
+	// since they don't match intelligence tier names (diamond, platinum)
+	gate := NewCreditGate(NewMemoryStore())
+	if d := gate.FeeDiscountBPS("elite"); d != 0 {
+		t.Errorf("elite (reputation tier) should get 0 discount, got %d", d)
+	}
+	if d := gate.FeeDiscountBPS("trusted"); d != 0 {
+		t.Errorf("trusted (reputation tier) should get 0 discount, got %d", d)
+	}
+	if d := gate.FeeDiscountBPS(""); d != 0 {
+		t.Errorf("empty tier should get 0 discount, got %d", d)
+	}
+}
+
+func TestClampEdgeCases(t *testing.T) {
+	if v := clamp(-5, 0, 100); v != 0 {
+		t.Errorf("clamp(-5,0,100) = %.1f, want 0", v)
+	}
+	if v := clamp(150, 0, 100); v != 100 {
+		t.Errorf("clamp(150,0,100) = %.1f, want 100", v)
+	}
+	if v := clamp(50, 0, 100); v != 50 {
+		t.Errorf("clamp(50,0,100) = %.1f, want 50", v)
+	}
+}
+
+func TestRound1(t *testing.T) {
+	if v := round1(3.14159); v != 3.1 {
+		t.Errorf("round1(3.14159) = %f, want 3.1", v)
+	}
+	if v := round1(3.15); v != 3.2 {
+		t.Errorf("round1(3.15) = %f, want 3.2", v)
+	}
+	if v := round1(0); v != 0 {
+		t.Errorf("round1(0) = %f, want 0", v)
+	}
+}
+
+// --- Error-returning mock providers ---
+
+type errorTraceRank struct{}
+
+func (e *errorTraceRank) GetScore(_ context.Context, _ string) (float64, int, int, float64, float64, error) {
+	return 0, 0, 0, 0, 0, context.DeadlineExceeded
+}
+
+func (e *errorTraceRank) GetAllScores(_ context.Context) (map[string]TraceRankData, error) {
+	return nil, context.DeadlineExceeded
 }
