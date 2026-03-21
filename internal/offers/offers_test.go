@@ -619,3 +619,504 @@ func TestOffer_RefundFromDelivered(t *testing.T) {
 		t.Fatalf("expected refund 0.010000")
 	}
 }
+
+// --- Additional service-level tests for uncovered paths ---
+
+type mockRecorder struct {
+	recorded []string
+}
+
+func (m *mockRecorder) RecordTransaction(_ context.Context, txHash, from, to, amount, serviceID, status string) error {
+	m.recorded = append(m.recorded, txHash)
+	return nil
+}
+
+type mockRevenue struct {
+	accumulated []string
+}
+
+func (m *mockRevenue) AccumulateRevenue(_ context.Context, agentAddr, amount, txRef string) error {
+	m.accumulated = append(m.accumulated, txRef)
+	return nil
+}
+
+func TestOffer_WithRecorderAndRevenue(t *testing.T) {
+	ml := newMockLedger()
+	store := NewMemoryStore()
+	rec := &mockRecorder{}
+	rev := &mockRevenue{}
+	svc := NewService(store, ml).
+		WithLogger(slog.New(slog.NewTextHandler(os.Stderr, nil))).
+		WithRecorder(rec).
+		WithRevenueAccumulator(rev)
+
+	ctx := context.Background()
+
+	offer, err := svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "inference",
+		Price:       "0.010000",
+		Capacity:    10,
+	})
+	if err != nil {
+		t.Fatalf("PostOffer: %v", err)
+	}
+
+	claim, err := svc.ClaimOffer(ctx, offer.ID, "0xBuyer")
+	if err != nil {
+		t.Fatalf("ClaimOffer: %v", err)
+	}
+
+	// Complete triggers recorder and revenue accumulator
+	_, err = svc.CompleteClaim(ctx, claim.ID, "0xBuyer")
+	if err != nil {
+		t.Fatalf("CompleteClaim: %v", err)
+	}
+
+	if len(rec.recorded) != 1 {
+		t.Fatalf("expected 1 recorded transaction, got %d", len(rec.recorded))
+	}
+	if len(rev.accumulated) != 1 {
+		t.Fatalf("expected 1 accumulated revenue, got %d", len(rev.accumulated))
+	}
+}
+
+func TestOffer_ClaimExpiredOffer(t *testing.T) {
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	// Create an offer that expires very quickly
+	offer, _ := svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "inference",
+		Price:       "0.010000",
+		Capacity:    10,
+		ExpiresIn:   "1ms",
+	})
+
+	time.Sleep(5 * time.Millisecond)
+
+	// Claiming an expired offer
+	_, err := svc.ClaimOffer(ctx, offer.ID, "0xBuyer")
+	if !errors.Is(err, ErrOfferExpired) {
+		t.Fatalf("expected ErrOfferExpired, got %v", err)
+	}
+
+	// Verify the offer status was updated to expired
+	updated, _ := svc.GetOffer(ctx, offer.ID)
+	if updated.Status != OfferExpired {
+		t.Fatalf("expected status expired, got %s", updated.Status)
+	}
+}
+
+func TestOffer_PostOffer_InvalidCapacity(t *testing.T) {
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	tests := []struct {
+		name     string
+		capacity int
+	}{
+		{"zero", 0},
+		{"negative", -1},
+		{"over_max", MaxCapacity + 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+				ServiceType: "inference",
+				Price:       "0.010000",
+				Capacity:    tt.capacity,
+			})
+			if err == nil {
+				t.Fatal("expected error for invalid capacity")
+			}
+		})
+	}
+}
+
+func TestOffer_PostOffer_EmptyServiceType(t *testing.T) {
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	_, err := svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "",
+		Price:       "0.010000",
+		Capacity:    10,
+	})
+	if err == nil {
+		t.Fatal("expected error for empty service type")
+	}
+}
+
+func TestOffer_PostOffer_CustomExpiry(t *testing.T) {
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	offer, err := svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "inference",
+		Price:       "0.010000",
+		Capacity:    10,
+		ExpiresIn:   "48h",
+	})
+	if err != nil {
+		t.Fatalf("PostOffer: %v", err)
+	}
+
+	// Verify expiry is ~48h from now, not the default 24h
+	expectedExpiry := offer.CreatedAt.Add(48 * time.Hour)
+	diff := offer.ExpiresAt.Sub(expectedExpiry)
+	if diff < -time.Second || diff > time.Second {
+		t.Fatalf("expected expiry near %v, got %v", expectedExpiry, offer.ExpiresAt)
+	}
+}
+
+func TestOffer_PostOffer_InvalidExpiryFallsBackToDefault(t *testing.T) {
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	offer, err := svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "inference",
+		Price:       "0.010000",
+		Capacity:    10,
+		ExpiresIn:   "notaduration",
+	})
+	if err != nil {
+		t.Fatalf("PostOffer: %v", err)
+	}
+
+	// Should fall back to DefaultOfferExpiry (24h)
+	expectedExpiry := offer.CreatedAt.Add(DefaultOfferExpiry)
+	diff := offer.ExpiresAt.Sub(expectedExpiry)
+	if diff < -time.Second || diff > time.Second {
+		t.Fatalf("expected default expiry, got %v", offer.ExpiresAt)
+	}
+}
+
+func TestOffer_PostOffer_StoreError(t *testing.T) {
+	ml := newMockLedger()
+	store := &failingStore{err: errors.New("store broken"), MemoryStore: NewMemoryStore()}
+	svc := NewService(store, ml).WithLogger(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	ctx := context.Background()
+
+	_, err := svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "inference",
+		Price:       "0.010000",
+		Capacity:    10,
+	})
+	if err == nil {
+		t.Fatal("expected error from store")
+	}
+}
+
+func TestOffer_CancelAlreadyTerminal(t *testing.T) {
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	offer, _ := svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "inference",
+		Price:       "0.010000",
+		Capacity:    10,
+	})
+
+	// Cancel once
+	svc.CancelOffer(ctx, offer.ID, "0xSeller")
+
+	// Cancel again should fail
+	_, err := svc.CancelOffer(ctx, offer.ID, "0xSeller")
+	if err == nil {
+		t.Fatal("expected error cancelling already-cancelled offer")
+	}
+}
+
+func TestOffer_ListClaimsByOffer(t *testing.T) {
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	offer, _ := svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "inference",
+		Price:       "0.010000",
+		Capacity:    10,
+	})
+
+	svc.ClaimOffer(ctx, offer.ID, "0xBuyer1")
+	svc.ClaimOffer(ctx, offer.ID, "0xBuyer2")
+	svc.ClaimOffer(ctx, offer.ID, "0xBuyer3")
+
+	claims, err := svc.ListClaimsByOffer(ctx, offer.ID, 0)
+	if err != nil {
+		t.Fatalf("ListClaimsByOffer: %v", err)
+	}
+	if len(claims) != 3 {
+		t.Fatalf("expected 3 claims, got %d", len(claims))
+	}
+}
+
+func TestOffer_ListClaimsByOffer_DefaultLimit(t *testing.T) {
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	offer, _ := svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "inference",
+		Price:       "0.010000",
+		Capacity:    10,
+	})
+
+	svc.ClaimOffer(ctx, offer.ID, "0xBuyer1")
+
+	// Limit <= 0 defaults to 50
+	claims, err := svc.ListClaimsByOffer(ctx, offer.ID, -1)
+	if err != nil {
+		t.Fatalf("ListClaimsByOffer: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("expected 1 claim, got %d", len(claims))
+	}
+}
+
+func TestOffer_ListOffers_DefaultLimit(t *testing.T) {
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "inference",
+		Price:       "0.010000",
+		Capacity:    10,
+	})
+
+	offers, err := svc.ListOffers(ctx, "", 0)
+	if err != nil {
+		t.Fatalf("ListOffers: %v", err)
+	}
+	if len(offers) != 1 {
+		t.Fatalf("expected 1 offer, got %d", len(offers))
+	}
+}
+
+func TestOffer_ListOffersBySeller_DefaultLimit(t *testing.T) {
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "inference",
+		Price:       "0.010000",
+		Capacity:    10,
+	})
+
+	offers, err := svc.ListOffersBySeller(ctx, "0xSeller", 0)
+	if err != nil {
+		t.Fatalf("ListOffersBySeller: %v", err)
+	}
+	if len(offers) != 1 {
+		t.Fatalf("expected 1 offer, got %d", len(offers))
+	}
+}
+
+func TestOffer_RefundByStranger_Unauthorized(t *testing.T) {
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	offer, _ := svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "inference",
+		Price:       "0.010000",
+		Capacity:    10,
+	})
+	claim, _ := svc.ClaimOffer(ctx, offer.ID, "0xBuyer")
+
+	// Stranger can't refund
+	_, err := svc.RefundClaim(ctx, claim.ID, "0xStranger")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestOffer_IsTerminal(t *testing.T) {
+	tests := []struct {
+		status   OfferStatus
+		terminal bool
+	}{
+		{OfferActive, false},
+		{OfferExhausted, true},
+		{OfferCancelled, true},
+		{OfferExpired, true},
+	}
+	for _, tt := range tests {
+		o := &Offer{Status: tt.status}
+		if o.IsTerminal() != tt.terminal {
+			t.Errorf("IsTerminal(%s): expected %v, got %v", tt.status, tt.terminal, o.IsTerminal())
+		}
+	}
+}
+
+func TestOffer_ValidatePrice(t *testing.T) {
+	tests := []struct {
+		name    string
+		price   string
+		wantErr bool
+	}{
+		{"valid", "1.000000", false},
+		{"valid_small", "0.000001", false},
+		{"empty", "", true},
+		{"spaces_only", "   ", true},
+		{"negative", "-1.000000", true},
+		{"zero", "0.000000", true},
+		{"not_a_number", "abc", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePrice(tt.price)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validatePrice(%q) error = %v, wantErr %v", tt.price, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// failingStore wraps MemoryStore and lets you inject failures per method.
+type failingStore struct {
+	*MemoryStore
+	err             error
+	failCreateClaim bool
+	failUpdateOffer bool
+}
+
+func (s *failingStore) CreateOffer(ctx context.Context, o *Offer) error {
+	if s.err != nil {
+		return s.err
+	}
+	return s.MemoryStore.CreateOffer(ctx, o)
+}
+
+func (s *failingStore) CreateClaim(ctx context.Context, c *Claim) error {
+	if s.failCreateClaim {
+		return errors.New("store: create claim failed")
+	}
+	return s.MemoryStore.CreateClaim(ctx, c)
+}
+
+func (s *failingStore) UpdateOffer(ctx context.Context, o *Offer) error {
+	if s.failUpdateOffer {
+		return errors.New("store: update offer failed")
+	}
+	return s.MemoryStore.UpdateOffer(ctx, o)
+}
+
+// failingLedger lets you inject failures in EscrowLock.
+type failingLedger struct {
+	failEscrowLock bool
+}
+
+func (f *failingLedger) EscrowLock(_ context.Context, _, _, _ string) error {
+	if f.failEscrowLock {
+		return errors.New("ledger: insufficient funds")
+	}
+	return nil
+}
+
+func (f *failingLedger) ReleaseEscrow(_ context.Context, _, _, _, _ string) error {
+	return nil
+}
+
+func (f *failingLedger) RefundEscrow(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func TestOffer_ClaimOffer_EscrowLockFails(t *testing.T) {
+	fl := &failingLedger{failEscrowLock: true}
+	store := NewMemoryStore()
+	svc := NewService(store, fl).WithLogger(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	ctx := context.Background()
+
+	offer, _ := svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "inference",
+		Price:       "0.010000",
+		Capacity:    10,
+	})
+
+	_, err := svc.ClaimOffer(ctx, offer.ID, "0xBuyer")
+	if err == nil {
+		t.Fatal("expected error from escrow lock failure")
+	}
+}
+
+func TestOffer_ClaimOffer_UpdateOfferFails(t *testing.T) {
+	ml := newMockLedger()
+	store := &failingStore{MemoryStore: NewMemoryStore()}
+	svc := NewService(store, ml).WithLogger(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	ctx := context.Background()
+
+	offer, _ := svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "inference",
+		Price:       "0.010000",
+		Capacity:    10,
+	})
+
+	// Make UpdateOffer fail after escrow lock succeeds
+	store.failUpdateOffer = true
+
+	_, err := svc.ClaimOffer(ctx, offer.ID, "0xBuyer")
+	if err == nil {
+		t.Fatal("expected error from update offer failure")
+	}
+
+	// Verify that funds were refunded
+	if len(ml.refunded) == 0 {
+		t.Fatal("expected refund after update offer failure")
+	}
+}
+
+func TestOffer_ClaimOffer_CreateClaimFails(t *testing.T) {
+	ml := newMockLedger()
+	store := &failingStore{MemoryStore: NewMemoryStore()}
+	svc := NewService(store, ml).WithLogger(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	ctx := context.Background()
+
+	offer, _ := svc.PostOffer(ctx, "0xSeller", CreateOfferRequest{
+		ServiceType: "inference",
+		Price:       "0.010000",
+		Capacity:    1,
+	})
+
+	// Make CreateClaim fail after capacity is decremented
+	store.failCreateClaim = true
+
+	_, err := svc.ClaimOffer(ctx, offer.ID, "0xBuyer")
+	if err == nil {
+		t.Fatal("expected error from create claim failure")
+	}
+
+	// Verify capacity was rolled back
+	store.failCreateClaim = false
+	updated, _ := svc.GetOffer(ctx, offer.ID)
+	if updated.RemainingCap != 1 {
+		t.Fatalf("expected capacity rolled back to 1, got %d", updated.RemainingCap)
+	}
+	// Since capacity was 1 and exhausted temporarily, status should be rolled back to active
+	if updated.Status != OfferActive {
+		t.Fatalf("expected status active after rollback, got %s", updated.Status)
+	}
+}
+
+func TestOffer_MemoryStore_ListClaimsByBuyer(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	c1 := &Claim{ID: "clm_1", OfferID: "ofr_1", BuyerAddr: "buyer1", Amount: "1.00"}
+	c2 := &Claim{ID: "clm_2", OfferID: "ofr_2", BuyerAddr: "buyer1", Amount: "2.00"}
+	c3 := &Claim{ID: "clm_3", OfferID: "ofr_3", BuyerAddr: "buyer2", Amount: "3.00"}
+	store.CreateClaim(ctx, c1)
+	store.CreateClaim(ctx, c2)
+	store.CreateClaim(ctx, c3)
+
+	claims, err := store.ListClaimsByBuyer(ctx, "buyer1", 50)
+	if err != nil {
+		t.Fatalf("ListClaimsByBuyer: %v", err)
+	}
+	if len(claims) != 2 {
+		t.Fatalf("expected 2 claims for buyer1, got %d", len(claims))
+	}
+
+	// Test with limit
+	claims, _ = store.ListClaimsByBuyer(ctx, "buyer1", 1)
+	if len(claims) != 1 {
+		t.Fatalf("expected 1 claim with limit, got %d", len(claims))
+	}
+}
