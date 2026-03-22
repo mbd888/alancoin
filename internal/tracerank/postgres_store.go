@@ -57,12 +57,13 @@ func (p *PostgresStore) SaveScores(ctx context.Context, scores []*AgentScore, ru
 		}
 	}
 
-	// Also insert into history table for auditing
+	// Also insert into history table for auditing.
+	// Cast $1 to TEXT to avoid PG16 type-inference ambiguity in INSERT...SELECT with ON CONFLICT.
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO tracerank_runs (run_id, node_count, edge_count, iterations, converged, duration_ms, max_score, mean_score)
-		SELECT $1, COUNT(*), 0, MAX(iterations), true, 0,
+		SELECT $1::TEXT, COUNT(*), 0, MAX(iterations), true, 0,
 			   MAX(graph_score), AVG(graph_score)
-		FROM tracerank_scores WHERE compute_run_id = $1
+		FROM tracerank_scores WHERE compute_run_id = $1::TEXT
 		ON CONFLICT (run_id) DO NOTHING`, runID)
 	if err != nil {
 		return err

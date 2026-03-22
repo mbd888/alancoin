@@ -258,7 +258,7 @@ func (b *MemoryBus) Start(ctx context.Context) {
 				for i, sub := range b.subscriptions {
 					if sub.topic == event.Topic || sub.topic == "*" {
 						select {
-						case subChans[i] <- event:
+						case subChans[i] <- event: //nolint:gosec // i bounded by range over b.subscriptions
 						default:
 							b.logger.Warn("eventbus: consumer channel full",
 								"consumer", sub.consumerGroup, "topic", event.Topic)
@@ -296,8 +296,9 @@ func (b *MemoryBus) drainBuffer(ctx context.Context, subChans []chan Event) {
 			}
 			for i, sub := range b.subscriptions {
 				if sub.topic == event.Topic || sub.topic == "*" {
+					ch := subChans[i] //nolint:gosec // i bounded by range over b.subscriptions
 					select {
-					case subChans[i] <- event:
+					case ch <- event:
 					default:
 					}
 				}

@@ -1604,7 +1604,7 @@ func TestForwarder_EmptyResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if resp.Body != nil && len(resp.Body) > 0 {
+	if len(resp.Body) > 0 {
 		t.Errorf("expected nil/empty body for empty response, got %v", resp.Body)
 	}
 }
