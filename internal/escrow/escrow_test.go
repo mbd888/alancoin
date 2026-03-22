@@ -2,12 +2,19 @@ package escrow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 // mockLedger records calls for verification.
@@ -1925,5 +1932,2424 @@ func TestResolveArbitration_Nonexistent(t *testing.T) {
 	})
 	if err != ErrEscrowNotFound {
 		t.Errorf("Expected ErrEscrowNotFound, got %v", err)
+	}
+}
+
+// --- merged from coverage_extra2_test.go ---
+
+// ============================================================================
+// Escrow MemoryStore: deep copy, ListByAgent, ListExpired, ListByStatus
+// ============================================================================
+
+func TestMemoryStore_Get_DeepCopy(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	store.Create(ctx, &Escrow{
+		ID: "esc_1", BuyerAddr: "0xbuyer", SellerAddr: "0xseller",
+		Amount: "1.000000", Status: StatusPending,
+		DisputeEvidence: []EvidenceEntry{{SubmittedBy: "0xbuyer", Content: "proof"}},
+	})
+
+	e1, _ := store.Get(ctx, "esc_1")
+	e1.DisputeEvidence = append(e1.DisputeEvidence, EvidenceEntry{SubmittedBy: "0xbuyer", Content: "new"})
+
+	e2, _ := store.Get(ctx, "esc_1")
+	if len(e2.DisputeEvidence) != 1 {
+		t.Errorf("expected deep copy to prevent mutation, got %d evidence entries", len(e2.DisputeEvidence))
+	}
+}
+
+func TestMemoryStore_Update_DeepCopy(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	store.Create(ctx, &Escrow{
+		ID: "esc_1", BuyerAddr: "0xbuyer", SellerAddr: "0xseller",
+		Amount: "1.000000", Status: StatusPending,
+		DisputeEvidence: []EvidenceEntry{{SubmittedBy: "0xbuyer", Content: "proof"}},
+	})
+
+	updated := &Escrow{
+		ID: "esc_1", BuyerAddr: "0xbuyer", SellerAddr: "0xseller",
+		Amount: "1.000000", Status: StatusDelivered,
+		DisputeEvidence: []EvidenceEntry{{SubmittedBy: "0xseller", Content: "delivery"}},
+	}
+	store.Update(ctx, updated)
+
+	// Mutate caller's copy
+	updated.DisputeEvidence[0].Content = "mutated"
+
+	stored, _ := store.Get(ctx, "esc_1")
+	if stored.DisputeEvidence[0].Content != "delivery" {
+		t.Errorf("expected deep copy on update, got %s", stored.DisputeEvidence[0].Content)
+	}
+}
+
+func TestMemoryStore_Update_NotFound(t *testing.T) {
+	store := NewMemoryStore()
+	err := store.Update(context.Background(), &Escrow{ID: "nonexistent"})
+	if !errors.Is(err, ErrEscrowNotFound) {
+		t.Errorf("expected ErrEscrowNotFound, got %v", err)
+	}
+}
+
+func TestMemoryStore_Get_NotFound(t *testing.T) {
+	store := NewMemoryStore()
+	_, err := store.Get(context.Background(), "nonexistent")
+	if !errors.Is(err, ErrEscrowNotFound) {
+		t.Errorf("expected ErrEscrowNotFound, got %v", err)
+	}
+}
+
+func TestMemoryStore_ListByAgent_BuyerAndSeller(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	store.Create(ctx, &Escrow{
+		ID: "esc_1", BuyerAddr: "0xbuyer", SellerAddr: "0xseller",
+		Status: StatusPending,
+	})
+	store.Create(ctx, &Escrow{
+		ID: "esc_2", BuyerAddr: "0xother", SellerAddr: "0xbuyer",
+		Status: StatusPending,
+	})
+
+	// Should find both as buyer and seller
+	list, err := store.ListByAgent(ctx, "0xBuyer", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(list) != 2 {
+		t.Errorf("expected 2 escrows for buyer, got %d", len(list))
+	}
+}
+
+func TestMemoryStore_ListByAgent_WithLimit(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		store.Create(ctx, &Escrow{
+			ID: fmt.Sprintf("esc_%d", i), BuyerAddr: "0xbuyer", SellerAddr: "0xseller",
+			Status: StatusPending,
+		})
+	}
+
+	list, err := store.ListByAgent(ctx, "0xbuyer", 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(list) != 2 {
+		t.Errorf("expected 2 with limit, got %d", len(list))
+	}
+}
+
+func TestMemoryStore_ListExpired_Filters(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	now := time.Now()
+	// Pending, expired, should be found
+	store.Create(ctx, &Escrow{
+		ID: "esc_1", BuyerAddr: "0xb", SellerAddr: "0xs",
+		Status: StatusPending, AutoReleaseAt: now.Add(-1 * time.Hour),
+	})
+	// Disputed, should be excluded
+	store.Create(ctx, &Escrow{
+		ID: "esc_2", BuyerAddr: "0xb", SellerAddr: "0xs",
+		Status: StatusDisputed, AutoReleaseAt: now.Add(-1 * time.Hour),
+	})
+	// Arbitrating, should be excluded
+	store.Create(ctx, &Escrow{
+		ID: "esc_3", BuyerAddr: "0xb", SellerAddr: "0xs",
+		Status: StatusArbitrating, AutoReleaseAt: now.Add(-1 * time.Hour),
+	})
+	// Released (terminal), should be excluded
+	store.Create(ctx, &Escrow{
+		ID: "esc_4", BuyerAddr: "0xb", SellerAddr: "0xs",
+		Status: StatusReleased, AutoReleaseAt: now.Add(-1 * time.Hour),
+	})
+	// Not expired yet
+	store.Create(ctx, &Escrow{
+		ID: "esc_5", BuyerAddr: "0xb", SellerAddr: "0xs",
+		Status: StatusPending, AutoReleaseAt: now.Add(1 * time.Hour),
+	})
+
+	expired, err := store.ListExpired(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(expired) != 1 {
+		t.Errorf("expected 1 expired (pending only), got %d", len(expired))
+	}
+}
+
+func TestMemoryStore_ListByStatus_Coverage(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	store.Create(ctx, &Escrow{ID: "esc_1", Status: StatusPending})
+	store.Create(ctx, &Escrow{ID: "esc_2", Status: StatusDelivered})
+	store.Create(ctx, &Escrow{ID: "esc_3", Status: StatusPending})
+
+	pending, err := store.ListByStatus(ctx, StatusPending, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Errorf("expected 2 pending, got %d", len(pending))
+	}
+}
+
+func TestMemoryStore_ListByStatus_WithLimit(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		store.Create(ctx, &Escrow{ID: fmt.Sprintf("esc_%d", i), Status: StatusPending})
+	}
+
+	pending, err := store.ListByStatus(ctx, StatusPending, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Errorf("expected 2 with limit, got %d", len(pending))
+	}
+}
+
+// ============================================================================
+// Escrow model: IsTerminal, ValidTransition, checkTransition
+// ============================================================================
+
+func TestEscrow_IsTerminal_Coverage(t *testing.T) {
+	tests := []struct {
+		status   Status
+		terminal bool
+	}{
+		{StatusPending, false},
+		{StatusDelivered, false},
+		{StatusDisputed, false},
+		{StatusArbitrating, false},
+		{StatusReleased, true},
+		{StatusRefunded, true},
+		{StatusExpired, true},
+	}
+	for _, tt := range tests {
+		e := &Escrow{Status: tt.status}
+		if e.IsTerminal() != tt.terminal {
+			t.Errorf("IsTerminal(%s) = %v, want %v", tt.status, e.IsTerminal(), tt.terminal)
+		}
+	}
+}
+
+func TestCheckTransition_AlreadyResolved(t *testing.T) {
+	for _, from := range []Status{StatusReleased, StatusRefunded, StatusExpired} {
+		err := checkTransition(from, StatusPending)
+		if !errors.Is(err, ErrAlreadyResolved) {
+			t.Errorf("checkTransition(%s, pending) = %v, want ErrAlreadyResolved", from, err)
+		}
+	}
+}
+
+func TestCheckTransition_InvalidStatus(t *testing.T) {
+	err := checkTransition(StatusPending, StatusArbitrating) // not valid
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Errorf("expected ErrInvalidStatus, got %v", err)
+	}
+}
+
+// ============================================================================
+// Escrow: validateAmount edge cases
+// ============================================================================
+
+func TestValidateAmount_Coverage(t *testing.T) {
+	tests := []struct {
+		amount  string
+		wantErr bool
+	}{
+		{"1.000000", false},
+		{"0.000001", false},
+		{"0", true},                           // not positive
+		{"-1", true},                          // negative
+		{"", true},                            // empty
+		{"abc", true},                         // not a number
+		{"  ", true},                          // whitespace only
+		{"99999999999999999999.000000", true}, // exceeds max (parsed * 1e6 overflows)
+	}
+	for _, tt := range tests {
+		err := validateAmount(tt.amount)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("validateAmount(%q) error = %v, wantErr %v", tt.amount, err, tt.wantErr)
+		}
+	}
+}
+
+// ============================================================================
+// Escrow: MoneyError
+// ============================================================================
+
+func TestEscrow_MoneyError(t *testing.T) {
+	inner := fmt.Errorf("ledger failure")
+	me := &MoneyError{
+		Err:         inner,
+		FundsStatus: "locked_in_escrow",
+		Recovery:    "Contact support",
+		Amount:      "5.00",
+		Reference:   "esc_123",
+	}
+	if me.Error() != "ledger failure" {
+		t.Errorf("unexpected error message: %s", me.Error())
+	}
+	if me.Unwrap() != inner {
+		t.Error("Unwrap should return inner error")
+	}
+}
+
+func TestEscrow_MoneyFields(t *testing.T) {
+	fields := moneyFields(fmt.Errorf("plain error"))
+	if fields != nil {
+		t.Error("expected nil for non-MoneyError")
+	}
+
+	me := &MoneyError{
+		Err:         fmt.Errorf("test"),
+		FundsStatus: "no_change",
+		Recovery:    "Retry",
+		Amount:      "5.00",
+		Reference:   "ref1",
+	}
+	fields = moneyFields(me)
+	if fields == nil {
+		t.Fatal("expected non-nil for MoneyError")
+	}
+	if fields["funds_status"] != "no_change" {
+		t.Errorf("expected no_change, got %v", fields["funds_status"])
+	}
+	if fields["amount"] != "5.00" {
+		t.Errorf("expected 5.00, got %v", fields["amount"])
+	}
+}
+
+func TestEscrow_MoneyFields_EmptyOptional(t *testing.T) {
+	me := &MoneyError{
+		Err:         fmt.Errorf("test"),
+		FundsStatus: "no_change",
+		Recovery:    "Retry",
+	}
+	fields := moneyFields(me)
+	if _, ok := fields["amount"]; ok {
+		t.Error("empty amount should not be in fields")
+	}
+	if _, ok := fields["reference"]; ok {
+		t.Error("empty reference should not be in fields")
+	}
+}
+
+// ============================================================================
+// Escrow: ListOption / WithCursor
+// ============================================================================
+
+func TestEscrow_ListOption_InvalidCursor(t *testing.T) {
+	opt := WithCursor("invalid-base64")
+	var o listOpts
+	opt(&o)
+	if o.cursor != nil {
+		t.Error("expected nil cursor for invalid input")
+	}
+}
+
+func TestEscrow_ApplyListOpts_Empty(t *testing.T) {
+	o := applyListOpts(nil)
+	if o.cursor != nil {
+		t.Error("expected nil cursor for empty opts")
+	}
+}
+
+// ============================================================================
+// Escrow Service: With* methods
+// ============================================================================
+
+func TestEscrowService_WithMethods(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml)
+
+	if got := svc.WithLogger(slog.Default()); got != svc {
+		t.Error("WithLogger should return same service")
+	}
+	if got := svc.WithRecorder(&mockRecorder{}); got != svc {
+		t.Error("WithRecorder should return same service")
+	}
+	if got := svc.WithRevenueAccumulator(nil); got != svc {
+		t.Error("WithRevenueAccumulator should return same service")
+	}
+	if got := svc.WithReputationImpactor(nil); got != svc {
+		t.Error("WithReputationImpactor should return same service")
+	}
+	if got := svc.WithReceiptIssuer(nil); got != svc {
+		t.Error("WithReceiptIssuer should return same service")
+	}
+	if got := svc.WithWebhookEmitter(nil); got != svc {
+		t.Error("WithWebhookEmitter should return same service")
+	}
+	if got := svc.WithTrustGate(nil); got != svc {
+		t.Error("WithTrustGate should return same service")
+	}
+}
+
+// ============================================================================
+// Escrow: Create edge cases
+// ============================================================================
+
+func TestEscrow_Create_SameBuyerSeller_Extra(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml)
+
+	_, err := svc.Create(context.Background(), CreateRequest{
+		BuyerAddr:  "0xsame",
+		SellerAddr: "0xSame", // same address, different case
+		Amount:     "1.000000",
+	})
+	if err == nil {
+		t.Fatal("expected error for same buyer and seller")
+	}
+}
+
+func TestEscrow_Create_InvalidAmount(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml)
+
+	_, err := svc.Create(context.Background(), CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "invalid",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid amount")
+	}
+}
+
+func TestEscrow_Create_CustomAutoRelease(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml)
+
+	e, err := svc.Create(context.Background(), CreateRequest{
+		BuyerAddr:   "0xbuyer",
+		SellerAddr:  "0xseller",
+		Amount:      "1.000000",
+		AutoRelease: "30m",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// AutoReleaseAt should be ~30 minutes from now
+	delta := time.Until(e.AutoReleaseAt)
+	if delta < 29*time.Minute || delta > 31*time.Minute {
+		t.Errorf("expected ~30m auto release, got %v", delta)
+	}
+}
+
+func TestEscrow_Create_InvalidAutoRelease(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml)
+
+	e, err := svc.Create(context.Background(), CreateRequest{
+		BuyerAddr:   "0xbuyer",
+		SellerAddr:  "0xseller",
+		Amount:      "1.000000",
+		AutoRelease: "not-a-duration",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should fall back to default
+	delta := time.Until(e.AutoReleaseAt)
+	if delta < 4*time.Minute || delta > 6*time.Minute {
+		t.Errorf("expected ~5m default auto release, got %v", delta)
+	}
+}
+
+func TestEscrow_Create_WithTrustGate(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml).WithTrustGate(&mockTrustGateCov{err: fmt.Errorf("untrusted seller")})
+
+	_, err := svc.Create(context.Background(), CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.000000",
+	})
+	if err == nil {
+		t.Fatal("expected error from trust gate")
+	}
+}
+
+type mockTrustGateCov struct {
+	err error
+}
+
+func (m *mockTrustGateCov) CheckCounterpartyTrust(_ context.Context, _ string) error {
+	return m.err
+}
+
+func TestEscrow_Create_LedgerFails(t *testing.T) {
+	store := NewMemoryStore()
+	fl := &failingLedger{lockErr: fmt.Errorf("insufficient funds")}
+	svc := NewService(store, fl)
+
+	_, err := svc.Create(context.Background(), CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.000000",
+	})
+	if err == nil {
+		t.Fatal("expected error from ledger")
+	}
+	var me *MoneyError
+	if !errors.As(err, &me) {
+		t.Fatalf("expected MoneyError, got %T", err)
+	}
+	if me.FundsStatus != "no_change" {
+		t.Errorf("expected no_change, got %s", me.FundsStatus)
+	}
+}
+
+// ============================================================================
+// Escrow: MarkDelivered edge cases
+// ============================================================================
+
+func TestEscrow_MarkDelivered_NotFound(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml)
+
+	_, err := svc.MarkDelivered(context.Background(), "nonexistent", "0xseller")
+	if !errors.Is(err, ErrEscrowNotFound) {
+		t.Errorf("expected ErrEscrowNotFound, got %v", err)
+	}
+}
+
+func TestEscrow_MarkDelivered_WrongCaller(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml)
+
+	e, _ := svc.Create(context.Background(), CreateRequest{
+		BuyerAddr: "0xbuyer", SellerAddr: "0xseller", Amount: "1.000000",
+	})
+
+	_, err := svc.MarkDelivered(context.Background(), e.ID, "0xbuyer")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+// ============================================================================
+// Escrow: Confirm edge cases
+// ============================================================================
+
+func TestEscrow_Confirm_NotFound(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml)
+
+	_, err := svc.Confirm(context.Background(), "nonexistent", "0xbuyer")
+	if !errors.Is(err, ErrEscrowNotFound) {
+		t.Errorf("expected ErrEscrowNotFound, got %v", err)
+	}
+}
+
+func TestEscrow_Confirm_WrongCaller(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml)
+
+	e, _ := svc.Create(context.Background(), CreateRequest{
+		BuyerAddr: "0xbuyer", SellerAddr: "0xseller", Amount: "1.000000",
+	})
+
+	_, err := svc.Confirm(context.Background(), e.ID, "0xseller")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+// ============================================================================
+// MultiStepMemoryStore coverage
+// ============================================================================
+
+func TestMultiStepMemoryStore_RecordStep_NotFound(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	err := store.RecordStep(context.Background(), "nonexistent", Step{StepIndex: 0, Amount: "1.000000"})
+	if !errors.Is(err, ErrMultiStepNotFound) {
+		t.Errorf("expected ErrMultiStepNotFound, got %v", err)
+	}
+}
+
+func TestMultiStepMemoryStore_RecordStep_Duplicate(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	ctx := context.Background()
+
+	store.Create(ctx, &MultiStepEscrow{
+		ID: "mse_1", BuyerAddr: "0xbuyer", TotalAmount: "2.000000",
+		SpentAmount: "0", TotalSteps: 2, Status: MSOpen,
+	})
+
+	store.RecordStep(ctx, "mse_1", Step{StepIndex: 0, Amount: "1.000000", SellerAddr: "0xs"})
+	err := store.RecordStep(ctx, "mse_1", Step{StepIndex: 0, Amount: "1.000000", SellerAddr: "0xs"})
+	if !errors.Is(err, ErrDuplicateStep) {
+		t.Errorf("expected ErrDuplicateStep, got %v", err)
+	}
+}
+
+func TestMultiStepMemoryStore_DeleteStep(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	ctx := context.Background()
+
+	store.Create(ctx, &MultiStepEscrow{
+		ID: "mse_1", BuyerAddr: "0xbuyer", TotalAmount: "2.000000",
+		SpentAmount: "0", TotalSteps: 2, Status: MSOpen,
+	})
+
+	store.RecordStep(ctx, "mse_1", Step{StepIndex: 0, Amount: "1.000000", SellerAddr: "0xs"})
+
+	// Verify step was recorded
+	mse, _ := store.Get(ctx, "mse_1")
+	if mse.ConfirmedSteps != 1 {
+		t.Fatalf("expected 1 confirmed step, got %d", mse.ConfirmedSteps)
+	}
+
+	err := store.DeleteStep(ctx, "mse_1", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mse, _ = store.Get(ctx, "mse_1")
+	if mse.ConfirmedSteps != 0 {
+		t.Errorf("expected 0 after delete, got %d", mse.ConfirmedSteps)
+	}
+}
+
+func TestMultiStepMemoryStore_DeleteStep_NotFound(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	ctx := context.Background()
+
+	store.Create(ctx, &MultiStepEscrow{
+		ID: "mse_1", BuyerAddr: "0xbuyer", TotalAmount: "2.000000",
+		SpentAmount: "0", TotalSteps: 2, Status: MSOpen,
+	})
+
+	err := store.DeleteStep(ctx, "mse_1", 99) // non-existent step
+	if !errors.Is(err, ErrStepOutOfRange) {
+		t.Errorf("expected ErrStepOutOfRange, got %v", err)
+	}
+}
+
+func TestMultiStepMemoryStore_DeleteStep_EscrowNotFound(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	err := store.DeleteStep(context.Background(), "nonexistent", 0)
+	if !errors.Is(err, ErrMultiStepNotFound) {
+		t.Errorf("expected ErrMultiStepNotFound, got %v", err)
+	}
+}
+
+func TestMultiStepMemoryStore_Abort(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	ctx := context.Background()
+
+	store.Create(ctx, &MultiStepEscrow{
+		ID: "mse_1", BuyerAddr: "0xbuyer", TotalAmount: "2.000000",
+		SpentAmount: "0", TotalSteps: 2, Status: MSOpen,
+	})
+
+	err := store.Abort(ctx, "mse_1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mse, _ := store.Get(ctx, "mse_1")
+	if mse.Status != MSAborted {
+		t.Errorf("expected aborted, got %s", mse.Status)
+	}
+}
+
+func TestMultiStepMemoryStore_Abort_NotFound(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	err := store.Abort(context.Background(), "nonexistent")
+	if !errors.Is(err, ErrMultiStepNotFound) {
+		t.Errorf("expected ErrMultiStepNotFound, got %v", err)
+	}
+}
+
+func TestMultiStepMemoryStore_Complete_NotFound(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	err := store.Complete(context.Background(), "nonexistent")
+	if !errors.Is(err, ErrMultiStepNotFound) {
+		t.Errorf("expected ErrMultiStepNotFound, got %v", err)
+	}
+}
+
+func TestMultiStepMemoryStore_Get_DeepCopy(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	ctx := context.Background()
+
+	store.Create(ctx, &MultiStepEscrow{
+		ID: "mse_1", BuyerAddr: "0xbuyer", TotalAmount: "2.000000",
+		SpentAmount: "0", TotalSteps: 2, Status: MSOpen,
+		PlannedSteps: []PlannedStep{{SellerAddr: "0xs", Amount: "1.000000"}},
+	})
+
+	mse1, _ := store.Get(ctx, "mse_1")
+	mse1.PlannedSteps[0].SellerAddr = "mutated"
+
+	mse2, _ := store.Get(ctx, "mse_1")
+	if mse2.PlannedSteps[0].SellerAddr != "0xs" {
+		t.Error("expected deep copy to prevent mutation")
+	}
+}
+
+// ============================================================================
+// MultiStep Service: edge cases
+// ============================================================================
+
+func TestMultiStep_WithLogger(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+	got := svc.WithLogger(slog.Default())
+	if got != svc {
+		t.Error("WithLogger should return same service")
+	}
+}
+
+func TestMultiStep_Get_NotFound(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+
+	_, err := svc.Get(context.Background(), "nonexistent")
+	if !errors.Is(err, ErrMultiStepNotFound) {
+		t.Errorf("expected ErrMultiStepNotFound, got %v", err)
+	}
+}
+
+func TestMultiStep_LockSteps_InvalidSteps(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+
+	// Zero steps
+	_, err := svc.LockSteps(context.Background(), "0xbuyer", "1.000000", 0, nil)
+	if err == nil {
+		t.Error("expected error for zero steps")
+	}
+
+	// Too many steps
+	_, err = svc.LockSteps(context.Background(), "0xbuyer", "1.000000", MaxTotalSteps+1, nil)
+	if err == nil {
+		t.Error("expected error for too many steps")
+	}
+}
+
+func TestMultiStep_LockSteps_MismatchedPlannedSteps(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+
+	_, err := svc.LockSteps(context.Background(), "0xbuyer", "1.000000", 2, []PlannedStep{
+		{SellerAddr: "0xs", Amount: "1.000000"},
+	})
+	if err == nil {
+		t.Error("expected error for mismatched planned steps count")
+	}
+}
+
+func TestMultiStep_LockSteps_InvalidPlannedStepAmount(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+
+	_, err := svc.LockSteps(context.Background(), "0xbuyer", "1.000000", 1, []PlannedStep{
+		{SellerAddr: "0xs", Amount: "invalid"},
+	})
+	if err == nil {
+		t.Error("expected error for invalid step amount")
+	}
+}
+
+func TestMultiStep_LockSteps_EmptySeller(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+
+	_, err := svc.LockSteps(context.Background(), "0xbuyer", "1.000000", 1, []PlannedStep{
+		{SellerAddr: "", Amount: "1.000000"},
+	})
+	if err == nil {
+		t.Error("expected error for empty seller")
+	}
+}
+
+func TestMultiStep_RefundRemaining_WrongCaller(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+
+	mse, _ := svc.LockSteps(context.Background(), "0xbuyer", "2.000000", 2, []PlannedStep{
+		{SellerAddr: "0xs1", Amount: "1.000000"},
+		{SellerAddr: "0xs2", Amount: "1.000000"},
+	})
+
+	_, err := svc.RefundRemaining(context.Background(), mse.ID, "0xstranger")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestMultiStep_ConfirmStep_StepMismatch(t *testing.T) {
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+
+	mse, _ := svc.LockSteps(context.Background(), "0xbuyer", "2.000000", 2, []PlannedStep{
+		{SellerAddr: "0xs1", Amount: "1.000000"},
+		{SellerAddr: "0xs2", Amount: "1.000000"},
+	})
+
+	// Wrong seller for step 0
+	_, err := svc.ConfirmStep(context.Background(), mse.ID, 0, "0xwrong", "1.000000")
+	if err == nil {
+		t.Fatal("expected error for wrong seller")
+	}
+	if !errors.Is(err, ErrStepMismatch) {
+		t.Errorf("expected ErrStepMismatch, got %v", err)
+	}
+
+	// Wrong amount for step 0
+	_, err = svc.ConfirmStep(context.Background(), mse.ID, 0, "0xs1", "0.500000")
+	if err == nil {
+		t.Fatal("expected error for wrong amount")
+	}
+}
+
+// ============================================================================
+// Coalition: CoalitionEscrow model methods
+// ============================================================================
+
+func TestCoalitionEscrow_IsTerminal_Coverage(t *testing.T) {
+	tests := []struct {
+		status   CoalitionStatus
+		terminal bool
+	}{
+		{CSActive, false},
+		{CSDelivered, false},
+		{CSSettled, true},
+		{CSAborted, true},
+		{CSExpired, true},
+	}
+	for _, tt := range tests {
+		ce := &CoalitionEscrow{Status: tt.status}
+		if ce.IsTerminal() != tt.terminal {
+			t.Errorf("IsTerminal(%s) = %v, want %v", tt.status, ce.IsTerminal(), tt.terminal)
+		}
+	}
+}
+
+func TestCoalitionEscrow_AllMembersCompleted_Coverage(t *testing.T) {
+	now := time.Now()
+	ce := &CoalitionEscrow{
+		Members: []CoalitionMember{
+			{AgentAddr: "0xa", CompletedAt: &now},
+			{AgentAddr: "0xb", CompletedAt: nil},
+		},
+	}
+	if ce.allMembersCompleted() {
+		t.Error("expected false when not all completed")
+	}
+
+	ce.Members[1].CompletedAt = &now
+	if !ce.allMembersCompleted() {
+		t.Error("expected true when all completed")
+	}
+}
+
+// ============================================================================
+// Coalition MemoryStore: deep copy
+// ============================================================================
+
+func TestCoalitionMemoryStore_DeepCopy(t *testing.T) {
+	store := NewCoalitionMemoryStore()
+	ctx := context.Background()
+	now := time.Now()
+	score := 0.95
+
+	store.Create(ctx, &CoalitionEscrow{
+		ID: "coa_1", BuyerAddr: "0xbuyer", OracleAddr: "0xoracle",
+		TotalAmount:   "1.000000",
+		Members:       []CoalitionMember{{AgentAddr: "0xa", CompletedAt: &now}},
+		QualityTiers:  []QualityTier{{Name: "good", MinScore: 0.5}},
+		Contributions: map[string]float64{"0xa": 0.5},
+		QualityScore:  &score,
+		SettledAt:     &now,
+		Status:        CSActive,
+		AutoSettleAt:  now.Add(1 * time.Hour),
+		CreatedAt:     now, UpdatedAt: now,
+	})
+
+	ce1, _ := store.Get(ctx, "coa_1")
+	ce1.Members[0].AgentAddr = "mutated"
+	ce1.QualityTiers[0].Name = "mutated"
+	ce1.Contributions["0xa"] = 999
+
+	ce2, _ := store.Get(ctx, "coa_1")
+	if ce2.Members[0].AgentAddr == "mutated" {
+		t.Error("members should be deep copied")
+	}
+	if ce2.QualityTiers[0].Name == "mutated" {
+		t.Error("quality tiers should be deep copied")
+	}
+	if ce2.Contributions["0xa"] == 999 {
+		t.Error("contributions should be deep copied")
+	}
+}
+
+func TestCoalitionMemoryStore_Get_NotFound(t *testing.T) {
+	store := NewCoalitionMemoryStore()
+	_, err := store.Get(context.Background(), "nonexistent")
+	if !errors.Is(err, ErrCoalitionNotFound) {
+		t.Errorf("expected ErrCoalitionNotFound, got %v", err)
+	}
+}
+
+// ============================================================================
+// Escrow Handler: HTTP endpoint coverage
+// ============================================================================
+
+func testEscrowService() *Service {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	return NewService(store, ml).WithLogger(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+}
+
+func TestHandler_RegisterRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := testEscrowService()
+	handler := NewHandler(svc)
+
+	r := gin.New()
+	g := r.Group("/v1")
+	handler.RegisterRoutes(g)
+	handler.RegisterProtectedRoutes(g)
+
+	routes := r.Routes()
+	if len(routes) == 0 {
+		t.Error("expected routes to be registered")
+	}
+}
+
+func TestHandler_WithScopeChecker(t *testing.T) {
+	svc := testEscrowService()
+	handler := NewHandler(svc)
+	got := handler.WithScopeChecker(nil)
+	if got != handler {
+		t.Error("WithScopeChecker should return same handler")
+	}
+}
+
+func TestHandler_CreateEscrow_InvalidBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := testEscrowService()
+	handler := NewHandler(svc)
+
+	r := gin.New()
+	r.POST("/escrow", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xbuyer")
+		c.Next()
+	}, handler.CreateEscrow)
+
+	req := httptest.NewRequest("POST", "/escrow", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandler_CreateEscrow_NotBuyer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := testEscrowService()
+	handler := NewHandler(svc)
+
+	r := gin.New()
+	r.POST("/escrow", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0x1234567890abcdef1234567890abcdef12345678")
+		c.Next()
+	}, handler.CreateEscrow)
+
+	body := `{"buyerAddr":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sellerAddr":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","amount":"1.000000"}`
+	req := httptest.NewRequest("POST", "/escrow", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestHandler_GetEscrow_NotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := testEscrowService()
+	handler := NewHandler(svc)
+
+	r := gin.New()
+	r.GET("/escrow/:id", handler.GetEscrow)
+
+	req := httptest.NewRequest("GET", "/escrow/nonexistent", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandler_MarkDelivered_NotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := testEscrowService()
+	handler := NewHandler(svc)
+
+	r := gin.New()
+	r.POST("/escrow/:id/deliver", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xseller")
+		c.Next()
+	}, handler.MarkDelivered)
+
+	req := httptest.NewRequest("POST", "/escrow/nonexistent/deliver", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandler_ConfirmEscrow_NotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := testEscrowService()
+	handler := NewHandler(svc)
+
+	r := gin.New()
+	r.POST("/escrow/:id/confirm", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xbuyer")
+		c.Next()
+	}, handler.ConfirmEscrow)
+
+	req := httptest.NewRequest("POST", "/escrow/nonexistent/confirm", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandler_DisputeEscrow_BadBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := testEscrowService()
+	handler := NewHandler(svc)
+
+	r := gin.New()
+	r.POST("/escrow/:id/dispute", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xbuyer")
+		c.Next()
+	}, handler.DisputeEscrow)
+
+	req := httptest.NewRequest("POST", "/escrow/esc_1/dispute", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandler_SubmitEvidence_BadBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := testEscrowService()
+	handler := NewHandler(svc)
+
+	r := gin.New()
+	r.POST("/escrow/:id/evidence", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xbuyer")
+		c.Next()
+	}, handler.SubmitEvidence)
+
+	req := httptest.NewRequest("POST", "/escrow/esc_1/evidence", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandler_AssignArbitrator_BadBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := testEscrowService()
+	handler := NewHandler(svc)
+
+	r := gin.New()
+	r.POST("/escrow/:id/arbitrate", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xbuyer")
+		c.Next()
+	}, handler.AssignArbitrator)
+
+	req := httptest.NewRequest("POST", "/escrow/esc_1/arbitrate", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandler_ResolveArbitration_BadBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := testEscrowService()
+	handler := NewHandler(svc)
+
+	r := gin.New()
+	r.POST("/escrow/:id/resolve", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xarbitrator")
+		c.Next()
+	}, handler.ResolveArbitration)
+
+	req := httptest.NewRequest("POST", "/escrow/esc_1/resolve", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+// ============================================================================
+// MultiStep Handler coverage
+// ============================================================================
+
+func TestMultiStepHandler_RegisterRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+	handler := NewMultiStepHandler(svc)
+
+	r := gin.New()
+	g := r.Group("/v1")
+	handler.RegisterRoutes(g)
+	handler.RegisterProtectedRoutes(g)
+
+	routes := r.Routes()
+	if len(routes) == 0 {
+		t.Error("expected routes to be registered")
+	}
+}
+
+func TestMultiStepHandler_CreateBadBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+	handler := NewMultiStepHandler(svc)
+
+	r := gin.New()
+	r.POST("/escrow/multistep", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xbuyer")
+		c.Next()
+	}, handler.CreateMultiStepEscrow)
+
+	req := httptest.NewRequest("POST", "/escrow/multistep", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMultiStepHandler_ConfirmStep_BadBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+	handler := NewMultiStepHandler(svc)
+
+	r := gin.New()
+	r.POST("/escrow/multistep/:id/confirm-step", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xbuyer")
+		c.Next()
+	}, handler.ConfirmStep)
+
+	req := httptest.NewRequest("POST", "/escrow/multistep/mse_1/confirm-step", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMultiStepHandler_GetNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+	handler := NewMultiStepHandler(svc)
+
+	r := gin.New()
+	r.GET("/escrow/multistep/:id", handler.GetMultiStepEscrow)
+
+	req := httptest.NewRequest("GET", "/escrow/multistep/nonexistent", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestMultiStepHandler_RefundNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+	handler := NewMultiStepHandler(svc)
+
+	r := gin.New()
+	r.POST("/escrow/multistep/:id/refund", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xbuyer")
+		c.Next()
+	}, handler.RefundRemaining)
+
+	req := httptest.NewRequest("POST", "/escrow/multistep/nonexistent/refund", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+// ============================================================================
+// Coalition Handler coverage
+// ============================================================================
+
+func TestCoalitionHandler_RegisterRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ml := newMockLedger()
+	store := NewCoalitionMemoryStore()
+	svc := NewCoalitionService(store, ml)
+	handler := NewCoalitionHandler(svc)
+
+	r := gin.New()
+	g := r.Group("/v1")
+	handler.RegisterRoutes(g)
+	handler.RegisterProtectedRoutes(g)
+
+	routes := r.Routes()
+	if len(routes) == 0 {
+		t.Error("expected routes to be registered")
+	}
+}
+
+func TestCoalitionHandler_CreateBadBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ml := newMockLedger()
+	store := NewCoalitionMemoryStore()
+	svc := NewCoalitionService(store, ml)
+	handler := NewCoalitionHandler(svc)
+
+	r := gin.New()
+	r.POST("/coalition", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xbuyer")
+		c.Next()
+	}, handler.CreateCoalition)
+
+	req := httptest.NewRequest("POST", "/coalition", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestCoalitionHandler_CreateNotBuyer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ml := newMockLedger()
+	store := NewCoalitionMemoryStore()
+	svc := NewCoalitionService(store, ml)
+	handler := NewCoalitionHandler(svc)
+
+	r := gin.New()
+	r.POST("/coalition", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0x1111111111111111111111111111111111111111")
+		c.Next()
+	}, handler.CreateCoalition)
+
+	body, _ := json.Marshal(CreateCoalitionRequest{
+		BuyerAddr:     "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		OracleAddr:    "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		TotalAmount:   "1.000000",
+		SplitStrategy: SplitEqual,
+		Members:       []CoalitionMember{{AgentAddr: "0xcccccccccccccccccccccccccccccccccccccccc", Role: "a"}},
+		QualityTiers:  []QualityTier{{Name: "good", MinScore: 0.5, PayoutPct: 100}},
+	})
+	req := httptest.NewRequest("POST", "/coalition", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestCoalitionHandler_GetNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ml := newMockLedger()
+	store := NewCoalitionMemoryStore()
+	svc := NewCoalitionService(store, ml)
+	handler := NewCoalitionHandler(svc)
+
+	r := gin.New()
+	r.GET("/coalition/:id", handler.GetCoalition)
+
+	req := httptest.NewRequest("GET", "/coalition/nonexistent", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestCoalitionHandler_ListCoalitions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ml := newMockLedger()
+	store := NewCoalitionMemoryStore()
+	svc := NewCoalitionService(store, ml)
+	handler := NewCoalitionHandler(svc)
+
+	r := gin.New()
+	r.GET("/agents/:address/coalitions", handler.ListCoalitions)
+
+	req := httptest.NewRequest("GET", "/agents/0xbuyer/coalitions?limit=5", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestCoalitionHandler_ListCoalitions_CapAt200(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ml := newMockLedger()
+	store := NewCoalitionMemoryStore()
+	svc := NewCoalitionService(store, ml)
+	handler := NewCoalitionHandler(svc)
+
+	r := gin.New()
+	r.GET("/agents/:address/coalitions", handler.ListCoalitions)
+
+	req := httptest.NewRequest("GET", "/agents/0xbuyer/coalitions?limit=500", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestCoalitionHandler_ReportCompletion_NotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ml := newMockLedger()
+	store := NewCoalitionMemoryStore()
+	svc := NewCoalitionService(store, ml)
+	handler := NewCoalitionHandler(svc)
+
+	r := gin.New()
+	r.POST("/coalition/:id/complete", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xagent")
+		c.Next()
+	}, handler.ReportCompletion)
+
+	req := httptest.NewRequest("POST", "/coalition/nonexistent/complete", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestCoalitionHandler_OracleReport_BadBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ml := newMockLedger()
+	store := NewCoalitionMemoryStore()
+	svc := NewCoalitionService(store, ml)
+	handler := NewCoalitionHandler(svc)
+
+	r := gin.New()
+	r.POST("/coalition/:id/oracle-report", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xoracle")
+		c.Next()
+	}, handler.OracleReport)
+
+	req := httptest.NewRequest("POST", "/coalition/coa_1/oracle-report", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestCoalitionHandler_AbortNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ml := newMockLedger()
+	store := NewCoalitionMemoryStore()
+	svc := NewCoalitionService(store, ml)
+	handler := NewCoalitionHandler(svc)
+
+	r := gin.New()
+	r.POST("/coalition/:id/abort", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xbuyer")
+		c.Next()
+	}, handler.AbortCoalition)
+
+	req := httptest.NewRequest("POST", "/coalition/nonexistent/abort", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestCoalitionHandler_CreateWithInvalidContractID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ml := newMockLedger()
+	store := NewCoalitionMemoryStore()
+	svc := NewCoalitionService(store, ml)
+	handler := NewCoalitionHandler(svc)
+
+	r := gin.New()
+	r.POST("/coalition", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xbuyer")
+		c.Next()
+	}, handler.CreateCoalition)
+
+	body, _ := json.Marshal(CreateCoalitionRequest{
+		BuyerAddr:     "0xbuyer",
+		OracleAddr:    "0xoracle",
+		TotalAmount:   "1.000000",
+		SplitStrategy: SplitEqual,
+		Members:       []CoalitionMember{{AgentAddr: "0xa", Role: "a"}},
+		QualityTiers:  []QualityTier{{Name: "good", MinScore: 0.5, PayoutPct: 100}},
+		ContractID:    "ab", // too short (< 4 characters)
+	})
+	req := httptest.NewRequest("POST", "/coalition", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for short contractId, got %d", w.Code)
+	}
+}
+
+// ============================================================================
+// Timer: lifecycle tests
+// ============================================================================
+
+func TestTimer_StartAndStop(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml)
+	timer := NewTimer(svc, store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	if timer.Running() {
+		t.Fatal("should not be running before Start")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go timer.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	if !timer.Running() {
+		t.Fatal("should be running after Start")
+	}
+
+	timer.Stop()
+	time.Sleep(100 * time.Millisecond)
+
+	if timer.Running() {
+		t.Fatal("should not be running after Stop")
+	}
+	cancel()
+}
+
+func TestTimer_ContextCancel(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml)
+	timer := NewTimer(svc, store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go timer.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	if timer.Running() {
+		t.Fatal("should not be running after context cancel")
+	}
+}
+
+func TestCoalitionTimer_ContextCancel(t *testing.T) {
+	ml := newMockLedger()
+	store := NewCoalitionMemoryStore()
+	svc := NewCoalitionService(store, ml)
+	timer := NewCoalitionTimer(svc, store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go timer.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	if timer.Running() {
+		t.Fatal("should not be running after context cancel")
+	}
+}
+
+// ============================================================================
+// MultiStepHandler: ConfirmStep with non-buyer
+// ============================================================================
+
+func TestMultiStepHandler_ConfirmStep_NotBuyer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+
+	sellerAddr := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	mse, _ := svc.LockSteps(context.Background(), "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "2.000000", 2, []PlannedStep{
+		{SellerAddr: sellerAddr, Amount: "1.000000"},
+		{SellerAddr: sellerAddr, Amount: "1.000000"},
+	})
+
+	handler := NewMultiStepHandler(svc)
+	r := gin.New()
+	r.POST("/escrow/multistep/:id/confirm-step", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0x1111111111111111111111111111111111111111")
+		c.Next()
+	}, handler.ConfirmStep)
+
+	body := fmt.Sprintf(`{"stepIndex":0,"sellerAddr":"%s","amount":"1.000000"}`, sellerAddr)
+	req := httptest.NewRequest("POST", "/escrow/multistep/"+mse.ID+"/confirm-step", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
+	}
+}
+
+// ============================================================================
+// MultiStepHandler: Create with totalSteps validation
+// ============================================================================
+
+func TestMultiStepHandler_Create_TooManySteps(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+	handler := NewMultiStepHandler(svc)
+
+	r := gin.New()
+	r.POST("/escrow/multistep", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xbuyer")
+		c.Next()
+	}, handler.CreateMultiStepEscrow)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"totalAmount":  "1.000000",
+		"totalSteps":   MaxTotalSteps + 1,
+		"plannedSteps": []PlannedStepRequest{},
+	})
+	req := httptest.NewRequest("POST", "/escrow/multistep", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMultiStepHandler_Create_MismatchedSteps(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := NewMultiStepMemoryStore()
+	ml := newMockLedger()
+	svc := NewMultiStepService(store, ml)
+	handler := NewMultiStepHandler(svc)
+
+	r := gin.New()
+	r.POST("/escrow/multistep", func(c *gin.Context) {
+		c.Set("authAgentAddr", "0xbuyer")
+		c.Next()
+	}, handler.CreateMultiStepEscrow)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"totalAmount": "1.000000",
+		"totalSteps":  2,
+		"plannedSteps": []PlannedStepRequest{
+			{SellerAddr: "0xs", Amount: "1.000000"},
+		},
+	})
+	req := httptest.NewRequest("POST", "/escrow/multistep", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for mismatched steps, got %d", w.Code)
+	}
+}
+
+// --- merged from escrow_extra_test.go ---
+
+func testService() (*Service, *mockLedger) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml).WithLogger(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	return svc, ml
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: SubmitEvidence
+// ---------------------------------------------------------------------------
+
+func TestEscrow_SubmitEvidence_Success(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+
+	// Dispute first
+	esc, _ = svc.Dispute(ctx, esc.ID, "0xbuyer", "bad quality")
+
+	// Buyer submits evidence
+	esc, err := svc.SubmitEvidence(ctx, esc.ID, "0xbuyer", "here is my proof")
+	if err != nil {
+		t.Fatalf("SubmitEvidence by buyer: %v", err)
+	}
+	// Should have 2 entries: initial dispute reason + new evidence
+	if len(esc.DisputeEvidence) != 2 {
+		t.Fatalf("expected 2 evidence entries, got %d", len(esc.DisputeEvidence))
+	}
+
+	// Seller submits evidence
+	esc, err = svc.SubmitEvidence(ctx, esc.ID, "0xseller", "here is seller proof")
+	if err != nil {
+		t.Fatalf("SubmitEvidence by seller: %v", err)
+	}
+	if len(esc.DisputeEvidence) != 3 {
+		t.Fatalf("expected 3 evidence entries, got %d", len(esc.DisputeEvidence))
+	}
+}
+
+func TestEscrow_SubmitEvidence_Unauthorized(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+	_, _ = svc.Dispute(ctx, esc.ID, "0xbuyer", "bad quality")
+
+	_, err := svc.SubmitEvidence(ctx, esc.ID, "0xstranger", "evidence")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestEscrow_SubmitEvidence_WrongStatus(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+
+	// Evidence on pending escrow should fail
+	_, err := svc.SubmitEvidence(ctx, esc.ID, "0xbuyer", "evidence")
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("expected ErrInvalidStatus, got %v", err)
+	}
+}
+
+func TestEscrow_SubmitEvidence_EmptyContent(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+	_, _ = svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
+
+	_, err := svc.SubmitEvidence(ctx, esc.ID, "0xbuyer", "")
+	if err == nil {
+		t.Fatal("expected error for empty content")
+	}
+}
+
+func TestEscrow_SubmitEvidence_Nonexistent(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	_, err := svc.SubmitEvidence(ctx, "esc_ghost", "0xbuyer", "evidence")
+	if !errors.Is(err, ErrEscrowNotFound) {
+		t.Fatalf("expected ErrEscrowNotFound, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: AssignArbitrator
+// ---------------------------------------------------------------------------
+
+func TestEscrow_AssignArbitrator_Success(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+	_, _ = svc.Dispute(ctx, esc.ID, "0xbuyer", "bad service")
+
+	esc, err := svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xarbitrator")
+	if err != nil {
+		t.Fatalf("AssignArbitrator: %v", err)
+	}
+	if esc.Status != StatusArbitrating {
+		t.Fatalf("expected arbitrating, got %s", esc.Status)
+	}
+	if esc.ArbitratorAddr != "0xarbitrator" {
+		t.Fatalf("expected arbitrator 0xarbitrator, got %s", esc.ArbitratorAddr)
+	}
+	if esc.ArbitrationDeadline == nil {
+		t.Fatal("expected ArbitrationDeadline to be set")
+	}
+}
+
+func TestEscrow_AssignArbitrator_Unauthorized(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+	_, _ = svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
+
+	_, err := svc.AssignArbitrator(ctx, esc.ID, "0xstranger", "0xarbitrator")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestEscrow_AssignArbitrator_SelfAssignment(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+	_, _ = svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
+
+	// Buyer as arbitrator
+	_, err := svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xbuyer")
+	if err == nil {
+		t.Fatal("expected error for self-assignment (buyer)")
+	}
+
+	// Seller as arbitrator
+	_, err = svc.AssignArbitrator(ctx, esc.ID, "0xseller", "0xseller")
+	if err == nil {
+		t.Fatal("expected error for self-assignment (seller)")
+	}
+}
+
+func TestEscrow_AssignArbitrator_WrongStatus(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+
+	// Assign from pending status should fail
+	_, err := svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xarbitrator")
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("expected ErrInvalidStatus, got %v", err)
+	}
+}
+
+func TestEscrow_AssignArbitrator_Nonexistent(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	_, err := svc.AssignArbitrator(ctx, "esc_ghost", "0xbuyer", "0xarbitrator")
+	if !errors.Is(err, ErrEscrowNotFound) {
+		t.Fatalf("expected ErrEscrowNotFound, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: ResolveArbitration
+// ---------------------------------------------------------------------------
+
+func setupArbitration(t *testing.T) (*Service, *Escrow) {
+	t.Helper()
+	svc, _ := testService()
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "10.00",
+	})
+	_, _ = svc.Dispute(ctx, esc.ID, "0xbuyer", "bad service")
+	esc, _ = svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xarbitrator")
+	return svc, esc
+}
+
+func TestEscrow_ResolveArbitration_Release(t *testing.T) {
+	svc, esc := setupArbitration(t)
+	ctx := context.Background()
+
+	result, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
+		Resolution: "release",
+		Reason:     "seller delivered properly",
+	})
+	if err != nil {
+		t.Fatalf("ResolveArbitration release: %v", err)
+	}
+	if result.Status != StatusReleased {
+		t.Fatalf("expected released, got %s", result.Status)
+	}
+	if result.ResolvedAt == nil {
+		t.Fatal("expected ResolvedAt to be set")
+	}
+}
+
+func TestEscrow_ResolveArbitration_Refund(t *testing.T) {
+	svc, esc := setupArbitration(t)
+	ctx := context.Background()
+
+	result, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
+		Resolution: "refund",
+		Reason:     "seller failed to deliver",
+	})
+	if err != nil {
+		t.Fatalf("ResolveArbitration refund: %v", err)
+	}
+	if result.Status != StatusRefunded {
+		t.Fatalf("expected refunded, got %s", result.Status)
+	}
+}
+
+func TestEscrow_ResolveArbitration_Partial(t *testing.T) {
+	svc, esc := setupArbitration(t)
+	ctx := context.Background()
+
+	result, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
+		Resolution:    "partial",
+		ReleaseAmount: "7.00",
+		Reason:        "partial delivery",
+	})
+	if err != nil {
+		t.Fatalf("ResolveArbitration partial: %v", err)
+	}
+	if result.Status != StatusReleased {
+		t.Fatalf("expected released, got %s", result.Status)
+	}
+	if result.PartialReleaseAmount != "7.000000" {
+		t.Fatalf("expected release 7.000000, got %s", result.PartialReleaseAmount)
+	}
+	if result.PartialRefundAmount != "3.000000" {
+		t.Fatalf("expected refund 3.000000, got %s", result.PartialRefundAmount)
+	}
+}
+
+func TestEscrow_ResolveArbitration_Unauthorized(t *testing.T) {
+	svc, esc := setupArbitration(t)
+	ctx := context.Background()
+
+	_, err := svc.ResolveArbitration(ctx, esc.ID, "0xstranger", ResolveRequest{
+		Resolution: "release",
+	})
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestEscrow_ResolveArbitration_InvalidResolution(t *testing.T) {
+	svc, esc := setupArbitration(t)
+	ctx := context.Background()
+
+	_, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
+		Resolution: "invalid",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid resolution")
+	}
+}
+
+func TestEscrow_ResolveArbitration_PartialExceedsTotal(t *testing.T) {
+	svc, esc := setupArbitration(t)
+	ctx := context.Background()
+
+	_, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
+		Resolution:    "partial",
+		ReleaseAmount: "10.00", // equal to total, must be less
+	})
+	if !errors.Is(err, ErrInvalidAmount) {
+		t.Fatalf("expected ErrInvalidAmount, got %v", err)
+	}
+}
+
+func TestEscrow_ResolveArbitration_NoArbitrator(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "10.00",
+	})
+	_, _ = svc.Dispute(ctx, esc.ID, "0xbuyer", "bad")
+
+	// No arbitrator assigned yet
+	_, err := svc.ResolveArbitration(ctx, esc.ID, "0xsomeone", ResolveRequest{
+		Resolution: "release",
+	})
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized (no arbitrator), got %v", err)
+	}
+}
+
+func TestEscrow_ResolveArbitration_AlreadyResolved(t *testing.T) {
+	svc, esc := setupArbitration(t)
+	ctx := context.Background()
+
+	// First resolve succeeds
+	_, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
+		Resolution: "release",
+	})
+	if err != nil {
+		t.Fatalf("first resolve: %v", err)
+	}
+
+	// Second resolve should fail
+	_, err = svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
+		Resolution: "refund",
+	})
+	if !errors.Is(err, ErrAlreadyResolved) {
+		t.Fatalf("expected ErrAlreadyResolved, got %v", err)
+	}
+}
+
+func TestEscrow_ResolveArbitration_Nonexistent(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	_, err := svc.ResolveArbitration(ctx, "esc_ghost", "0xarbitrator", ResolveRequest{
+		Resolution: "release",
+	})
+	if !errors.Is(err, ErrEscrowNotFound) {
+		t.Fatalf("expected ErrEscrowNotFound, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: ForceCloseExpired
+// ---------------------------------------------------------------------------
+
+func TestEscrow_ForceCloseExpired(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml)
+	ctx := context.Background()
+
+	// Create 2 expired escrows and 1 disputed
+	esc1, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr: "0xbuyer", SellerAddr: "0xseller", Amount: "1.00", AutoRelease: "1ms",
+	})
+	esc2, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr: "0xbuyer", SellerAddr: "0xseller2", Amount: "2.00", AutoRelease: "1ms",
+	})
+	esc3, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr: "0xbuyer", SellerAddr: "0xseller3", Amount: "3.00", AutoRelease: "1ms",
+	})
+	// Dispute esc3 — should NOT be force-closed
+	_, _ = svc.Dispute(ctx, esc3.ID, "0xbuyer", "bad")
+
+	time.Sleep(5 * time.Millisecond)
+
+	closed, err := svc.ForceCloseExpired(ctx)
+	if err != nil {
+		t.Fatalf("ForceCloseExpired: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("expected 2 closed, got %d", closed)
+	}
+
+	g1, _ := svc.Get(ctx, esc1.ID)
+	g2, _ := svc.Get(ctx, esc2.ID)
+	g3, _ := svc.Get(ctx, esc3.ID)
+	if g1.Status != StatusExpired {
+		t.Errorf("esc1 should be expired, got %s", g1.Status)
+	}
+	if g2.Status != StatusExpired {
+		t.Errorf("esc2 should be expired, got %s", g2.Status)
+	}
+	if g3.Status != StatusDisputed {
+		t.Errorf("esc3 should remain disputed, got %s", g3.Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: ListByAgent
+// ---------------------------------------------------------------------------
+
+func TestEscrow_ListByAgentDefaultLimitZero(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	// Create some escrows
+	for i := 0; i < 3; i++ {
+		_, _ = svc.Create(ctx, CreateRequest{
+			BuyerAddr: "0xbuyer", SellerAddr: "0xseller", Amount: "1.00",
+		})
+	}
+
+	// limit 0 should default to 50
+	list, err := svc.ListByAgent(ctx, "0xbuyer", 0)
+	if err != nil {
+		t.Fatalf("ListByAgent: %v", err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("expected 3, got %d", len(list))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: Dispute validation
+// ---------------------------------------------------------------------------
+
+func TestEscrow_Dispute_EmptyReason(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+
+	_, err := svc.Dispute(ctx, esc.ID, "0xbuyer", "")
+	if err == nil {
+		t.Fatal("expected error for empty reason")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: Create validation
+// ---------------------------------------------------------------------------
+
+func TestEscrow_Create_SameBuyerSeller(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	_, err := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xAlice",
+		SellerAddr: "0xAlice",
+		Amount:     "1.00",
+	})
+	if err == nil {
+		t.Fatal("expected error when buyer == seller")
+	}
+}
+
+func TestEscrow_Create_InvalidAmount_Empty(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	_, err := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "",
+	})
+	if !errors.Is(err, ErrInvalidAmount) {
+		t.Fatalf("expected ErrInvalidAmount, got %v", err)
+	}
+}
+
+func TestEscrow_Create_InvalidAmount_Negative(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	_, err := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "-1.00",
+	})
+	if !errors.Is(err, ErrInvalidAmount) {
+		t.Fatalf("expected ErrInvalidAmount, got %v", err)
+	}
+}
+
+func TestEscrow_Create_InvalidAmount_NotNumber(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	_, err := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "abc",
+	})
+	if !errors.Is(err, ErrInvalidAmount) {
+		t.Fatalf("expected ErrInvalidAmount, got %v", err)
+	}
+}
+
+func TestEscrow_Create_ZeroAmount(t *testing.T) {
+	svc, _ := testService()
+	ctx := context.Background()
+
+	_, err := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "0",
+	})
+	if !errors.Is(err, ErrInvalidAmount) {
+		t.Fatalf("expected ErrInvalidAmount, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: MoneyError wrapping
+// ---------------------------------------------------------------------------
+
+func TestMoneyError_UnwrapAndError(t *testing.T) {
+	inner := errors.New("ledger failed")
+	me := &MoneyError{
+		Err:         inner,
+		FundsStatus: "locked_in_escrow",
+		Recovery:    "contact support",
+		Amount:      "10.00",
+		Reference:   "esc_123",
+	}
+
+	if me.Error() != "ledger failed" {
+		t.Errorf("expected 'ledger failed', got %s", me.Error())
+	}
+	if !errors.Is(me, inner) {
+		t.Error("expected Unwrap to return inner error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: IsTerminal for Escrow and CoalitionEscrow
+// ---------------------------------------------------------------------------
+
+func TestCoalitionEscrow_IsTerminal(t *testing.T) {
+	terminals := []CoalitionStatus{CSSettled, CSAborted, CSExpired}
+	for _, s := range terminals {
+		ce := &CoalitionEscrow{Status: s}
+		if !ce.IsTerminal() {
+			t.Errorf("expected %s to be terminal", s)
+		}
+	}
+
+	nonTerminals := []CoalitionStatus{CSActive, CSDelivered}
+	for _, s := range nonTerminals {
+		ce := &CoalitionEscrow{Status: s}
+		if ce.IsTerminal() {
+			t.Errorf("expected %s to be non-terminal", s)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: With... option chaining
+// ---------------------------------------------------------------------------
+
+func TestEscrow_ServiceOptions(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	rec := &mockRecorder{}
+
+	svc := NewService(store, ml).
+		WithLogger(slog.Default()).
+		WithRecorder(rec).
+		WithRevenueAccumulator(nil).
+		WithReputationImpactor(nil).
+		WithReceiptIssuer(nil).
+		WithWebhookEmitter(nil).
+		WithTrustGate(nil)
+
+	if svc == nil {
+		t.Fatal("expected non-nil service")
+	}
+
+	// Should work normally with nil optional dependencies
+	ctx := context.Background()
+	esc, err := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	_, err = svc.Confirm(ctx, esc.ID, "0xbuyer")
+	if err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: MemoryStore ListByStatus
+// ---------------------------------------------------------------------------
+
+func TestMemoryStore_ListByStatus(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now()
+
+	store.Create(ctx, &Escrow{
+		ID: "esc1", Status: StatusPending,
+		BuyerAddr: "0xb", SellerAddr: "0xs",
+		AutoReleaseAt: now, CreatedAt: now, UpdatedAt: now,
+	})
+	store.Create(ctx, &Escrow{
+		ID: "esc2", Status: StatusDisputed,
+		BuyerAddr: "0xb", SellerAddr: "0xs",
+		AutoReleaseAt: now, CreatedAt: now, UpdatedAt: now,
+	})
+	store.Create(ctx, &Escrow{
+		ID: "esc3", Status: StatusPending,
+		BuyerAddr: "0xb", SellerAddr: "0xs",
+		AutoReleaseAt: now, CreatedAt: now, UpdatedAt: now,
+	})
+
+	// List pending
+	result, err := store.ListByStatus(ctx, StatusPending, 100)
+	if err != nil {
+		t.Fatalf("ListByStatus: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 pending, got %d", len(result))
+	}
+
+	// List disputed
+	result, err = store.ListByStatus(ctx, StatusDisputed, 100)
+	if err != nil {
+		t.Fatalf("ListByStatus: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 disputed, got %d", len(result))
+	}
+
+	// List with limit
+	result, err = store.ListByStatus(ctx, StatusPending, 1)
+	if err != nil {
+		t.Fatalf("ListByStatus: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 (limited), got %d", len(result))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: validateAmount
+// ---------------------------------------------------------------------------
+
+func TestValidateAmount(t *testing.T) {
+	tests := []struct {
+		amount  string
+		wantErr bool
+	}{
+		{"1.00", false},
+		{"0.000001", false},
+		{"999999.999999", false},
+		{"", true},
+		{"  ", true},
+		{"-1.00", true},
+		{"0", true},
+		{"abc", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.amount, func(t *testing.T) {
+			err := validateAmount(tt.amount)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateAmount(%q) = %v, wantErr %v", tt.amount, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: AutoRelease ledger failure
+// ---------------------------------------------------------------------------
+
+func TestEscrow_AutoRelease_LedgerReleaseFailure(t *testing.T) {
+	store := NewMemoryStore()
+	fl := &failingLedger{releaseErr: errors.New("release failed")}
+	svc := NewService(store, fl)
+	ctx := context.Background()
+
+	esc, _ := svc.Create(ctx, CreateRequest{
+		BuyerAddr: "0xbuyer", SellerAddr: "0xseller",
+		Amount: "1.00", AutoRelease: "1ms",
+	})
+	time.Sleep(5 * time.Millisecond)
+
+	err := svc.AutoRelease(ctx, esc)
+	if err == nil {
+		t.Fatal("expected error when release fails")
+	}
+
+	var me *MoneyError
+	if !errors.As(err, &me) {
+		t.Fatalf("expected MoneyError, got %T", err)
+	}
+	if me.FundsStatus != "locked_in_escrow" {
+		t.Errorf("expected locked_in_escrow, got %s", me.FundsStatus)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: Create with TrustGate
+// ---------------------------------------------------------------------------
+
+type mockTrustGate struct {
+	err error
+}
+
+func (m *mockTrustGate) CheckCounterpartyTrust(_ context.Context, _ string) error {
+	return m.err
+}
+
+func TestEscrow_Create_TrustGateReject(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml).
+		WithTrustGate(&mockTrustGate{err: errors.New("untrusted agent")})
+	ctx := context.Background()
+
+	_, err := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+	if err == nil {
+		t.Fatal("expected error from trust gate")
+	}
+}
+
+func TestEscrow_Create_TrustGateAllow(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml).
+		WithTrustGate(&mockTrustGate{err: nil})
+	ctx := context.Background()
+
+	esc, err := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "1.00",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if esc.Status != StatusPending {
+		t.Fatalf("expected pending, got %s", esc.Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow: allMembersCompleted
+// ---------------------------------------------------------------------------
+
+func TestCoalitionEscrow_AllMembersCompleted(t *testing.T) {
+	now := time.Now()
+	ce := &CoalitionEscrow{
+		Members: []CoalitionMember{
+			{AgentAddr: "0xa", CompletedAt: &now},
+			{AgentAddr: "0xb", CompletedAt: &now},
+		},
+	}
+	if !ce.allMembersCompleted() {
+		t.Fatal("expected all completed")
+	}
+
+	// One member not completed
+	ce.Members = append(ce.Members, CoalitionMember{AgentAddr: "0xc"})
+	if ce.allMembersCompleted() {
+		t.Fatal("expected not all completed")
 	}
 }

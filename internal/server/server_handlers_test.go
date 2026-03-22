@@ -1,6 +1,7 @@
 package server
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/mbd888/alancoin/internal/eventbus"
 	"github.com/mbd888/alancoin/internal/forensics"
 	"github.com/mbd888/alancoin/internal/realtime"
@@ -2087,5 +2089,887 @@ func TestChargebackConsumerWithCostCenter(t *testing.T) {
 	err = consumer(ctx, []eventbus.Event{event})
 	if err != nil {
 		t.Fatalf("Chargeback consumer failed: %v", err)
+	}
+}
+
+// --- merged from coverage_final_test.go ---
+
+// ---------------------------------------------------------------------------
+// timerStatus is tested directly; readinessHandler timer path requires
+// real (non-nil-pointer) timers which are only created in Postgres mode.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// timerStatus edge cases
+// ---------------------------------------------------------------------------
+
+type mockRunnable struct {
+	running bool
+}
+
+func (m *mockRunnable) Running() bool { return m.running }
+
+func TestTimerStatus_Running(t *testing.T) {
+	r := &mockRunnable{running: true}
+	if got := timerStatus(r); got != "running" {
+		t.Errorf("Expected 'running', got %q", got)
+	}
+}
+
+func TestTimerStatus_Stopped(t *testing.T) {
+	r := &mockRunnable{running: false}
+	if got := timerStatus(r); got != "stopped" {
+		t.Errorf("Expected 'stopped', got %q", got)
+	}
+}
+
+func TestTimerStatus_NotConfigured(t *testing.T) {
+	if got := timerStatus(nil); got != "not_configured" {
+		t.Errorf("Expected 'not_configured', got %q", got)
+	}
+}
+
+func TestTimerStatus_Unknown(t *testing.T) {
+	// Pass something that doesn't implement runnable
+	if got := timerStatus("not-a-timer"); got != "unknown" {
+		t.Errorf("Expected 'unknown', got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// gzipWriter WriteString
+// ---------------------------------------------------------------------------
+
+func TestGzipWriter_WriteString(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(gzipMiddleware())
+	router.GET("/test-ws", func(c *gin.Context) {
+		// Use WriteString explicitly to cover gzipWriter.WriteString
+		c.Writer.WriteString(strings.Repeat("test string data ", 100))
+		c.Status(200)
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test-ws", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	router.ServeHTTP(w, req)
+
+	if w.Header().Get("Content-Encoding") != "gzip" {
+		t.Error("Expected gzip Content-Encoding")
+	}
+
+	reader, err := gzip.NewReader(w.Body)
+	if err != nil {
+		t.Fatalf("Failed to create gzip reader: %v", err)
+	}
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("Failed to read gzip body: %v", err)
+	}
+	if !strings.Contains(string(body), "test string data") {
+		t.Error("Expected decompressed body to contain 'test string data'")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// escrowLedgerAdapter — ReleaseEscrow, PartialEscrowSettle
+// ---------------------------------------------------------------------------
+
+func TestEscrowLedgerAdapter_ReleaseEscrow(t *testing.T) {
+	s := newTestServer(t)
+	adapter := &escrowLedgerAdapter{l: s.ledgerService}
+
+	ctx := context.Background()
+	buyerAddr := "0xdddd000000000000000000000000000000000051"
+	sellerAddr := "0xdddd000000000000000000000000000000000052"
+
+	// Fund both agents
+	_ = s.ledger.StoreRef().Credit(ctx, buyerAddr, "100.000000", "dep_r1", "test")
+
+	// Lock escrow first
+	err := adapter.EscrowLock(ctx, buyerAddr, "5.000000", "esc_rel_1")
+	if err != nil {
+		t.Fatalf("EscrowLock failed: %v", err)
+	}
+
+	// Release escrow to seller
+	err = adapter.ReleaseEscrow(ctx, buyerAddr, sellerAddr, "5.000000", "esc_rel_1")
+	if err != nil {
+		t.Fatalf("ReleaseEscrow failed: %v", err)
+	}
+}
+
+func TestEscrowLedgerAdapter_PartialEscrowSettle(t *testing.T) {
+	s := newTestServer(t)
+	adapter := &escrowLedgerAdapter{l: s.ledgerService}
+
+	ctx := context.Background()
+	buyerAddr := "0xdddd000000000000000000000000000000000053"
+	sellerAddr := "0xdddd000000000000000000000000000000000054"
+
+	// Fund
+	_ = s.ledger.StoreRef().Credit(ctx, buyerAddr, "100.000000", "dep_p1", "test")
+
+	// Lock escrow (within per-tx limit of 5 USDC for new agents)
+	err := adapter.EscrowLock(ctx, buyerAddr, "4.000000", "esc_part_1")
+	if err != nil {
+		t.Fatalf("EscrowLock failed: %v", err)
+	}
+
+	// Partial settle: release some, refund some
+	err = adapter.PartialEscrowSettle(ctx, buyerAddr, sellerAddr, "2.500000", "1.500000", "esc_part_1")
+	if err != nil {
+		t.Fatalf("PartialEscrowSettle failed: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// streamLedgerAdapter — SettleHold
+// ---------------------------------------------------------------------------
+
+func TestStreamLedgerAdapter_SettleHold(t *testing.T) {
+	s := newTestServer(t)
+	adapter := &streamLedgerAdapter{l: s.ledgerService}
+
+	ctx := context.Background()
+	buyerAddr := "0xdddd000000000000000000000000000000000055"
+	sellerAddr := "0xdddd000000000000000000000000000000000056"
+
+	// Fund buyer
+	_ = s.ledger.StoreRef().Credit(ctx, buyerAddr, "100.000000", "dep_s1", "test")
+
+	// Hold
+	err := adapter.Hold(ctx, buyerAddr, "5.000000", "stream_settle_1")
+	if err != nil {
+		t.Fatalf("Hold failed: %v", err)
+	}
+
+	// SettleHold
+	err = adapter.SettleHold(ctx, buyerAddr, sellerAddr, "5.000000", "stream_settle_1")
+	if err != nil {
+		t.Fatalf("SettleHold failed: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// gatewayLedgerAdapter — SettleHold, SettleHoldWithFee
+// ---------------------------------------------------------------------------
+
+func TestGatewayLedgerAdapter_SettleHold(t *testing.T) {
+	s := newTestServer(t)
+	adapter := &gatewayLedgerAdapter{l: s.ledgerService}
+
+	ctx := context.Background()
+	buyerAddr := "0xdddd000000000000000000000000000000000057"
+	sellerAddr := "0xdddd000000000000000000000000000000000058"
+
+	// Fund buyer
+	_ = s.ledger.StoreRef().Credit(ctx, buyerAddr, "100.000000", "dep_g1", "test")
+
+	// Hold
+	err := adapter.Hold(ctx, buyerAddr, "5.000000", "gw_settle_1")
+	if err != nil {
+		t.Fatalf("Hold failed: %v", err)
+	}
+
+	// SettleHold
+	err = adapter.SettleHold(ctx, buyerAddr, sellerAddr, "5.000000", "gw_settle_1")
+	if err != nil {
+		t.Fatalf("SettleHold failed: %v", err)
+	}
+}
+
+func TestGatewayLedgerAdapter_SettleHoldWithFee(t *testing.T) {
+	s := newTestServer(t)
+	adapter := &gatewayLedgerAdapter{l: s.ledgerService}
+
+	ctx := context.Background()
+	buyerAddr := "0xdddd000000000000000000000000000000000059"
+	sellerAddr := "0xdddd000000000000000000000000000000000060"
+	platformAddr := "0xdddd000000000000000000000000000000000061"
+
+	// Fund buyer
+	_ = s.ledger.StoreRef().Credit(ctx, buyerAddr, "100.000000", "dep_gf1", "test")
+
+	// Hold (within per-tx limit)
+	err := adapter.Hold(ctx, buyerAddr, "4.000000", "gw_fee_1")
+	if err != nil {
+		t.Fatalf("Hold failed: %v", err)
+	}
+
+	// SettleHoldWithFee
+	err = adapter.SettleHoldWithFee(ctx, buyerAddr, sellerAddr, "3.500000", platformAddr, "0.500000", "gw_fee_1")
+	if err != nil {
+		t.Fatalf("SettleHoldWithFee failed: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// kyaReputationAdapter — non-nil provider path (via registry)
+// ---------------------------------------------------------------------------
+
+func TestKyaReputationAdapter_WithProvider(t *testing.T) {
+	s := newTestServer(t)
+	// Register an agent so the reputation provider has data
+	addr := "0xaaaa000000000000000000000000000000000071"
+	registerAgent(t, s, addr, "RepAdapter")
+
+	repProvider := reputation.NewRegistryProvider(s.registry)
+	adapter := &kyaReputationAdapter{rep: repProvider}
+	ctx := context.Background()
+
+	// GetScore (non-nil rep path)
+	score, err := adapter.GetScore(ctx, addr)
+	if err != nil {
+		t.Fatalf("GetScore failed: %v", err)
+	}
+	if score < 0 {
+		t.Errorf("Expected non-negative score, got %v", score)
+	}
+
+	// GetSuccessRate
+	rate, err := adapter.GetSuccessRate(ctx, addr)
+	if err != nil {
+		t.Fatalf("GetSuccessRate failed: %v", err)
+	}
+	// New agent: 0 txns, success rate should be 0
+	if rate != 0 {
+		t.Logf("Success rate for new agent: %v", rate)
+	}
+
+	// GetDisputeRate
+	disputeRate, err := adapter.GetDisputeRate(ctx, addr)
+	if err != nil {
+		t.Fatalf("GetDisputeRate failed: %v", err)
+	}
+	if disputeRate < 0 {
+		t.Errorf("Expected non-negative dispute rate, got %v", disputeRate)
+	}
+
+	// GetTxCount
+	txCount, err := adapter.GetTxCount(ctx, addr)
+	if err != nil {
+		t.Fatalf("GetTxCount failed: %v", err)
+	}
+	if txCount < 0 {
+		t.Errorf("Expected non-negative tx count, got %v", txCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// adminWSStateProvider
+// ---------------------------------------------------------------------------
+
+func TestAdminWSStateProvider_WithHub(t *testing.T) {
+	s := newTestServer(t)
+	provider := &adminWSStateProvider{hub: s.realtimeHub}
+
+	state := provider.AdminState(context.Background())
+	if state == nil {
+		t.Fatal("Expected non-nil state")
+	}
+	if _, ok := state["connectedClients"]; !ok {
+		t.Error("Expected 'connectedClients' in state")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// adminDBStateProvider — db is nil in test server, but verify code path
+// ---------------------------------------------------------------------------
+
+func TestAdminDBStateProvider(t *testing.T) {
+	// We can't easily get a sql.DB in test mode, but we verify the type
+	// exists and test the happy path when db is available.
+	// For now, test with a nil-guard: the server handles nil db gracefully.
+	s := newTestServer(t)
+	if s.db != nil {
+		provider := &adminDBStateProvider{db: s.db}
+		state := provider.AdminState(context.Background())
+		if state == nil {
+			t.Fatal("Expected non-nil state")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// adminReconcileStateProvider
+// ---------------------------------------------------------------------------
+
+func TestAdminReconcileStateProvider_NilReport(t *testing.T) {
+	// reconcileRunner is nil in in-memory mode. Test the nil runner path.
+	s := newTestServer(t)
+	if s.reconcileRunner != nil {
+		provider := &adminReconcileStateProvider{runner: s.reconcileRunner}
+		state := provider.AdminState(context.Background())
+		if state == nil {
+			t.Fatal("Expected non-nil state")
+		}
+		if state["last_run"] != nil {
+			t.Error("Expected nil last_run for fresh runner")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// initBillingProvider edge cases
+// ---------------------------------------------------------------------------
+
+func TestInitBillingProvider_NoStripeKey(t *testing.T) {
+	cfg := testConfig()
+	cfg.StripeSecretKey = ""
+	provider := initBillingProvider(cfg, nil)
+	if provider == nil {
+		t.Fatal("Expected non-nil noop provider")
+	}
+}
+
+func TestInitBillingProvider_WithStripeKey(t *testing.T) {
+	cfg := testConfig()
+	cfg.StripeSecretKey = "sk_test_fake"
+	cfg.StripePriceStarterID = "price_starter"
+	cfg.StripePriceGrowthID = "price_growth"
+	cfg.StripePriceEnterpriseID = "price_enterprise"
+	provider := initBillingProvider(cfg, nil)
+	if provider == nil {
+		t.Fatal("Expected non-nil stripe provider")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// billingProviderName
+// ---------------------------------------------------------------------------
+
+func TestBillingProviderName_Stripe(t *testing.T) {
+	cfg := testConfig()
+	cfg.StripeSecretKey = "sk_test_fake"
+	if got := billingProviderName(cfg); got != "stripe" {
+		t.Errorf("Expected 'stripe', got %q", got)
+	}
+}
+
+// readinessHandler full path requires real timers (Postgres mode only).
+
+// ---------------------------------------------------------------------------
+// Gzip WriteString coverage through the full handler path
+// ---------------------------------------------------------------------------
+
+func TestGzipMiddleware_WriteStringPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(gzipMiddleware())
+	router.GET("/big", func(c *gin.Context) {
+		// gin's c.String internally calls WriteString
+		c.String(200, strings.Repeat("a long response body ", 200))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/big", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	router.ServeHTTP(w, req)
+
+	if w.Header().Get("Content-Encoding") != "gzip" {
+		t.Error("Expected gzip encoding")
+	}
+
+	reader, err := gzip.NewReader(w.Body)
+	if err != nil {
+		t.Fatalf("Failed to create gzip reader: %v", err)
+	}
+	defer reader.Close()
+
+	body, _ := io.ReadAll(reader)
+	if !strings.Contains(string(body), "a long response body") {
+		t.Error("Expected decompressed body content")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional route tests for dashboard/intelligence endpoints
+// ---------------------------------------------------------------------------
+
+func TestDashboardRouteRegistered(t *testing.T) {
+	s := newTestServer(t)
+
+	routes := s.router.Routes()
+	routeSet := make(map[string]bool)
+	for _, route := range routes {
+		routeSet[route.Method+":"+route.Path] = true
+	}
+
+	dashRoutes := []string{
+		"GET:/v1/timeline",
+		"GET:/v1/network/stats",
+		"GET:/v1/network/stats/enhanced",
+		"GET:/v1/feed",
+		"GET:/v1/services",
+	}
+
+	for _, e := range dashRoutes {
+		if !routeSet[e] {
+			t.Errorf("Route %s not registered", e)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Verify transactions can be made and timeline is non-empty
+// ---------------------------------------------------------------------------
+
+func TestGetTimeline_WithTransactions(t *testing.T) {
+	s := newTestServer(t)
+
+	// Register two agents
+	fromAddr := "0xaaaa000000000000000000000000000000000081"
+	toAddr := "0xaaaa000000000000000000000000000000000082"
+	fromKey := registerAgent(t, s, fromAddr, "TimelineSender")
+	_ = registerAgent(t, s, toAddr, "TimelineRecv")
+
+	// Fund the sender
+	_ = s.ledger.StoreRef().Credit(context.Background(), fromAddr, "100.000000", "dep_tl", "test")
+
+	// Send a transaction
+	txBody := `{"to":"` + toAddr + `","amount":"1.000000","service_type":"test","reference":"tl_ref1"}`
+	w := httptest.NewRecorder()
+	req := authedRequest("POST", "/v1/transactions", fromKey, txBody)
+	s.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK && w.Code != http.StatusCreated {
+		t.Logf("Transaction response: %d %s", w.Code, w.Body.String())
+	}
+
+	// Get timeline
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "/v1/timeline", nil)
+	s.router.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", w2.Code, w2.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Register agent — description and metadata edge cases
+// ---------------------------------------------------------------------------
+
+func TestRegisterAgent_WithDescription(t *testing.T) {
+	s := newTestServer(t)
+
+	body := `{"address":"0xaaaa000000000000000000000000000000000091","name":"DescBot","description":"A test bot with a description"}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	s.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("Expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Health handler — no DB (in-memory) path
+// ---------------------------------------------------------------------------
+
+func TestHealthHandler_NoDB_AllHealthy(t *testing.T) {
+	s := newTestServer(t)
+	// In-memory server: db is nil, should skip DB check
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/health", nil)
+	s.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d", w.Code)
+	}
+
+	var resp HealthResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+	if resp.Status != "healthy" {
+		t.Errorf("Expected 'healthy', got %q", resp.Status)
+	}
+}
+
+// --- merged from server_coverage_test.go ---
+
+// ---------------------------------------------------------------------------
+// gzipMiddleware
+// ---------------------------------------------------------------------------
+
+func TestGzipMiddleware_CompressesWhenAccepted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(gzipMiddleware())
+	router.GET("/test", func(c *gin.Context) {
+		// Write enough data to be worth compressing
+		c.String(200, strings.Repeat("hello world ", 100))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d", w.Code)
+	}
+
+	if w.Header().Get("Content-Encoding") != "gzip" {
+		t.Error("Expected Content-Encoding: gzip")
+	}
+
+	// Verify the body is valid gzip
+	reader, err := gzip.NewReader(w.Body)
+	if err != nil {
+		t.Fatalf("Failed to create gzip reader: %v", err)
+	}
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("Failed to read gzip body: %v", err)
+	}
+	if !strings.Contains(string(body), "hello world") {
+		t.Error("Expected decompressed body to contain 'hello world'")
+	}
+}
+
+func TestGzipMiddleware_SkipsWithoutAcceptEncoding(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(gzipMiddleware())
+	router.GET("/test", func(c *gin.Context) {
+		c.String(200, "hello")
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	// No Accept-Encoding header
+	router.ServeHTTP(w, req)
+
+	if w.Header().Get("Content-Encoding") == "gzip" {
+		t.Error("Should not gzip when Accept-Encoding is absent")
+	}
+	if w.Body.String() != "hello" {
+		t.Errorf("Expected 'hello', got %q", w.Body.String())
+	}
+}
+
+func TestGzipMiddleware_SkipsWebSocket(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(gzipMiddleware())
+	router.GET("/ws", func(c *gin.Context) {
+		c.String(200, "ws-response")
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/ws", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("Upgrade", "websocket")
+	router.ServeHTTP(w, req)
+
+	if w.Header().Get("Content-Encoding") == "gzip" {
+		t.Error("Should not gzip WebSocket upgrade requests")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// cacheControl middleware
+// ---------------------------------------------------------------------------
+
+func TestCacheControl_SetsHeader(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(cacheControl(60))
+	router.GET("/test", func(c *gin.Context) {
+		c.String(200, "ok")
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	router.ServeHTTP(w, req)
+
+	cc := w.Header().Get("Cache-Control")
+	if cc != "public, max-age=60" {
+		t.Errorf("Expected 'public, max-age=60', got %q", cc)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// timeoutMiddleware
+// ---------------------------------------------------------------------------
+
+func TestTimeoutMiddleware_SkipsWebSocket_Coverage(t *testing.T) {
+	s := newTestServer(t)
+
+	router := gin.New()
+	router.Use(s.timeoutMiddleware())
+	router.GET("/ws", func(c *gin.Context) {
+		// WebSocket upgrade requests should not have timeout applied
+		// Verify context does NOT have a deadline from timeout middleware
+		_, hasDeadline := c.Request.Context().Deadline()
+		if hasDeadline {
+			t.Error("WebSocket request should not have a deadline from timeout middleware")
+		}
+		c.String(200, "ok")
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/ws", nil)
+	req.Header.Set("Upgrade", "websocket")
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected 200, got %d", w.Code)
+	}
+}
+
+func TestTimeoutMiddleware_AppliesTimeout(t *testing.T) {
+	s := newTestServer(t)
+
+	router := gin.New()
+	router.Use(s.timeoutMiddleware())
+	router.GET("/test", func(c *gin.Context) {
+		// Verify context has a deadline
+		_, hasDeadline := c.Request.Context().Deadline()
+		if !hasDeadline {
+			t.Error("Expected context to have a deadline from timeout middleware")
+		}
+		c.String(200, "ok")
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected 200, got %d", w.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// requestIDMiddleware
+// ---------------------------------------------------------------------------
+
+func TestRequestIDMiddleware_GeneratesID(t *testing.T) {
+	s := newTestServer(t)
+
+	router := gin.New()
+	router.Use(s.requestIDMiddleware())
+	router.GET("/test", func(c *gin.Context) {
+		c.String(200, "ok")
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	router.ServeHTTP(w, req)
+
+	xReqID := w.Header().Get("X-Request-ID")
+	if xReqID == "" {
+		t.Error("Expected X-Request-ID header to be set")
+	}
+}
+
+func TestRequestIDMiddleware_PreservesExistingID(t *testing.T) {
+	s := newTestServer(t)
+
+	router := gin.New()
+	router.Use(s.requestIDMiddleware())
+	router.GET("/test", func(c *gin.Context) {
+		c.String(200, "ok")
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Request-ID", "my-custom-id")
+	router.ServeHTTP(w, req)
+
+	xReqID := w.Header().Get("X-Request-ID")
+	if xReqID != "my-custom-id" {
+		t.Errorf("Expected preserved request ID 'my-custom-id', got %q", xReqID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// loggingMiddleware
+// ---------------------------------------------------------------------------
+
+func TestLoggingMiddleware_DoesNotPanic(t *testing.T) {
+	s := newTestServer(t)
+
+	router := gin.New()
+	router.Use(s.loggingMiddleware())
+	router.GET("/test", func(c *gin.Context) {
+		c.String(200, "ok")
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected 200, got %d", w.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HealthResponse type
+// ---------------------------------------------------------------------------
+
+func TestHealthResponse_Serialization(t *testing.T) {
+	resp := HealthResponse{
+		Status:  "healthy",
+		Version: "0.1.0",
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+	if !strings.Contains(string(data), "healthy") {
+		t.Error("Expected 'healthy' in serialized response")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Router accessor
+// ---------------------------------------------------------------------------
+
+func TestServer_Router(t *testing.T) {
+	s := newTestServer(t)
+	r := s.Router()
+	if r == nil {
+		t.Error("Expected non-nil router")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// makeForensicsConsumer, makeChargebackConsumer, makeWebhookConsumer
+// ---------------------------------------------------------------------------
+
+func TestMakeForensicsConsumer_NilService_Coverage(t *testing.T) {
+	s := newTestServer(t)
+	s.forensicsService = nil
+
+	handler := s.makeForensicsConsumer()
+	err := handler(nil, nil)
+	if err != nil {
+		t.Errorf("Expected nil error for nil forensics service, got: %v", err)
+	}
+}
+
+func TestMakeChargebackConsumer_NilService_Coverage(t *testing.T) {
+	s := newTestServer(t)
+	s.chargebackService = nil
+
+	handler := s.makeChargebackConsumer()
+	err := handler(nil, nil)
+	if err != nil {
+		t.Errorf("Expected nil error for nil chargeback service, got: %v", err)
+	}
+}
+
+func TestMakeWebhookConsumer_NilWebhooks_Coverage(t *testing.T) {
+	s := newTestServer(t)
+	s.webhooks = nil
+
+	handler := s.makeWebhookConsumer()
+	err := handler(nil, nil)
+	if err != nil {
+		t.Errorf("Expected nil error for nil webhooks, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// tenantRateLimitMiddleware — nil stores
+// ---------------------------------------------------------------------------
+
+func TestTenantRateLimitMiddleware_NilStores(t *testing.T) {
+	s := newTestServer(t)
+	// tenantStore is nil in test config — middleware should be a passthrough
+	mw := s.tenantRateLimitMiddleware()
+
+	router := gin.New()
+	router.Use(mw)
+	router.GET("/test", func(c *gin.Context) {
+		c.String(200, "ok")
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected 200 for nil tenant store, got %d", w.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// WithLogger option
+// ---------------------------------------------------------------------------
+
+func TestWithLogger(t *testing.T) {
+	s := newTestServer(t)
+	origLogger := s.logger
+
+	// Re-create to check WithLogger actually sets it
+	if origLogger == nil {
+		t.Error("Expected non-nil logger on server")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Escrow handler routes return expected status for unauthenticated requests
+// ---------------------------------------------------------------------------
+
+func TestEscrowRoutes_RequireAuth(t *testing.T) {
+	s := newTestServer(t)
+
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{"POST", "/v1/escrow"},
+		{"POST", "/v1/escrow/esc_123/deliver"},
+		{"POST", "/v1/escrow/esc_123/confirm"},
+		{"POST", "/v1/escrow/esc_123/dispute"},
+	}
+
+	for _, tt := range tests {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(tt.method, tt.path, nil)
+		s.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s: expected 401, got %d", tt.method, tt.path, w.Code)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Workflow/stream routes exist
+// ---------------------------------------------------------------------------
+
+func TestWorkflowAndStreamRoutesRegistered(t *testing.T) {
+	s := newTestServer(t)
+
+	routes := s.router.Routes()
+	routeSet := make(map[string]bool)
+	for _, route := range routes {
+		routeSet[route.Method+":"+route.Path] = true
+	}
+
+	expected := []string{
+		"POST:/v1/workflows",
+		"GET:/v1/workflows/:id",
+		"POST:/v1/streams",
+		"GET:/v1/streams/:id",
+	}
+
+	for _, e := range expected {
+		if !routeSet[e] {
+			t.Errorf("Route %s not registered", e)
+		}
 	}
 }

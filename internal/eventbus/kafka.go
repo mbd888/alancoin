@@ -393,10 +393,7 @@ func (b *KafkaBus) IsHealthy() bool {
 	}
 
 	threshold := int64(30_000) // 30 seconds
-	if (now - lastPub) > threshold {
-		return false
-	}
-	return true
+	return (now - lastPub) <= threshold
 }
 
 // Metrics returns operational statistics.
