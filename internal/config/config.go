@@ -83,7 +83,25 @@ type Config struct {
 	CircuitBreakerDuration  time.Duration // How long circuit stays open
 	DrainDeadline           time.Duration // Max time to wait for in-flight requests during shutdown
 	EventBusBufferSize      int           // Event bus channel buffer size
+	EventBusBackend         string        // "memory" (default) or "kafka"
 	RateLimitBurst          int           // Token bucket burst size for rate limiter
+
+	// Kafka (only used when EventBusBackend=kafka)
+	KafkaBrokers       []string // Broker addresses
+	KafkaConsumerGroup string   // Consumer group prefix
+	KafkaClientID      string   // Client ID for this node
+	KafkaTopicPrefix   string   // Topic name prefix
+	KafkaTLSEnabled    bool
+	KafkaTLSCert       string
+	KafkaTLSKey        string
+	KafkaTLSCA         string
+	KafkaSASLEnabled   bool
+	KafkaSASLMechanism string // "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"
+	KafkaSASLUsername  string
+	KafkaSASLPassword  string
+
+	// CDC (Change Data Capture)
+	CDCEnabled bool // Enable ledger CDC watcher
 
 	// Stripe billing
 	StripeSecretKey         string // Stripe secret key (sk_test_... or sk_live_...)
@@ -184,7 +202,23 @@ func Load() (*Config, error) {
 		CircuitBreakerDuration:  getEnvDuration("CB_DURATION", DefaultCircuitBreakerDuration),
 		DrainDeadline:           getEnvDuration("DRAIN_DEADLINE", DefaultDrainDeadline),
 		EventBusBufferSize:      int(getEnvInt64("EVENT_BUS_BUFFER_SIZE", int64(DefaultEventBusBufferSize))),
+		EventBusBackend:         getEnv("EVENTBUS_BACKEND", "memory"),
 		RateLimitBurst:          int(getEnvInt64("RATE_LIMIT_BURST", int64(DefaultRateLimitBurst))),
+
+		KafkaBrokers:       parseCSV(os.Getenv("KAFKA_BROKERS")),
+		KafkaConsumerGroup: getEnv("KAFKA_CONSUMER_GROUP", "alancoin"),
+		KafkaClientID:      getEnv("KAFKA_CLIENT_ID", "alancoin-1"),
+		KafkaTopicPrefix:   getEnv("KAFKA_TOPIC_PREFIX", "alancoin."),
+		KafkaTLSEnabled:    os.Getenv("KAFKA_TLS_ENABLED") == "true",
+		KafkaTLSCert:       os.Getenv("KAFKA_TLS_CERT"),
+		KafkaTLSKey:        os.Getenv("KAFKA_TLS_KEY"),
+		KafkaTLSCA:         os.Getenv("KAFKA_TLS_CA"),
+		KafkaSASLEnabled:   os.Getenv("KAFKA_SASL_ENABLED") == "true",
+		KafkaSASLMechanism: getEnv("KAFKA_SASL_MECHANISM", "PLAIN"),
+		KafkaSASLUsername:  os.Getenv("KAFKA_SASL_USERNAME"),
+		KafkaSASLPassword:  os.Getenv("KAFKA_SASL_PASSWORD"),
+
+		CDCEnabled: os.Getenv("CDC_ENABLED") == "true",
 
 		StripeSecretKey:         os.Getenv("STRIPE_SECRET_KEY"),
 		StripeWebhookSecret:     os.Getenv("STRIPE_WEBHOOK_SECRET"),
@@ -260,6 +294,14 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("PLATFORM_ADDRESS must be set to a real address in production")
 	}
 
+	// Event bus backend validation
+	if c.EventBusBackend != "" && c.EventBusBackend != "memory" && c.EventBusBackend != "kafka" {
+		return fmt.Errorf("EVENTBUS_BACKEND must be \"memory\" or \"kafka\", got %q", c.EventBusBackend)
+	}
+	if c.EventBusBackend == "kafka" && len(c.KafkaBrokers) == 0 {
+		return fmt.Errorf("KAFKA_BROKERS is required when EVENTBUS_BACKEND=kafka")
+	}
+
 	// Warn if production database connection doesn't use SSL
 	if c.IsProduction() && c.DatabaseURL != "" {
 		if !strings.Contains(c.DatabaseURL, "sslmode=require") &&
@@ -316,4 +358,19 @@ func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
 		}
 	}
 	return defaultValue
+}
+
+func parseCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

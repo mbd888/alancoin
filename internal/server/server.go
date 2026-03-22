@@ -131,7 +131,8 @@ type Server struct {
 	forensicsService       *forensics.Service     // Spend anomaly detection
 	intelligenceStore      intelligence.Store     // Unified agent intelligence profiles
 	intelligenceWorker     *intelligence.Worker   // Periodic intelligence computation
-	eventBus               *eventbus.MemoryBus    // Settlement event bus
+	eventBus               eventbus.Bus           // Settlement event bus (MemoryBus or KafkaBus)
+	eventBusMemory         *eventbus.MemoryBus    // Non-nil only when using MemoryBus (for DLQ admin endpoints)
 	db                     *sql.DB                // nil if using in-memory
 	router                 *gin.Engine
 	httpSrv                *http.Server
@@ -376,10 +377,40 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		}
 
 		// Event bus: replaces fire-and-forget goroutines with durable, batched processing.
-		s.eventBus = eventbus.NewMemoryBus(s.cfg.EventBusBufferSize, s.logger)
-		if db != nil {
-			s.eventBus.WithWAL(eventbus.NewWALStore(db, s.logger))
-			s.logger.Info("event bus WAL enabled (postgres)")
+		if s.cfg.EventBusBackend == "kafka" {
+			kafkaCfg := eventbus.KafkaConfig{
+				Brokers:       s.cfg.KafkaBrokers,
+				ConsumerGroup: s.cfg.KafkaConsumerGroup,
+				ClientID:      s.cfg.KafkaClientID,
+				TopicPrefix:   s.cfg.KafkaTopicPrefix,
+				TLSEnabled:    s.cfg.KafkaTLSEnabled,
+				TLSCert:       s.cfg.KafkaTLSCert,
+				TLSKey:        s.cfg.KafkaTLSKey,
+				TLSCA:         s.cfg.KafkaTLSCA,
+				SASLEnabled:   s.cfg.KafkaSASLEnabled,
+				SASLMechanism: s.cfg.KafkaSASLMechanism,
+				SASLUsername:  s.cfg.KafkaSASLUsername,
+				SASLPassword:  s.cfg.KafkaSASLPassword,
+				BatchSize:     100,
+				FlushInterval: 1000,
+				MaxRetries:    3,
+				BufferSize:    s.cfg.EventBusBufferSize,
+			}
+			kafkaBus, err := eventbus.NewKafkaBus(kafkaCfg, s.logger)
+			if err != nil {
+				return nil, fmt.Errorf("kafka bus init: %w", err)
+			}
+			s.eventBus = kafkaBus
+			s.logger.Info("event bus enabled (kafka)", "brokers", s.cfg.KafkaBrokers)
+		} else {
+			memBus := eventbus.NewMemoryBus(s.cfg.EventBusBufferSize, s.logger)
+			if db != nil {
+				memBus.WithWAL(eventbus.NewWALStore(db, s.logger))
+				s.logger.Info("event bus WAL enabled (postgres)")
+			}
+			s.eventBus = memBus
+			s.eventBusMemory = memBus
+			s.logger.Info("event bus enabled (in-memory, 10K buffer)")
 		}
 		s.eventBus.Subscribe(eventbus.TopicSettlement, "forensics", 50, time.Second,
 			s.makeForensicsConsumer())
@@ -388,7 +419,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.eventBus.Subscribe(eventbus.TopicSettlement, "webhooks", 20, 500*time.Millisecond,
 			s.makeWebhookConsumer())
 		s.gatewayService.WithEventBus(&eventBusGatewayAdapter{s.eventBus})
-		s.logger.Info("event bus enabled (in-memory, 10K buffer, 3 consumers)")
+		s.logger.Info("event bus: 3 consumers subscribed")
 
 		// Wire revenue accumulator into all payment paths (GAP-1 fix).
 		// Records seller revenue from gateway, escrow, streams for flywheel
@@ -601,8 +632,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			s.gatewayService.WithBudgetPreFlight(&budgetPreFlightAdapter{s.chargebackService})
 		}
 
-		// Event bus (in-memory mode).
-		s.eventBus = eventbus.NewMemoryBus(s.cfg.EventBusBufferSize, s.logger)
+		// Event bus (in-memory mode — no DB, always MemoryBus).
+		memBus := eventbus.NewMemoryBus(s.cfg.EventBusBufferSize, s.logger)
+		s.eventBus = memBus
+		s.eventBusMemory = memBus
 		s.eventBus.Subscribe(eventbus.TopicSettlement, "forensics", 50, time.Second,
 			s.makeForensicsConsumer())
 		s.eventBus.Subscribe(eventbus.TopicSettlement, "chargeback", 50, time.Second,
@@ -1301,16 +1334,20 @@ func (s *Server) setupRoutes() {
 				c.JSON(200, gin.H{
 					"metrics": s.eventBus.Metrics(),
 					"healthy": s.eventBus.IsHealthy(),
+					"backend": s.cfg.EventBusBackend,
 				})
 			})
-			adminOps.GET("/admin/eventbus/dlq", func(c *gin.Context) {
-				dlq := s.eventBus.DeadLetterQueue()
-				c.JSON(200, gin.H{"events": dlq, "count": len(dlq)})
-			})
-			adminOps.POST("/admin/eventbus/dlq/replay", func(c *gin.Context) {
-				replayed := s.eventBus.ReplayDeadLetters(c.Request.Context())
-				c.JSON(200, gin.H{"replayed": replayed})
-			})
+			// DLQ endpoints only available with MemoryBus (Kafka DLQ is a separate topic)
+			if s.eventBusMemory != nil {
+				adminOps.GET("/admin/eventbus/dlq", func(c *gin.Context) {
+					dlq := s.eventBusMemory.DeadLetterQueue()
+					c.JSON(200, gin.H{"events": dlq, "count": len(dlq)})
+				})
+				adminOps.POST("/admin/eventbus/dlq/replay", func(c *gin.Context) {
+					replayed := s.eventBusMemory.ReplayDeadLetters(c.Request.Context())
+					c.JSON(200, gin.H{"replayed": replayed})
+				})
+			}
 		}
 	}
 
@@ -1900,6 +1937,13 @@ func (s *Server) Run(ctx context.Context) error {
 	// Start event bus (settlement event consumers)
 	if s.eventBus != nil {
 		go s.eventBus.Start(runCtx)
+	}
+
+	// Start CDC watcher (ledger → event bus)
+	if s.db != nil && s.eventBus != nil && s.cfg.CDCEnabled {
+		cdc := eventbus.NewCDC(s.db, s.eventBus, s.logger)
+		go cdc.Start(runCtx)
+		s.logger.Info("CDC watcher started (ledger → event bus)")
 	}
 
 	// Start materialized view refresher (5-minute interval)
@@ -3117,7 +3161,7 @@ func (a *kyaTrustGateAdapter) CheckCounterpartyTrust(ctx context.Context, agentA
 // --- Event bus adapter ---
 
 type eventBusGatewayAdapter struct {
-	bus *eventbus.MemoryBus
+	bus eventbus.Bus
 }
 
 func (a *eventBusGatewayAdapter) PublishSettlement(ctx context.Context, sessionID, tenantID, buyerAddr, sellerAddr, amount, fee, serviceType, serviceID, reference string, latencyMs int64) error {
