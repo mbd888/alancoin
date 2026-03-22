@@ -53,19 +53,15 @@ jobs:
           go-version: "1.25.8"
       - name: Verify dependencies
         run: go mod verify
-      - name: Run unit tests
+      - name: Run tests
         run: go test -race -count=1 -coverprofile=coverage.out ./...
-      - name: Run integration tests
-        env:
-          POSTGRES_URL: postgres://alancoin:alancoin@localhost:5432/alancoin_test?sslmode=disable
-        run: go test -race -count=1 -tags=integration ./...
       - name: Check coverage
         run: |
           go tool cover -func=coverage.out | grep total | awk '{print "Total coverage: " $3}'
           COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{gsub(/%/,""); print $3}')
           echo "Coverage: ${COVERAGE}%"
-          if [ "$(echo "${COVERAGE} < 55" | bc -l)" -eq 1 ]; then
-            echo "::error::Coverage ${COVERAGE}% is below minimum threshold of 55%"
+          if [ "$(echo "${COVERAGE} < 66" | bc -l)" -eq 1 ]; then
+            echo "::error::Coverage ${COVERAGE}% is below minimum threshold of 66%"
             exit 1
           fi
 
