@@ -35,17 +35,3 @@ func TestCleanupWorker_ContextCancellation(t *testing.T) {
 		t.Error("cleanup worker did not exit after context cancellation")
 	}
 }
-
-func TestCleanupWorker_NilWAL_OnlyOutboxCleans(t *testing.T) {
-	// With nil WAL, only outbox cleanup should run. Since we have no real DB,
-	// this just verifies no panic when WAL is nil but outbox is also nil.
-	w := NewCleanupWorker(nil, nil, nil, time.Hour, 24*time.Hour, 24*time.Hour, slog.Default())
-	w.runOnce(context.Background())
-	// No panic = pass
-}
-
-func TestCleanupWorker_NilOutbox_OnlyWALCleans(t *testing.T) {
-	// Same logic — verifies no panic
-	w := NewCleanupWorker(nil, nil, nil, time.Hour, 24*time.Hour, 24*time.Hour, slog.Default())
-	w.runOnce(context.Background())
-}

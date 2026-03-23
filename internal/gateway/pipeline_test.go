@@ -146,6 +146,18 @@ func TestSumStepAmounts_Empty(t *testing.T) {
 	}
 }
 
+func TestSumStepAmounts_InvalidAmount(t *testing.T) {
+	results := []PipelineStepResult{
+		{AmountPaid: "1.000000"},
+		{AmountPaid: "invalid"},
+		{AmountPaid: "2.000000"},
+	}
+	total := sumStepAmounts(results)
+	if total != "3.000000" {
+		t.Fatalf("expected 3.000000 (skip invalid), got %s", total)
+	}
+}
+
 func TestSubstitutePrev_ComplexValueBecomesJSON(t *testing.T) {
 	params := map[string]interface{}{"data": "$prev.nested"}
 	prev := map[string]interface{}{

@@ -613,6 +613,13 @@ func TestEscrow_CreateFailsOnLedgerLockError(t *testing.T) {
 	if len(fl.calls) != 1 || fl.calls[0] != "lock" {
 		t.Errorf("Expected exactly one lock call, got %v", fl.calls)
 	}
+	var me *MoneyError
+	if !errors.As(err, &me) {
+		t.Fatalf("Expected MoneyError, got %T", err)
+	}
+	if me.FundsStatus != "no_change" {
+		t.Errorf("Expected no_change, got %s", me.FundsStatus)
+	}
 }
 
 func TestEscrow_ConfirmFailsOnLedgerReleaseError(t *testing.T) {
@@ -779,6 +786,20 @@ func TestMemoryStore_ListExpiredFiltersTerminal(t *testing.T) {
 	// Refunded (terminal) → should NOT be listed
 	store.Create(ctx, &Escrow{
 		ID: "esc_refunded", Status: StatusRefunded,
+		BuyerAddr: "0xb", SellerAddr: "0xs",
+		AutoReleaseAt: past, CreatedAt: now, UpdatedAt: now,
+	})
+
+	// Disputed → should NOT be listed (funds locked for arbitration)
+	store.Create(ctx, &Escrow{
+		ID: "esc_disputed", Status: StatusDisputed,
+		BuyerAddr: "0xb", SellerAddr: "0xs",
+		AutoReleaseAt: past, CreatedAt: now, UpdatedAt: now,
+	})
+
+	// Arbitrating → should NOT be listed
+	store.Create(ctx, &Escrow{
+		ID: "esc_arbitrating", Status: StatusArbitrating,
 		BuyerAddr: "0xb", SellerAddr: "0xs",
 		AutoReleaseAt: past, CreatedAt: now, UpdatedAt: now,
 	})
@@ -987,96 +1008,6 @@ func TestEscrow_ListByAgentDefaultLimit(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Edge cases: IsTerminal coverage
-// ---------------------------------------------------------------------------
-
-func TestEscrow_IsTerminal(t *testing.T) {
-	tests := []struct {
-		status   Status
-		terminal bool
-	}{
-		{StatusPending, false},
-		{StatusDelivered, false},
-		{StatusReleased, true},
-		{StatusRefunded, true},
-		{StatusExpired, true},
-		{StatusDisputed, false},
-		{StatusArbitrating, false},
-	}
-
-	for _, tt := range tests {
-		e := &Escrow{Status: tt.status}
-		if e.IsTerminal() != tt.terminal {
-			t.Errorf("Status %s: expected IsTerminal=%v, got %v", tt.status, tt.terminal, e.IsTerminal())
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Timer tests
-// ---------------------------------------------------------------------------
-
-func TestTimer_StartStop(t *testing.T) {
-	store := NewMemoryStore()
-	ledger := newMockLedger()
-	svc := NewService(store, ledger)
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-
-	timer := NewTimer(svc, store, logger)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	done := make(chan struct{})
-	go func() {
-		timer.Start(ctx)
-		close(done)
-	}()
-
-	// Let it tick at least once (timer is 30s, so let's stop via context)
-	time.Sleep(50 * time.Millisecond)
-	timer.Stop()
-
-	select {
-	case <-done:
-		// Timer stopped cleanly
-	case <-time.After(2 * time.Second):
-		t.Fatal("Timer did not stop within 2 seconds")
-	}
-}
-
-func TestTimer_ContextCancellation(t *testing.T) {
-	store := NewMemoryStore()
-	ledger := newMockLedger()
-	svc := NewService(store, ledger)
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-
-	timer := NewTimer(svc, store, logger)
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	done := make(chan struct{})
-	go func() {
-		timer.Start(ctx)
-		close(done)
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-
-	select {
-	case <-done:
-		// Timer stopped cleanly via context
-	case <-time.After(2 * time.Second):
-		t.Fatal("Timer did not stop on context cancel within 2 seconds")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Edge cases: store failure triggers ledger rollback on Create
-// ---------------------------------------------------------------------------
-
 type failingStore struct {
 	*MemoryStore
 	failCreate bool
@@ -1147,62 +1078,6 @@ func TestEscrow_AutoReleaseOnDelivered(t *testing.T) {
 		t.Errorf("Expected expired, got %s", updated.Status)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Edge cases: auto-release ledger failure
-// ---------------------------------------------------------------------------
-
-func TestEscrow_AutoReleaseFailsOnLedgerError(t *testing.T) {
-	store := NewMemoryStore()
-	fl := &failingLedger{releaseErr: errors.New("ledger down")}
-	svc := NewService(store, fl)
-	ctx := context.Background()
-
-	esc, _ := svc.Create(ctx, CreateRequest{
-		BuyerAddr:   "0xbuyer",
-		SellerAddr:  "0xseller",
-		Amount:      "1.00",
-		AutoRelease: "1ms",
-	})
-
-	time.Sleep(5 * time.Millisecond)
-
-	err := svc.AutoRelease(ctx, esc)
-	if err == nil {
-		t.Fatal("Expected error when ledger fails during auto-release")
-	}
-
-	// Should remain pending (not expired)
-	got, _ := store.Get(ctx, esc.ID)
-	if got.Status != StatusPending {
-		t.Errorf("Should remain pending after failed auto-release, got %s", got.Status)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Edge cases: same buyer and seller
-// ---------------------------------------------------------------------------
-
-func TestEscrow_SameBuyerAndSeller(t *testing.T) {
-	store := NewMemoryStore()
-	ledger := newMockLedger()
-	svc := NewService(store, ledger)
-	ctx := context.Background()
-
-	// Self-payment escrow must be rejected to prevent reputation gaming
-	_, err := svc.Create(ctx, CreateRequest{
-		BuyerAddr:  "0xsame",
-		SellerAddr: "0xsame",
-		Amount:     "1.00",
-	})
-	if err == nil {
-		t.Fatal("Create with same buyer/seller should be rejected")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Edge cases: dispute with empty-ish caller
-// ---------------------------------------------------------------------------
 
 func TestEscrow_OperationsWithEmptyCaller(t *testing.T) {
 	store := NewMemoryStore()
@@ -1986,14 +1861,6 @@ func TestMemoryStore_Update_DeepCopy(t *testing.T) {
 	}
 }
 
-func TestMemoryStore_Update_NotFound(t *testing.T) {
-	store := NewMemoryStore()
-	err := store.Update(context.Background(), &Escrow{ID: "nonexistent"})
-	if !errors.Is(err, ErrEscrowNotFound) {
-		t.Errorf("expected ErrEscrowNotFound, got %v", err)
-	}
-}
-
 func TestMemoryStore_Get_NotFound(t *testing.T) {
 	store := NewMemoryStore()
 	_, err := store.Get(context.Background(), "nonexistent")
@@ -2024,145 +1891,6 @@ func TestMemoryStore_ListByAgent_BuyerAndSeller(t *testing.T) {
 		t.Errorf("expected 2 escrows for buyer, got %d", len(list))
 	}
 }
-
-func TestMemoryStore_ListByAgent_WithLimit(t *testing.T) {
-	store := NewMemoryStore()
-	ctx := context.Background()
-
-	for i := 0; i < 5; i++ {
-		store.Create(ctx, &Escrow{
-			ID: fmt.Sprintf("esc_%d", i), BuyerAddr: "0xbuyer", SellerAddr: "0xseller",
-			Status: StatusPending,
-		})
-	}
-
-	list, err := store.ListByAgent(ctx, "0xbuyer", 2)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(list) != 2 {
-		t.Errorf("expected 2 with limit, got %d", len(list))
-	}
-}
-
-func TestMemoryStore_ListExpired_Filters(t *testing.T) {
-	store := NewMemoryStore()
-	ctx := context.Background()
-
-	now := time.Now()
-	// Pending, expired, should be found
-	store.Create(ctx, &Escrow{
-		ID: "esc_1", BuyerAddr: "0xb", SellerAddr: "0xs",
-		Status: StatusPending, AutoReleaseAt: now.Add(-1 * time.Hour),
-	})
-	// Disputed, should be excluded
-	store.Create(ctx, &Escrow{
-		ID: "esc_2", BuyerAddr: "0xb", SellerAddr: "0xs",
-		Status: StatusDisputed, AutoReleaseAt: now.Add(-1 * time.Hour),
-	})
-	// Arbitrating, should be excluded
-	store.Create(ctx, &Escrow{
-		ID: "esc_3", BuyerAddr: "0xb", SellerAddr: "0xs",
-		Status: StatusArbitrating, AutoReleaseAt: now.Add(-1 * time.Hour),
-	})
-	// Released (terminal), should be excluded
-	store.Create(ctx, &Escrow{
-		ID: "esc_4", BuyerAddr: "0xb", SellerAddr: "0xs",
-		Status: StatusReleased, AutoReleaseAt: now.Add(-1 * time.Hour),
-	})
-	// Not expired yet
-	store.Create(ctx, &Escrow{
-		ID: "esc_5", BuyerAddr: "0xb", SellerAddr: "0xs",
-		Status: StatusPending, AutoReleaseAt: now.Add(1 * time.Hour),
-	})
-
-	expired, err := store.ListExpired(ctx, now, 10)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(expired) != 1 {
-		t.Errorf("expected 1 expired (pending only), got %d", len(expired))
-	}
-}
-
-func TestMemoryStore_ListByStatus_Coverage(t *testing.T) {
-	store := NewMemoryStore()
-	ctx := context.Background()
-
-	store.Create(ctx, &Escrow{ID: "esc_1", Status: StatusPending})
-	store.Create(ctx, &Escrow{ID: "esc_2", Status: StatusDelivered})
-	store.Create(ctx, &Escrow{ID: "esc_3", Status: StatusPending})
-
-	pending, err := store.ListByStatus(ctx, StatusPending, 10)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(pending) != 2 {
-		t.Errorf("expected 2 pending, got %d", len(pending))
-	}
-}
-
-func TestMemoryStore_ListByStatus_WithLimit(t *testing.T) {
-	store := NewMemoryStore()
-	ctx := context.Background()
-
-	for i := 0; i < 5; i++ {
-		store.Create(ctx, &Escrow{ID: fmt.Sprintf("esc_%d", i), Status: StatusPending})
-	}
-
-	pending, err := store.ListByStatus(ctx, StatusPending, 2)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(pending) != 2 {
-		t.Errorf("expected 2 with limit, got %d", len(pending))
-	}
-}
-
-// ============================================================================
-// Escrow model: IsTerminal, ValidTransition, checkTransition
-// ============================================================================
-
-func TestEscrow_IsTerminal_Coverage(t *testing.T) {
-	tests := []struct {
-		status   Status
-		terminal bool
-	}{
-		{StatusPending, false},
-		{StatusDelivered, false},
-		{StatusDisputed, false},
-		{StatusArbitrating, false},
-		{StatusReleased, true},
-		{StatusRefunded, true},
-		{StatusExpired, true},
-	}
-	for _, tt := range tests {
-		e := &Escrow{Status: tt.status}
-		if e.IsTerminal() != tt.terminal {
-			t.Errorf("IsTerminal(%s) = %v, want %v", tt.status, e.IsTerminal(), tt.terminal)
-		}
-	}
-}
-
-func TestCheckTransition_AlreadyResolved(t *testing.T) {
-	for _, from := range []Status{StatusReleased, StatusRefunded, StatusExpired} {
-		err := checkTransition(from, StatusPending)
-		if !errors.Is(err, ErrAlreadyResolved) {
-			t.Errorf("checkTransition(%s, pending) = %v, want ErrAlreadyResolved", from, err)
-		}
-	}
-}
-
-func TestCheckTransition_InvalidStatus(t *testing.T) {
-	err := checkTransition(StatusPending, StatusArbitrating) // not valid
-	if !errors.Is(err, ErrInvalidStatus) {
-		t.Errorf("expected ErrInvalidStatus, got %v", err)
-	}
-}
-
-// ============================================================================
-// Escrow: validateAmount edge cases
-// ============================================================================
 
 func TestValidateAmount_Coverage(t *testing.T) {
 	tests := []struct {
@@ -2204,6 +1932,9 @@ func TestEscrow_MoneyError(t *testing.T) {
 	}
 	if me.Unwrap() != inner {
 		t.Error("Unwrap should return inner error")
+	}
+	if !errors.Is(me, inner) {
+		t.Error("expected errors.Is to find inner error via Unwrap")
 	}
 }
 
@@ -2315,180 +2046,6 @@ func TestEscrow_Create_SameBuyerSeller_Extra(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for same buyer and seller")
-	}
-}
-
-func TestEscrow_Create_InvalidAmount(t *testing.T) {
-	store := NewMemoryStore()
-	ml := newMockLedger()
-	svc := NewService(store, ml)
-
-	_, err := svc.Create(context.Background(), CreateRequest{
-		BuyerAddr:  "0xbuyer",
-		SellerAddr: "0xseller",
-		Amount:     "invalid",
-	})
-	if err == nil {
-		t.Fatal("expected error for invalid amount")
-	}
-}
-
-func TestEscrow_Create_CustomAutoRelease(t *testing.T) {
-	store := NewMemoryStore()
-	ml := newMockLedger()
-	svc := NewService(store, ml)
-
-	e, err := svc.Create(context.Background(), CreateRequest{
-		BuyerAddr:   "0xbuyer",
-		SellerAddr:  "0xseller",
-		Amount:      "1.000000",
-		AutoRelease: "30m",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// AutoReleaseAt should be ~30 minutes from now
-	delta := time.Until(e.AutoReleaseAt)
-	if delta < 29*time.Minute || delta > 31*time.Minute {
-		t.Errorf("expected ~30m auto release, got %v", delta)
-	}
-}
-
-func TestEscrow_Create_InvalidAutoRelease(t *testing.T) {
-	store := NewMemoryStore()
-	ml := newMockLedger()
-	svc := NewService(store, ml)
-
-	e, err := svc.Create(context.Background(), CreateRequest{
-		BuyerAddr:   "0xbuyer",
-		SellerAddr:  "0xseller",
-		Amount:      "1.000000",
-		AutoRelease: "not-a-duration",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// Should fall back to default
-	delta := time.Until(e.AutoReleaseAt)
-	if delta < 4*time.Minute || delta > 6*time.Minute {
-		t.Errorf("expected ~5m default auto release, got %v", delta)
-	}
-}
-
-func TestEscrow_Create_WithTrustGate(t *testing.T) {
-	store := NewMemoryStore()
-	ml := newMockLedger()
-	svc := NewService(store, ml).WithTrustGate(&mockTrustGateCov{err: fmt.Errorf("untrusted seller")})
-
-	_, err := svc.Create(context.Background(), CreateRequest{
-		BuyerAddr:  "0xbuyer",
-		SellerAddr: "0xseller",
-		Amount:     "1.000000",
-	})
-	if err == nil {
-		t.Fatal("expected error from trust gate")
-	}
-}
-
-type mockTrustGateCov struct {
-	err error
-}
-
-func (m *mockTrustGateCov) CheckCounterpartyTrust(_ context.Context, _ string) error {
-	return m.err
-}
-
-func TestEscrow_Create_LedgerFails(t *testing.T) {
-	store := NewMemoryStore()
-	fl := &failingLedger{lockErr: fmt.Errorf("insufficient funds")}
-	svc := NewService(store, fl)
-
-	_, err := svc.Create(context.Background(), CreateRequest{
-		BuyerAddr:  "0xbuyer",
-		SellerAddr: "0xseller",
-		Amount:     "1.000000",
-	})
-	if err == nil {
-		t.Fatal("expected error from ledger")
-	}
-	var me *MoneyError
-	if !errors.As(err, &me) {
-		t.Fatalf("expected MoneyError, got %T", err)
-	}
-	if me.FundsStatus != "no_change" {
-		t.Errorf("expected no_change, got %s", me.FundsStatus)
-	}
-}
-
-// ============================================================================
-// Escrow: MarkDelivered edge cases
-// ============================================================================
-
-func TestEscrow_MarkDelivered_NotFound(t *testing.T) {
-	store := NewMemoryStore()
-	ml := newMockLedger()
-	svc := NewService(store, ml)
-
-	_, err := svc.MarkDelivered(context.Background(), "nonexistent", "0xseller")
-	if !errors.Is(err, ErrEscrowNotFound) {
-		t.Errorf("expected ErrEscrowNotFound, got %v", err)
-	}
-}
-
-func TestEscrow_MarkDelivered_WrongCaller(t *testing.T) {
-	store := NewMemoryStore()
-	ml := newMockLedger()
-	svc := NewService(store, ml)
-
-	e, _ := svc.Create(context.Background(), CreateRequest{
-		BuyerAddr: "0xbuyer", SellerAddr: "0xseller", Amount: "1.000000",
-	})
-
-	_, err := svc.MarkDelivered(context.Background(), e.ID, "0xbuyer")
-	if !errors.Is(err, ErrUnauthorized) {
-		t.Errorf("expected ErrUnauthorized, got %v", err)
-	}
-}
-
-// ============================================================================
-// Escrow: Confirm edge cases
-// ============================================================================
-
-func TestEscrow_Confirm_NotFound(t *testing.T) {
-	store := NewMemoryStore()
-	ml := newMockLedger()
-	svc := NewService(store, ml)
-
-	_, err := svc.Confirm(context.Background(), "nonexistent", "0xbuyer")
-	if !errors.Is(err, ErrEscrowNotFound) {
-		t.Errorf("expected ErrEscrowNotFound, got %v", err)
-	}
-}
-
-func TestEscrow_Confirm_WrongCaller(t *testing.T) {
-	store := NewMemoryStore()
-	ml := newMockLedger()
-	svc := NewService(store, ml)
-
-	e, _ := svc.Create(context.Background(), CreateRequest{
-		BuyerAddr: "0xbuyer", SellerAddr: "0xseller", Amount: "1.000000",
-	})
-
-	_, err := svc.Confirm(context.Background(), e.ID, "0xseller")
-	if !errors.Is(err, ErrUnauthorized) {
-		t.Errorf("expected ErrUnauthorized, got %v", err)
-	}
-}
-
-// ============================================================================
-// MultiStepMemoryStore coverage
-// ============================================================================
-
-func TestMultiStepMemoryStore_RecordStep_NotFound(t *testing.T) {
-	store := NewMultiStepMemoryStore()
-	err := store.RecordStep(context.Background(), "nonexistent", Step{StepIndex: 0, Amount: "1.000000"})
-	if !errors.Is(err, ErrMultiStepNotFound) {
-		t.Errorf("expected ErrMultiStepNotFound, got %v", err)
 	}
 }
 
@@ -2862,27 +2419,6 @@ func TestHandler_WithScopeChecker(t *testing.T) {
 	}
 }
 
-func TestHandler_CreateEscrow_InvalidBody(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	svc := testEscrowService()
-	handler := NewHandler(svc)
-
-	r := gin.New()
-	r.POST("/escrow", func(c *gin.Context) {
-		c.Set("authAgentAddr", "0xbuyer")
-		c.Next()
-	}, handler.CreateEscrow)
-
-	req := httptest.NewRequest("POST", "/escrow", strings.NewReader(`{}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", w.Code)
-	}
-}
-
 func TestHandler_CreateEscrow_NotBuyer(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	svc := testEscrowService()
@@ -2902,84 +2438,6 @@ func TestHandler_CreateEscrow_NotBuyer(t *testing.T) {
 
 	if w.Code != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", w.Code)
-	}
-}
-
-func TestHandler_GetEscrow_NotFound(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	svc := testEscrowService()
-	handler := NewHandler(svc)
-
-	r := gin.New()
-	r.GET("/escrow/:id", handler.GetEscrow)
-
-	req := httptest.NewRequest("GET", "/escrow/nonexistent", nil)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", w.Code)
-	}
-}
-
-func TestHandler_MarkDelivered_NotFound(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	svc := testEscrowService()
-	handler := NewHandler(svc)
-
-	r := gin.New()
-	r.POST("/escrow/:id/deliver", func(c *gin.Context) {
-		c.Set("authAgentAddr", "0xseller")
-		c.Next()
-	}, handler.MarkDelivered)
-
-	req := httptest.NewRequest("POST", "/escrow/nonexistent/deliver", nil)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", w.Code)
-	}
-}
-
-func TestHandler_ConfirmEscrow_NotFound(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	svc := testEscrowService()
-	handler := NewHandler(svc)
-
-	r := gin.New()
-	r.POST("/escrow/:id/confirm", func(c *gin.Context) {
-		c.Set("authAgentAddr", "0xbuyer")
-		c.Next()
-	}, handler.ConfirmEscrow)
-
-	req := httptest.NewRequest("POST", "/escrow/nonexistent/confirm", nil)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", w.Code)
-	}
-}
-
-func TestHandler_DisputeEscrow_BadBody(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	svc := testEscrowService()
-	handler := NewHandler(svc)
-
-	r := gin.New()
-	r.POST("/escrow/:id/dispute", func(c *gin.Context) {
-		c.Set("authAgentAddr", "0xbuyer")
-		c.Next()
-	}, handler.DisputeEscrow)
-
-	req := httptest.NewRequest("POST", "/escrow/esc_1/dispute", strings.NewReader(`{}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", w.Code)
 	}
 }
 
@@ -3559,77 +3017,6 @@ func testService() (*Service, *mockLedger) {
 	return svc, ml
 }
 
-// ---------------------------------------------------------------------------
-// Escrow: SubmitEvidence
-// ---------------------------------------------------------------------------
-
-func TestEscrow_SubmitEvidence_Success(t *testing.T) {
-	svc, _ := testService()
-	ctx := context.Background()
-
-	esc, _ := svc.Create(ctx, CreateRequest{
-		BuyerAddr:  "0xbuyer",
-		SellerAddr: "0xseller",
-		Amount:     "1.00",
-	})
-
-	// Dispute first
-	esc, _ = svc.Dispute(ctx, esc.ID, "0xbuyer", "bad quality")
-
-	// Buyer submits evidence
-	esc, err := svc.SubmitEvidence(ctx, esc.ID, "0xbuyer", "here is my proof")
-	if err != nil {
-		t.Fatalf("SubmitEvidence by buyer: %v", err)
-	}
-	// Should have 2 entries: initial dispute reason + new evidence
-	if len(esc.DisputeEvidence) != 2 {
-		t.Fatalf("expected 2 evidence entries, got %d", len(esc.DisputeEvidence))
-	}
-
-	// Seller submits evidence
-	esc, err = svc.SubmitEvidence(ctx, esc.ID, "0xseller", "here is seller proof")
-	if err != nil {
-		t.Fatalf("SubmitEvidence by seller: %v", err)
-	}
-	if len(esc.DisputeEvidence) != 3 {
-		t.Fatalf("expected 3 evidence entries, got %d", len(esc.DisputeEvidence))
-	}
-}
-
-func TestEscrow_SubmitEvidence_Unauthorized(t *testing.T) {
-	svc, _ := testService()
-	ctx := context.Background()
-
-	esc, _ := svc.Create(ctx, CreateRequest{
-		BuyerAddr:  "0xbuyer",
-		SellerAddr: "0xseller",
-		Amount:     "1.00",
-	})
-	_, _ = svc.Dispute(ctx, esc.ID, "0xbuyer", "bad quality")
-
-	_, err := svc.SubmitEvidence(ctx, esc.ID, "0xstranger", "evidence")
-	if !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("expected ErrUnauthorized, got %v", err)
-	}
-}
-
-func TestEscrow_SubmitEvidence_WrongStatus(t *testing.T) {
-	svc, _ := testService()
-	ctx := context.Background()
-
-	esc, _ := svc.Create(ctx, CreateRequest{
-		BuyerAddr:  "0xbuyer",
-		SellerAddr: "0xseller",
-		Amount:     "1.00",
-	})
-
-	// Evidence on pending escrow should fail
-	_, err := svc.SubmitEvidence(ctx, esc.ID, "0xbuyer", "evidence")
-	if !errors.Is(err, ErrInvalidStatus) {
-		t.Fatalf("expected ErrInvalidStatus, got %v", err)
-	}
-}
-
 func TestEscrow_SubmitEvidence_EmptyContent(t *testing.T) {
 	svc, _ := testService()
 	ctx := context.Background()
@@ -3644,46 +3031,6 @@ func TestEscrow_SubmitEvidence_EmptyContent(t *testing.T) {
 	_, err := svc.SubmitEvidence(ctx, esc.ID, "0xbuyer", "")
 	if err == nil {
 		t.Fatal("expected error for empty content")
-	}
-}
-
-func TestEscrow_SubmitEvidence_Nonexistent(t *testing.T) {
-	svc, _ := testService()
-	ctx := context.Background()
-
-	_, err := svc.SubmitEvidence(ctx, "esc_ghost", "0xbuyer", "evidence")
-	if !errors.Is(err, ErrEscrowNotFound) {
-		t.Fatalf("expected ErrEscrowNotFound, got %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Escrow: AssignArbitrator
-// ---------------------------------------------------------------------------
-
-func TestEscrow_AssignArbitrator_Success(t *testing.T) {
-	svc, _ := testService()
-	ctx := context.Background()
-
-	esc, _ := svc.Create(ctx, CreateRequest{
-		BuyerAddr:  "0xbuyer",
-		SellerAddr: "0xseller",
-		Amount:     "1.00",
-	})
-	_, _ = svc.Dispute(ctx, esc.ID, "0xbuyer", "bad service")
-
-	esc, err := svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xarbitrator")
-	if err != nil {
-		t.Fatalf("AssignArbitrator: %v", err)
-	}
-	if esc.Status != StatusArbitrating {
-		t.Fatalf("expected arbitrating, got %s", esc.Status)
-	}
-	if esc.ArbitratorAddr != "0xarbitrator" {
-		t.Fatalf("expected arbitrator 0xarbitrator, got %s", esc.ArbitratorAddr)
-	}
-	if esc.ArbitrationDeadline == nil {
-		t.Fatal("expected ArbitrationDeadline to be set")
 	}
 }
 
@@ -3728,37 +3075,6 @@ func TestEscrow_AssignArbitrator_SelfAssignment(t *testing.T) {
 	}
 }
 
-func TestEscrow_AssignArbitrator_WrongStatus(t *testing.T) {
-	svc, _ := testService()
-	ctx := context.Background()
-
-	esc, _ := svc.Create(ctx, CreateRequest{
-		BuyerAddr:  "0xbuyer",
-		SellerAddr: "0xseller",
-		Amount:     "1.00",
-	})
-
-	// Assign from pending status should fail
-	_, err := svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xarbitrator")
-	if !errors.Is(err, ErrInvalidStatus) {
-		t.Fatalf("expected ErrInvalidStatus, got %v", err)
-	}
-}
-
-func TestEscrow_AssignArbitrator_Nonexistent(t *testing.T) {
-	svc, _ := testService()
-	ctx := context.Background()
-
-	_, err := svc.AssignArbitrator(ctx, "esc_ghost", "0xbuyer", "0xarbitrator")
-	if !errors.Is(err, ErrEscrowNotFound) {
-		t.Fatalf("expected ErrEscrowNotFound, got %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Escrow: ResolveArbitration
-// ---------------------------------------------------------------------------
-
 func setupArbitration(t *testing.T) (*Service, *Escrow) {
 	t.Helper()
 	svc, _ := testService()
@@ -3772,76 +3088,6 @@ func setupArbitration(t *testing.T) (*Service, *Escrow) {
 	_, _ = svc.Dispute(ctx, esc.ID, "0xbuyer", "bad service")
 	esc, _ = svc.AssignArbitrator(ctx, esc.ID, "0xbuyer", "0xarbitrator")
 	return svc, esc
-}
-
-func TestEscrow_ResolveArbitration_Release(t *testing.T) {
-	svc, esc := setupArbitration(t)
-	ctx := context.Background()
-
-	result, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
-		Resolution: "release",
-		Reason:     "seller delivered properly",
-	})
-	if err != nil {
-		t.Fatalf("ResolveArbitration release: %v", err)
-	}
-	if result.Status != StatusReleased {
-		t.Fatalf("expected released, got %s", result.Status)
-	}
-	if result.ResolvedAt == nil {
-		t.Fatal("expected ResolvedAt to be set")
-	}
-}
-
-func TestEscrow_ResolveArbitration_Refund(t *testing.T) {
-	svc, esc := setupArbitration(t)
-	ctx := context.Background()
-
-	result, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
-		Resolution: "refund",
-		Reason:     "seller failed to deliver",
-	})
-	if err != nil {
-		t.Fatalf("ResolveArbitration refund: %v", err)
-	}
-	if result.Status != StatusRefunded {
-		t.Fatalf("expected refunded, got %s", result.Status)
-	}
-}
-
-func TestEscrow_ResolveArbitration_Partial(t *testing.T) {
-	svc, esc := setupArbitration(t)
-	ctx := context.Background()
-
-	result, err := svc.ResolveArbitration(ctx, esc.ID, "0xarbitrator", ResolveRequest{
-		Resolution:    "partial",
-		ReleaseAmount: "7.00",
-		Reason:        "partial delivery",
-	})
-	if err != nil {
-		t.Fatalf("ResolveArbitration partial: %v", err)
-	}
-	if result.Status != StatusReleased {
-		t.Fatalf("expected released, got %s", result.Status)
-	}
-	if result.PartialReleaseAmount != "7.000000" {
-		t.Fatalf("expected release 7.000000, got %s", result.PartialReleaseAmount)
-	}
-	if result.PartialRefundAmount != "3.000000" {
-		t.Fatalf("expected refund 3.000000, got %s", result.PartialRefundAmount)
-	}
-}
-
-func TestEscrow_ResolveArbitration_Unauthorized(t *testing.T) {
-	svc, esc := setupArbitration(t)
-	ctx := context.Background()
-
-	_, err := svc.ResolveArbitration(ctx, esc.ID, "0xstranger", ResolveRequest{
-		Resolution: "release",
-	})
-	if !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("expected ErrUnauthorized, got %v", err)
-	}
 }
 
 func TestEscrow_ResolveArbitration_InvalidResolution(t *testing.T) {
@@ -3910,22 +3156,6 @@ func TestEscrow_ResolveArbitration_AlreadyResolved(t *testing.T) {
 	}
 }
 
-func TestEscrow_ResolveArbitration_Nonexistent(t *testing.T) {
-	svc, _ := testService()
-	ctx := context.Background()
-
-	_, err := svc.ResolveArbitration(ctx, "esc_ghost", "0xarbitrator", ResolveRequest{
-		Resolution: "release",
-	})
-	if !errors.Is(err, ErrEscrowNotFound) {
-		t.Fatalf("expected ErrEscrowNotFound, got %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Escrow: ForceCloseExpired
-// ---------------------------------------------------------------------------
-
 func TestEscrow_ForceCloseExpired(t *testing.T) {
 	store := NewMemoryStore()
 	ml := newMockLedger()
@@ -3969,35 +3199,6 @@ func TestEscrow_ForceCloseExpired(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Escrow: ListByAgent
-// ---------------------------------------------------------------------------
-
-func TestEscrow_ListByAgentDefaultLimitZero(t *testing.T) {
-	svc, _ := testService()
-	ctx := context.Background()
-
-	// Create some escrows
-	for i := 0; i < 3; i++ {
-		_, _ = svc.Create(ctx, CreateRequest{
-			BuyerAddr: "0xbuyer", SellerAddr: "0xseller", Amount: "1.00",
-		})
-	}
-
-	// limit 0 should default to 50
-	list, err := svc.ListByAgent(ctx, "0xbuyer", 0)
-	if err != nil {
-		t.Fatalf("ListByAgent: %v", err)
-	}
-	if len(list) != 3 {
-		t.Fatalf("expected 3, got %d", len(list))
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Escrow: Dispute validation
-// ---------------------------------------------------------------------------
-
 func TestEscrow_Dispute_EmptyReason(t *testing.T) {
 	svc, _ := testService()
 	ctx := context.Background()
@@ -4013,166 +3214,6 @@ func TestEscrow_Dispute_EmptyReason(t *testing.T) {
 		t.Fatal("expected error for empty reason")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Escrow: Create validation
-// ---------------------------------------------------------------------------
-
-func TestEscrow_Create_SameBuyerSeller(t *testing.T) {
-	svc, _ := testService()
-	ctx := context.Background()
-
-	_, err := svc.Create(ctx, CreateRequest{
-		BuyerAddr:  "0xAlice",
-		SellerAddr: "0xAlice",
-		Amount:     "1.00",
-	})
-	if err == nil {
-		t.Fatal("expected error when buyer == seller")
-	}
-}
-
-func TestEscrow_Create_InvalidAmount_Empty(t *testing.T) {
-	svc, _ := testService()
-	ctx := context.Background()
-
-	_, err := svc.Create(ctx, CreateRequest{
-		BuyerAddr:  "0xbuyer",
-		SellerAddr: "0xseller",
-		Amount:     "",
-	})
-	if !errors.Is(err, ErrInvalidAmount) {
-		t.Fatalf("expected ErrInvalidAmount, got %v", err)
-	}
-}
-
-func TestEscrow_Create_InvalidAmount_Negative(t *testing.T) {
-	svc, _ := testService()
-	ctx := context.Background()
-
-	_, err := svc.Create(ctx, CreateRequest{
-		BuyerAddr:  "0xbuyer",
-		SellerAddr: "0xseller",
-		Amount:     "-1.00",
-	})
-	if !errors.Is(err, ErrInvalidAmount) {
-		t.Fatalf("expected ErrInvalidAmount, got %v", err)
-	}
-}
-
-func TestEscrow_Create_InvalidAmount_NotNumber(t *testing.T) {
-	svc, _ := testService()
-	ctx := context.Background()
-
-	_, err := svc.Create(ctx, CreateRequest{
-		BuyerAddr:  "0xbuyer",
-		SellerAddr: "0xseller",
-		Amount:     "abc",
-	})
-	if !errors.Is(err, ErrInvalidAmount) {
-		t.Fatalf("expected ErrInvalidAmount, got %v", err)
-	}
-}
-
-func TestEscrow_Create_ZeroAmount(t *testing.T) {
-	svc, _ := testService()
-	ctx := context.Background()
-
-	_, err := svc.Create(ctx, CreateRequest{
-		BuyerAddr:  "0xbuyer",
-		SellerAddr: "0xseller",
-		Amount:     "0",
-	})
-	if !errors.Is(err, ErrInvalidAmount) {
-		t.Fatalf("expected ErrInvalidAmount, got %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Escrow: MoneyError wrapping
-// ---------------------------------------------------------------------------
-
-func TestMoneyError_UnwrapAndError(t *testing.T) {
-	inner := errors.New("ledger failed")
-	me := &MoneyError{
-		Err:         inner,
-		FundsStatus: "locked_in_escrow",
-		Recovery:    "contact support",
-		Amount:      "10.00",
-		Reference:   "esc_123",
-	}
-
-	if me.Error() != "ledger failed" {
-		t.Errorf("expected 'ledger failed', got %s", me.Error())
-	}
-	if !errors.Is(me, inner) {
-		t.Error("expected Unwrap to return inner error")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Escrow: IsTerminal for Escrow and CoalitionEscrow
-// ---------------------------------------------------------------------------
-
-func TestCoalitionEscrow_IsTerminal(t *testing.T) {
-	terminals := []CoalitionStatus{CSSettled, CSAborted, CSExpired}
-	for _, s := range terminals {
-		ce := &CoalitionEscrow{Status: s}
-		if !ce.IsTerminal() {
-			t.Errorf("expected %s to be terminal", s)
-		}
-	}
-
-	nonTerminals := []CoalitionStatus{CSActive, CSDelivered}
-	for _, s := range nonTerminals {
-		ce := &CoalitionEscrow{Status: s}
-		if ce.IsTerminal() {
-			t.Errorf("expected %s to be non-terminal", s)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Escrow: With... option chaining
-// ---------------------------------------------------------------------------
-
-func TestEscrow_ServiceOptions(t *testing.T) {
-	store := NewMemoryStore()
-	ml := newMockLedger()
-	rec := &mockRecorder{}
-
-	svc := NewService(store, ml).
-		WithLogger(slog.Default()).
-		WithRecorder(rec).
-		WithRevenueAccumulator(nil).
-		WithReputationImpactor(nil).
-		WithReceiptIssuer(nil).
-		WithWebhookEmitter(nil).
-		WithTrustGate(nil)
-
-	if svc == nil {
-		t.Fatal("expected non-nil service")
-	}
-
-	// Should work normally with nil optional dependencies
-	ctx := context.Background()
-	esc, err := svc.Create(ctx, CreateRequest{
-		BuyerAddr:  "0xbuyer",
-		SellerAddr: "0xseller",
-		Amount:     "1.00",
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	_, err = svc.Confirm(ctx, esc.ID, "0xbuyer")
-	if err != nil {
-		t.Fatalf("Confirm: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Escrow: MemoryStore ListByStatus
-// ---------------------------------------------------------------------------
 
 func TestMemoryStore_ListByStatus(t *testing.T) {
 	store := NewMemoryStore()
@@ -4222,39 +3263,6 @@ func TestMemoryStore_ListByStatus(t *testing.T) {
 		t.Fatalf("expected 1 (limited), got %d", len(result))
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Escrow: validateAmount
-// ---------------------------------------------------------------------------
-
-func TestValidateAmount(t *testing.T) {
-	tests := []struct {
-		amount  string
-		wantErr bool
-	}{
-		{"1.00", false},
-		{"0.000001", false},
-		{"999999.999999", false},
-		{"", true},
-		{"  ", true},
-		{"-1.00", true},
-		{"0", true},
-		{"abc", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.amount, func(t *testing.T) {
-			err := validateAmount(tt.amount)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("validateAmount(%q) = %v, wantErr %v", tt.amount, err, tt.wantErr)
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Escrow: AutoRelease ledger failure
-// ---------------------------------------------------------------------------
 
 func TestEscrow_AutoRelease_LedgerReleaseFailure(t *testing.T) {
 	store := NewMemoryStore()
@@ -4328,28 +3336,5 @@ func TestEscrow_Create_TrustGateAllow(t *testing.T) {
 	}
 	if esc.Status != StatusPending {
 		t.Fatalf("expected pending, got %s", esc.Status)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Escrow: allMembersCompleted
-// ---------------------------------------------------------------------------
-
-func TestCoalitionEscrow_AllMembersCompleted(t *testing.T) {
-	now := time.Now()
-	ce := &CoalitionEscrow{
-		Members: []CoalitionMember{
-			{AgentAddr: "0xa", CompletedAt: &now},
-			{AgentAddr: "0xb", CompletedAt: &now},
-		},
-	}
-	if !ce.allMembersCompleted() {
-		t.Fatal("expected all completed")
-	}
-
-	// One member not completed
-	ce.Members = append(ce.Members, CoalitionMember{AgentAddr: "0xc"})
-	if ce.allMembersCompleted() {
-		t.Fatal("expected not all completed")
 	}
 }

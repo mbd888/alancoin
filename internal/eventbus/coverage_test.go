@@ -15,6 +15,17 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
+// newMockDB creates a sqlmock database and registers cleanup via t.Cleanup.
+func newMockDB(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db, mock
+}
+
 // ---------------------------------------------------------------------------
 // drainBuffer: events are routed to correct subscription channels
 // ---------------------------------------------------------------------------
@@ -494,11 +505,7 @@ func TestReplayDeadLetters_ResetsAttempt(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWALStore_Write(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 
@@ -525,11 +532,7 @@ func TestWALStore_Write(t *testing.T) {
 }
 
 func TestWALStore_Write_Error(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 
@@ -543,11 +546,7 @@ func TestWALStore_Write_Error(t *testing.T) {
 }
 
 func TestWALStore_MarkProcessed(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 
@@ -565,11 +564,7 @@ func TestWALStore_MarkProcessed(t *testing.T) {
 }
 
 func TestWALStore_MarkProcessed_Error(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 
@@ -582,11 +577,7 @@ func TestWALStore_MarkProcessed_Error(t *testing.T) {
 }
 
 func TestWALStore_MarkDeadLettered(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 
@@ -604,11 +595,7 @@ func TestWALStore_MarkDeadLettered(t *testing.T) {
 }
 
 func TestWALStore_MarkDeadLettered_Error(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 
@@ -621,11 +608,7 @@ func TestWALStore_MarkDeadLettered_Error(t *testing.T) {
 }
 
 func TestWALStore_RecoverPending(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 
@@ -659,11 +642,7 @@ func TestWALStore_RecoverPending(t *testing.T) {
 }
 
 func TestWALStore_RecoverPending_Empty(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 
@@ -680,27 +659,19 @@ func TestWALStore_RecoverPending_Empty(t *testing.T) {
 }
 
 func TestWALStore_RecoverPending_QueryError(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 	mock.ExpectQuery("SELECT").WillReturnError(fmt.Errorf("query failed"))
 
-	_, err = wal.RecoverPending(context.Background())
+	_, err := wal.RecoverPending(context.Background())
 	if err == nil {
 		t.Error("expected error from RecoverPending")
 	}
 }
 
 func TestWALStore_RecoverPending_ScanError(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 
@@ -710,18 +681,14 @@ func TestWALStore_RecoverPending_ScanError(t *testing.T) {
 
 	mock.ExpectQuery("SELECT").WillReturnRows(rows)
 
-	_, err = wal.RecoverPending(context.Background())
+	_, err := wal.RecoverPending(context.Background())
 	if err == nil {
 		t.Error("expected scan error from RecoverPending")
 	}
 }
 
 func TestWALStore_Cleanup(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 
@@ -738,29 +705,21 @@ func TestWALStore_Cleanup(t *testing.T) {
 }
 
 func TestWALStore_Cleanup_Error(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 
 	mock.ExpectExec("DELETE FROM eventbus_wal").
 		WillReturnError(fmt.Errorf("delete failed"))
 
-	_, err = wal.Cleanup(context.Background(), 24*time.Hour)
+	_, err := wal.Cleanup(context.Background(), 24*time.Hour)
 	if err == nil {
 		t.Error("expected error from Cleanup")
 	}
 }
 
 func TestWALStore_CreateTable(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 
@@ -773,11 +732,7 @@ func TestWALStore_CreateTable(t *testing.T) {
 }
 
 func TestWALStore_CreateTable_Error(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 
@@ -794,11 +749,7 @@ func TestWALStore_CreateTable_Error(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestOutbox_WriteInTx(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	outbox := NewOutbox(db, slog.Default())
 
@@ -836,11 +787,7 @@ func TestOutbox_WriteInTx(t *testing.T) {
 }
 
 func TestOutbox_WriteInTx_Error(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	outbox := NewOutbox(db, slog.Default())
 
@@ -860,11 +807,7 @@ func TestOutbox_WriteInTx_Error(t *testing.T) {
 }
 
 func TestOutbox_Write(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	outbox := NewOutbox(db, slog.Default())
 
@@ -891,11 +834,7 @@ func TestOutbox_Write(t *testing.T) {
 }
 
 func TestOutbox_Write_Error(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	outbox := NewOutbox(db, slog.Default())
 
@@ -909,11 +848,7 @@ func TestOutbox_Write_Error(t *testing.T) {
 }
 
 func TestOutbox_CreateTable(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	outbox := NewOutbox(db, slog.Default())
 
@@ -926,11 +861,7 @@ func TestOutbox_CreateTable(t *testing.T) {
 }
 
 func TestOutbox_CreateTable_Error(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	outbox := NewOutbox(db, slog.Default())
 
@@ -947,11 +878,7 @@ func TestOutbox_CreateTable_Error(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestOutbox_PublishBatch_WithLagMetric(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	bus := NewMemoryBus(100, slog.Default())
 	outbox := NewOutbox(db, slog.Default())
@@ -979,11 +906,7 @@ func TestOutbox_PublishBatch_WithLagMetric(t *testing.T) {
 }
 
 func TestOutbox_PublishBatch_QueryError(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	bus := NewMemoryBus(100, slog.Default())
 	outbox := NewOutbox(db, slog.Default())
@@ -1003,11 +926,7 @@ func TestOutbox_PublishBatch_QueryError(t *testing.T) {
 }
 
 func TestOutbox_PublishBatch_PublishFails(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	// Use a tiny buffer bus that's already full
 	bus := NewMemoryBus(1, slog.Default())
@@ -1036,17 +955,9 @@ func TestOutbox_PublishBatch_PublishFails(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCleanupWithLock_Success(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
-	walDB, walMock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer walDB.Close()
+	walDB, walMock := newMockDB(t)
 
 	wal := NewWALStore(walDB, slog.Default())
 
@@ -1077,11 +988,7 @@ func TestCleanupWithLock_Success(t *testing.T) {
 }
 
 func TestCleanupWithLock_LockNotAcquired(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 	w := NewCleanupWorker(db, wal, nil, time.Hour, 24*time.Hour, 24*time.Hour, slog.Default())
@@ -1099,11 +1006,7 @@ func TestCleanupWithLock_LockNotAcquired(t *testing.T) {
 }
 
 func TestCleanupWithLock_LockError(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 	w := NewCleanupWorker(db, wal, nil, time.Hour, 24*time.Hour, 24*time.Hour, slog.Default())
@@ -1120,17 +1023,9 @@ func TestCleanupWithLock_LockError(t *testing.T) {
 }
 
 func TestCleanupWithLock_CleanupFails(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
-	walDB, walMock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer walDB.Close()
+	walDB, walMock := newMockDB(t)
 
 	wal := NewWALStore(walDB, slog.Default())
 	w := NewCleanupWorker(db, wal, nil, time.Hour, 24*time.Hour, 24*time.Hour, slog.Default())
@@ -1157,17 +1052,9 @@ func TestCleanupWithLock_CleanupFails(t *testing.T) {
 }
 
 func TestCleanupWithLock_ZeroDeleted(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
-	walDB, walMock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer walDB.Close()
+	walDB, walMock := newMockDB(t)
 
 	wal := NewWALStore(walDB, slog.Default())
 	w := NewCleanupWorker(db, wal, nil, time.Hour, 24*time.Hour, 24*time.Hour, slog.Default())
@@ -1188,23 +1075,11 @@ func TestCleanupWithLock_ZeroDeleted(t *testing.T) {
 }
 
 func TestCleanupWithLock_BothWALAndOutbox(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
-	walDB, walMock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer walDB.Close()
+	walDB, walMock := newMockDB(t)
 
-	outboxDB, outboxMock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer outboxDB.Close()
+	outboxDB, outboxMock := newMockDB(t)
 
 	wal := NewWALStore(walDB, slog.Default())
 	outbox := NewOutbox(outboxDB, slog.Default())
@@ -1245,17 +1120,9 @@ func TestCleanupWithLock_BothWALAndOutbox(t *testing.T) {
 }
 
 func TestCleanupWithLock_CancelledContext(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
-	walDB, walMock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer walDB.Close()
+	walDB, walMock := newMockDB(t)
 
 	wal := NewWALStore(walDB, slog.Default())
 	w := NewCleanupWorker(db, wal, nil, time.Hour, 24*time.Hour, 24*time.Hour, slog.Default())
@@ -1286,11 +1153,7 @@ func TestCleanupWithLock_CancelledContext(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCDC_PollOnce_QueryError(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	bus := NewMemoryBus(100, slog.Default())
 	cdc := NewCDC(db, bus, slog.Default())
@@ -1305,11 +1168,7 @@ func TestCDC_PollOnce_QueryError(t *testing.T) {
 }
 
 func TestCDC_PollOnce_CancelledContext_QueryError(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	bus := NewMemoryBus(100, slog.Default())
 	cdc := NewCDC(db, bus, slog.Default())
@@ -1324,11 +1183,7 @@ func TestCDC_PollOnce_CancelledContext_QueryError(t *testing.T) {
 }
 
 func TestCDC_PollOnce_ScanError(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	bus := NewMemoryBus(100, slog.Default())
 	cdc := NewCDC(db, bus, slog.Default())
@@ -1344,11 +1199,7 @@ func TestCDC_PollOnce_ScanError(t *testing.T) {
 }
 
 func TestCDC_PollOnce_PublishFails(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	// Tiny buffer that's already full
 	bus := NewMemoryBus(1, slog.Default())
@@ -1636,11 +1487,7 @@ func TestKafkaBus_Subscribe_Defaults(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPublish_WithWAL_Success(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 	bus := NewMemoryBus(100, slog.Default()).WithWAL(wal)
@@ -1660,11 +1507,7 @@ func TestPublish_WithWAL_Success(t *testing.T) {
 }
 
 func TestPublish_WithWAL_WALFailsButPublishContinues(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 	bus := NewMemoryBus(100, slog.Default()).WithWAL(wal)
@@ -1688,11 +1531,7 @@ func TestPublish_WithWAL_WALFailsButPublishContinues(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStart_WithWAL_RecoversPendingEvents(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 	bus := NewMemoryBus(100, slog.Default()).WithWAL(wal)
@@ -1730,11 +1569,7 @@ func TestStart_WithWAL_RecoversPendingEvents(t *testing.T) {
 }
 
 func TestStart_WithWAL_RecoveryFails(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 	bus := NewMemoryBus(100, slog.Default()).WithWAL(wal)
@@ -1764,11 +1599,7 @@ func TestStart_WithWAL_RecoveryFails(t *testing.T) {
 }
 
 func TestStart_WithWAL_RecoveryBufferFull(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 	bus := NewMemoryBus(1, slog.Default()).WithWAL(wal) // Buffer of 1
@@ -1809,11 +1640,7 @@ func TestStart_WithWAL_RecoveryBufferFull(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestConsumeLoop_WithWAL_MarkProcessed(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 	bus := NewMemoryBus(100, slog.Default()).WithWAL(wal)
@@ -1854,11 +1681,7 @@ func TestConsumeLoop_WithWAL_MarkProcessed(t *testing.T) {
 }
 
 func TestConsumeLoop_WithWAL_MarkProcessedFails(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 	bus := NewMemoryBus(100, slog.Default()).WithWAL(wal)
@@ -1891,11 +1714,7 @@ func TestConsumeLoop_WithWAL_MarkProcessedFails(t *testing.T) {
 }
 
 func TestConsumeLoop_WithWAL_MarkDeadLettered(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 	bus := NewMemoryBus(100, slog.Default()).WithWAL(wal)
@@ -1932,11 +1751,7 @@ func TestConsumeLoop_WithWAL_MarkDeadLettered(t *testing.T) {
 }
 
 func TestConsumeLoop_WithWAL_MarkDeadLetteredFails(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	wal := NewWALStore(db, slog.Default())
 	bus := NewMemoryBus(100, slog.Default()).WithWAL(wal)
@@ -1993,150 +1808,162 @@ func TestErrBufferFull_ImplementsError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Event JSON roundtrip
+// JSON roundtrip: Event, BusMetrics, and payload types
 // ---------------------------------------------------------------------------
 
-func TestEvent_JSONRoundTrip(t *testing.T) {
-	original := Event{
-		ID:        "evt_123",
-		Topic:     TopicSettlement,
-		Key:       "0xAgent",
-		Payload:   json.RawMessage(`{"amount":"10.5"}`),
-		Timestamp: time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC),
-		RequestID: "req_456",
-		Attempt:   2,
+func TestJSONRoundTrip(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    interface{}
+		validate func(t *testing.T, data []byte)
+	}{
+		{
+			name: "Event",
+			value: Event{
+				ID:        "evt_123",
+				Topic:     TopicSettlement,
+				Key:       "0xAgent",
+				Payload:   json.RawMessage(`{"amount":"10.5"}`),
+				Timestamp: time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC),
+				RequestID: "req_456",
+				Attempt:   2,
+			},
+			validate: func(t *testing.T, data []byte) {
+				var d Event
+				if err := json.Unmarshal(data, &d); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if d.ID != "evt_123" {
+					t.Errorf("ID = %q", d.ID)
+				}
+				if d.Topic != TopicSettlement {
+					t.Errorf("Topic = %q", d.Topic)
+				}
+				if d.Key != "0xAgent" {
+					t.Errorf("Key = %q", d.Key)
+				}
+				if d.RequestID != "req_456" {
+					t.Errorf("RequestID = %q", d.RequestID)
+				}
+				if d.Attempt != 2 {
+					t.Errorf("Attempt = %d", d.Attempt)
+				}
+			},
+		},
+		{
+			name: "BusMetrics_ConsumerLag",
+			value: BusMetrics{
+				Published:   10,
+				Consumed:    8,
+				Pending:     2,
+				ConsumerLag: map[string]int64{"group1": 5, "group2": 3},
+			},
+			validate: func(t *testing.T, data []byte) {
+				var d BusMetrics
+				if err := json.Unmarshal(data, &d); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if d.ConsumerLag["group1"] != 5 {
+					t.Errorf("group1 lag = %d, want 5", d.ConsumerLag["group1"])
+				}
+			},
+		},
+		{
+			name: "DisputePayload",
+			value: DisputePayload{
+				EscrowID:   "esc_1",
+				BuyerAddr:  "0xBuyer",
+				SellerAddr: "0xSeller",
+				Amount:     "100.00",
+				Reason:     "service not delivered",
+				ServiceID:  "svc_1",
+			},
+			validate: func(t *testing.T, data []byte) {
+				var d DisputePayload
+				if err := json.Unmarshal(data, &d); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if d.EscrowID != "esc_1" {
+					t.Errorf("EscrowID = %q", d.EscrowID)
+				}
+				if d.Reason != "service not delivered" {
+					t.Errorf("Reason = %q", d.Reason)
+				}
+			},
+		},
+		{
+			name: "AlertPayload",
+			value: AlertPayload{
+				AlertID:   "alert_1",
+				AgentAddr: "0xAgent",
+				Type:      "velocity_spike",
+				Severity:  "high",
+				Message:   "unusual transaction volume",
+				Score:     0.95,
+			},
+			validate: func(t *testing.T, data []byte) {
+				var d AlertPayload
+				if err := json.Unmarshal(data, &d); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if d.Score != 0.95 {
+					t.Errorf("Score = %f, want 0.95", d.Score)
+				}
+			},
+		},
+		{
+			name: "KYAPayload",
+			value: KYAPayload{
+				CertID:    "cert_1",
+				AgentAddr: "0xAgent",
+				TrustTier: "tier_2",
+				TenantID:  "ten_1",
+				ExpiresAt: "2026-01-01T00:00:00Z",
+			},
+			validate: func(t *testing.T, data []byte) {
+				var d KYAPayload
+				if err := json.Unmarshal(data, &d); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if d.TrustTier != "tier_2" {
+					t.Errorf("TrustTier = %q", d.TrustTier)
+				}
+			},
+		},
+		{
+			name: "CDCEvent",
+			value: CDCEvent{
+				EntryID:   "entry_1",
+				AgentAddr: "0xAgent",
+				Type:      "credit",
+				Amount:    "100.000000",
+				Reference: "ref_123",
+				TxHash:    "0xTxHash",
+				CreatedAt: "2025-06-15T12:00:00Z",
+			},
+			validate: func(t *testing.T, data []byte) {
+				var d CDCEvent
+				if err := json.Unmarshal(data, &d); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if d.EntryID != "entry_1" {
+					t.Errorf("EntryID = %q", d.EntryID)
+				}
+				if d.TxHash != "0xTxHash" {
+					t.Errorf("TxHash = %q", d.TxHash)
+				}
+			},
+		},
 	}
 
-	data, err := json.Marshal(original)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	var decoded Event
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	if decoded.ID != original.ID {
-		t.Errorf("ID = %q, want %q", decoded.ID, original.ID)
-	}
-	if decoded.Topic != original.Topic {
-		t.Errorf("Topic = %q, want %q", decoded.Topic, original.Topic)
-	}
-	if decoded.Key != original.Key {
-		t.Errorf("Key = %q, want %q", decoded.Key, original.Key)
-	}
-	if decoded.RequestID != original.RequestID {
-		t.Errorf("RequestID = %q, want %q", decoded.RequestID, original.RequestID)
-	}
-	if decoded.Attempt != original.Attempt {
-		t.Errorf("Attempt = %d, want %d", decoded.Attempt, original.Attempt)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// BusMetrics ConsumerLag field
-// ---------------------------------------------------------------------------
-
-func TestBusMetrics_ConsumerLagField(t *testing.T) {
-	m := BusMetrics{
-		Published:   10,
-		Consumed:    8,
-		Pending:     2,
-		ConsumerLag: map[string]int64{"group1": 5, "group2": 3},
-	}
-
-	data, err := json.Marshal(m)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	var decoded BusMetrics
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	if decoded.ConsumerLag["group1"] != 5 {
-		t.Errorf("group1 lag = %d, want 5", decoded.ConsumerLag["group1"])
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Payload types: JSON serialization
-// ---------------------------------------------------------------------------
-
-func TestDisputePayload_JSON(t *testing.T) {
-	p := DisputePayload{
-		EscrowID:   "esc_1",
-		BuyerAddr:  "0xBuyer",
-		SellerAddr: "0xSeller",
-		Amount:     "100.00",
-		Reason:     "service not delivered",
-		ServiceID:  "svc_1",
-	}
-
-	data, err := json.Marshal(p)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	var decoded DisputePayload
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	if decoded.EscrowID != p.EscrowID {
-		t.Errorf("EscrowID = %q, want %q", decoded.EscrowID, p.EscrowID)
-	}
-	if decoded.Reason != p.Reason {
-		t.Errorf("Reason = %q, want %q", decoded.Reason, p.Reason)
-	}
-}
-
-func TestAlertPayload_JSON(t *testing.T) {
-	p := AlertPayload{
-		AlertID:   "alert_1",
-		AgentAddr: "0xAgent",
-		Type:      "velocity_spike",
-		Severity:  "high",
-		Message:   "unusual transaction volume",
-		Score:     0.95,
-	}
-
-	e, err := NewEvent(TopicAlert, p.AgentAddr, p)
-	if err != nil {
-		t.Fatalf("NewEvent: %v", err)
-	}
-
-	var decoded AlertPayload
-	if err := json.Unmarshal(e.Payload, &decoded); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if decoded.Score != 0.95 {
-		t.Errorf("Score = %f, want 0.95", decoded.Score)
-	}
-}
-
-func TestKYAPayload_JSON(t *testing.T) {
-	p := KYAPayload{
-		CertID:    "cert_1",
-		AgentAddr: "0xAgent",
-		TrustTier: "tier_2",
-		TenantID:  "ten_1",
-		ExpiresAt: "2026-01-01T00:00:00Z",
-	}
-
-	e, err := NewEvent(TopicKYA, p.AgentAddr, p)
-	if err != nil {
-		t.Fatalf("NewEvent: %v", err)
-	}
-
-	var decoded KYAPayload
-	if err := json.Unmarshal(e.Payload, &decoded); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if decoded.TrustTier != "tier_2" {
-		t.Errorf("TrustTier = %q, want tier_2", decoded.TrustTier)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			tc.validate(t, data)
+		})
 	}
 }
 
@@ -2145,11 +1972,7 @@ func TestKYAPayload_JSON(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestOutbox_PublishBatch_MarkPublishedFails(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, mock := newMockDB(t)
 
 	bus := NewMemoryBus(100, slog.Default())
 	outbox := NewOutbox(db, slog.Default())
@@ -2170,65 +1993,4 @@ func TestOutbox_PublishBatch_MarkPublishedFails(t *testing.T) {
 
 	outbox.publishBatch(context.Background(), bus)
 	// Should not panic; mark published failure is logged
-}
-
-// ---------------------------------------------------------------------------
-// CDC: CDCEvent struct fields
-// ---------------------------------------------------------------------------
-
-func TestCDCEvent_JSON(t *testing.T) {
-	e := CDCEvent{
-		EntryID:   "entry_1",
-		AgentAddr: "0xAgent",
-		Type:      "credit",
-		Amount:    "100.000000",
-		Reference: "ref_123",
-		TxHash:    "0xTxHash",
-		CreatedAt: "2025-06-15T12:00:00Z",
-	}
-
-	data, err := json.Marshal(e)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	var decoded CDCEvent
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	if decoded.EntryID != "entry_1" {
-		t.Errorf("EntryID = %q", decoded.EntryID)
-	}
-	if decoded.TxHash != "0xTxHash" {
-		t.Errorf("TxHash = %q", decoded.TxHash)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Topic constants
-// ---------------------------------------------------------------------------
-
-func TestTopicConstants(t *testing.T) {
-	topics := map[string]string{
-		"TopicSettlement": TopicSettlement,
-		"TopicDispute":    TopicDispute,
-		"TopicAlert":      TopicAlert,
-		"TopicKYA":        TopicKYA,
-	}
-
-	for name, topic := range topics {
-		if topic == "" {
-			t.Errorf("%s is empty", name)
-		}
-	}
-
-	// Ensure all topics are unique
-	seen := map[string]bool{}
-	for name, topic := range topics {
-		if seen[topic] {
-			t.Errorf("%s has duplicate topic value %q", name, topic)
-		}
-		seen[topic] = true
-	}
 }

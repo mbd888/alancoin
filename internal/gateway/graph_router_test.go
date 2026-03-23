@@ -294,6 +294,36 @@ func TestComputeEdgeWeight_HealthPenalty(t *testing.T) {
 	}
 }
 
+func TestComputeEdgeWeight_InvalidPrice(t *testing.T) {
+	c := ServiceCandidate{Price: "invalid", ReputationScore: 80}
+	health := HealthStatus{State: HealthHealthy, SuccessRate: 1.0}
+	weight := computeEdgeWeight(c, health)
+	if weight < 1e300 {
+		t.Errorf("expected max weight for invalid price, got %f", weight)
+	}
+}
+
+func TestComputeEdgeWeight_VeryLowReputation(t *testing.T) {
+	c := ServiceCandidate{Price: "1.000000", ReputationScore: 0}
+	health := HealthStatus{State: HealthHealthy, SuccessRate: 1.0}
+	weight := computeEdgeWeight(c, health)
+	// Low rep = high weight
+	normalC := ServiceCandidate{Price: "1.000000", ReputationScore: 80}
+	normalWeight := computeEdgeWeight(normalC, health)
+	if weight <= normalWeight {
+		t.Error("expected higher weight for low reputation")
+	}
+}
+
+func TestComputeEdgeWeight_UnknownHealth(t *testing.T) {
+	c := ServiceCandidate{Price: "1.000000", ReputationScore: 80}
+	unknown := computeEdgeWeight(c, HealthStatus{State: HealthUnknown, SuccessRate: 0.5})
+	healthy := computeEdgeWeight(c, HealthStatus{State: HealthHealthy, SuccessRate: 0.99})
+	if unknown <= healthy {
+		t.Error("expected unknown health to have higher weight than healthy")
+	}
+}
+
 func TestProviderGraph_WeightRecalculationOnUpdate(t *testing.T) {
 	graph := NewProviderGraph()
 

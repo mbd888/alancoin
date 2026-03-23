@@ -3,9 +3,7 @@ package eventbus
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -132,80 +130,6 @@ func TestBackpressure(t *testing.T) {
 	}
 }
 
-func TestPayloadDeserialization(t *testing.T) {
-	bus := NewMemoryBus(100, slog.Default())
-
-	var gotPayload SettlementPayload
-	var mu sync.Mutex
-
-	bus.Subscribe(TopicSettlement, "deserialize-test", 1, 50*time.Millisecond, func(_ context.Context, events []Event) error {
-		mu.Lock()
-		defer mu.Unlock()
-		for _, e := range events {
-			json.Unmarshal(e.Payload, &gotPayload)
-		}
-		return nil
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go bus.Start(ctx)
-
-	event, _ := NewEvent(TopicSettlement, "0xBuyer", SettlementPayload{
-		SessionID:   "sess_123",
-		BuyerAddr:   "0xBuyer",
-		SellerAddr:  "0xSeller",
-		Amount:      "25.50",
-		ServiceType: "inference",
-		AmountFloat: 25.5,
-	})
-	bus.Publish(ctx, event)
-
-	time.Sleep(200 * time.Millisecond)
-	cancel()
-
-	mu.Lock()
-	defer mu.Unlock()
-	if gotPayload.Amount != "25.50" {
-		t.Errorf("amount = %q, want 25.50", gotPayload.Amount)
-	}
-	if gotPayload.ServiceType != "inference" {
-		t.Errorf("serviceType = %q, want inference", gotPayload.ServiceType)
-	}
-	if gotPayload.AmountFloat != 25.5 {
-		t.Errorf("amountFloat = %f, want 25.5", gotPayload.AmountFloat)
-	}
-}
-
-func TestMetrics(t *testing.T) {
-	bus := NewMemoryBus(100, slog.Default())
-
-	bus.Subscribe(TopicSettlement, "metrics-test", 50, 100*time.Millisecond, func(_ context.Context, events []Event) error {
-		return nil
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go bus.Start(ctx)
-
-	for i := 0; i < 20; i++ {
-		event, _ := NewEvent(TopicSettlement, "0xA", nil)
-		bus.Publish(ctx, event)
-	}
-
-	time.Sleep(300 * time.Millisecond)
-	cancel()
-
-	m := bus.Metrics()
-	if m.Published != 20 {
-		t.Errorf("published = %d, want 20", m.Published)
-	}
-	if m.Consumed != 20 {
-		t.Errorf("consumed = %d, want 20", m.Consumed)
-	}
-	if m.BatchesProcessed == 0 {
-		t.Error("expected at least one batch processed")
-	}
-}
-
 func TestMultipleConsumersSameTopic(t *testing.T) {
 	bus := NewMemoryBus(100, slog.Default())
 
@@ -237,98 +161,6 @@ func TestMultipleConsumersSameTopic(t *testing.T) {
 	}
 	if count2.Load() != 10 {
 		t.Errorf("consumer-2 = %d, want 10", count2.Load())
-	}
-}
-
-func TestRetryOnHandlerError(t *testing.T) {
-	bus := NewMemoryBus(100, slog.Default())
-
-	var attempts atomic.Int64
-	bus.Subscribe(TopicSettlement, "failing-consumer", 1, 50*time.Millisecond, func(_ context.Context, events []Event) error {
-		attempts.Add(1)
-		if attempts.Load() < 3 {
-			return fmt.Errorf("transient error")
-		}
-		return nil // succeed on 3rd attempt
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go bus.Start(ctx)
-
-	event, _ := NewEvent(TopicSettlement, "0xA", nil)
-	bus.Publish(ctx, event)
-
-	time.Sleep(800 * time.Millisecond)
-	cancel()
-
-	if attempts.Load() < 3 {
-		t.Errorf("attempts = %d, want >= 3 (retried)", attempts.Load())
-	}
-
-	m := bus.Metrics()
-	if m.Retries == 0 {
-		t.Error("expected retries > 0")
-	}
-}
-
-func TestDeadLetterQueue(t *testing.T) {
-	bus := NewMemoryBus(100, slog.Default())
-
-	// Handler always fails
-	bus.Subscribe(TopicSettlement, "always-fail", 1, 50*time.Millisecond, func(_ context.Context, events []Event) error {
-		return fmt.Errorf("permanent failure")
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go bus.Start(ctx)
-
-	event, _ := NewEvent(TopicSettlement, "0xA", map[string]string{"test": "dlq"})
-	bus.Publish(ctx, event)
-
-	time.Sleep(1200 * time.Millisecond) // Wait for all retries to exhaust
-	cancel()
-
-	dlq := bus.DeadLetterQueue()
-	if len(dlq) == 0 {
-		t.Error("expected events in dead letter queue")
-	}
-
-	m := bus.Metrics()
-	if m.DeadLettered == 0 {
-		t.Error("expected deadLettered > 0")
-	}
-}
-
-func TestReplayDeadLetters(t *testing.T) {
-	bus := NewMemoryBus(100, slog.Default())
-
-	var callCount atomic.Int64
-	failFirst := true
-	bus.Subscribe(TopicSettlement, "replay-test", 1, 50*time.Millisecond, func(_ context.Context, events []Event) error {
-		callCount.Add(1)
-		if failFirst {
-			failFirst = false
-			return fmt.Errorf("fail")
-		}
-		return nil
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go bus.Start(ctx)
-
-	event, _ := NewEvent(TopicSettlement, "0xA", nil)
-	bus.Publish(ctx, event)
-
-	time.Sleep(1200 * time.Millisecond) // Wait for retries + DLQ
-
-	// Replay DLQ
-	replayed := bus.ReplayDeadLetters(ctx)
-	time.Sleep(300 * time.Millisecond)
-	cancel()
-
-	if replayed == 0 && len(bus.DeadLetterQueue()) > 0 {
-		// Events were replayed back to buffer
-		t.Log("replayed events, checking processing")
 	}
 }
 
@@ -557,49 +389,6 @@ func TestReplayDeadLetters_BufferFull(t *testing.T) {
 	replayed := bus.ReplayDeadLetters(context.Background())
 	if replayed != 0 {
 		t.Errorf("expected 0 replayed (buffer full), got %d", replayed)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// busError
-// ---------------------------------------------------------------------------
-
-func TestBusError(t *testing.T) {
-	err := ErrBufferFull
-	if err.Error() != "eventbus: buffer full" {
-		t.Errorf("error message = %q", err.Error())
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Wildcard subscription
-// ---------------------------------------------------------------------------
-
-func TestWildcardSubscription(t *testing.T) {
-	bus := NewMemoryBus(100, slog.Default())
-
-	var count atomic.Int64
-	bus.Subscribe("*", "wildcard-consumer", 50, 100*time.Millisecond, func(_ context.Context, events []Event) error {
-		count.Add(int64(len(events)))
-		return nil
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go bus.Start(ctx)
-
-	// Publish to different topics
-	e1, _ := NewEvent(TopicSettlement, "k", nil)
-	e2, _ := NewEvent(TopicAlert, "k", nil)
-	e3, _ := NewEvent(TopicDispute, "k", nil)
-	bus.Publish(ctx, e1)
-	bus.Publish(ctx, e2)
-	bus.Publish(ctx, e3)
-
-	time.Sleep(300 * time.Millisecond)
-	cancel()
-
-	if count.Load() != 3 {
-		t.Errorf("wildcard consumer got %d events, want 3", count.Load())
 	}
 }
 

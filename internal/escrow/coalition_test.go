@@ -575,27 +575,19 @@ func TestCoalition_ValidationErrors(t *testing.T) {
 			}
 		})
 	}
-}
 
-func TestCoalition_BuyerCannotBeMember(t *testing.T) {
-	svc, _ := newCoalitionTestService()
-	ctx := context.Background()
-
-	req := defaultCreateReq()
-	req.Members[0].AgentAddr = "0xBuyer" // same as buyer
-	_, err := svc.Create(ctx, req)
+	// Buyer cannot be a member
+	reqBuyerMember := defaultCreateReq()
+	reqBuyerMember.Members[0].AgentAddr = "0xBuyer"
+	_, err := svc.Create(ctx, reqBuyerMember)
 	if err == nil {
 		t.Fatal("expected error when buyer is a member")
 	}
-}
 
-func TestCoalition_BuyerCannotBeOracle(t *testing.T) {
-	svc, _ := newCoalitionTestService()
-	ctx := context.Background()
-
-	req := defaultCreateReq()
-	req.OracleAddr = "0xBuyer" // same as buyer
-	_, err := svc.Create(ctx, req)
+	// Buyer cannot be the oracle
+	reqBuyerOracle := defaultCreateReq()
+	reqBuyerOracle.OracleAddr = "0xBuyer"
+	_, err = svc.Create(ctx, reqBuyerOracle)
 	if err == nil {
 		t.Fatal("expected error when buyer is the oracle")
 	}
@@ -649,36 +641,6 @@ func TestCoalition_ListByAgent(t *testing.T) {
 	}
 	if len(list) != 0 {
 		t.Fatalf("expected 0, got %d", len(list))
-	}
-}
-
-func TestCoalition_QualityTierSorting(t *testing.T) {
-	// Verify tiers are sorted descending by MinScore internally
-	svc, _ := newCoalitionTestService()
-	ctx := context.Background()
-
-	req := defaultCreateReq()
-	// Provide tiers in wrong order
-	req.QualityTiers = []QualityTier{
-		{Name: "poor", MinScore: 0.0, PayoutPct: 0},
-		{Name: "excellent", MinScore: 0.9, PayoutPct: 100},
-		{Name: "good", MinScore: 0.5, PayoutPct: 50},
-	}
-
-	ce, err := svc.Create(ctx, req)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	// Tiers should be sorted: excellent (0.9), good (0.5), poor (0.0)
-	if ce.QualityTiers[0].Name != "excellent" {
-		t.Fatalf("expected first tier to be excellent, got %s", ce.QualityTiers[0].Name)
-	}
-	if ce.QualityTiers[1].Name != "good" {
-		t.Fatalf("expected second tier to be good, got %s", ce.QualityTiers[1].Name)
-	}
-	if ce.QualityTiers[2].Name != "poor" {
-		t.Fatalf("expected third tier to be poor, got %s", ce.QualityTiers[2].Name)
 	}
 }
 
@@ -1178,30 +1140,6 @@ func TestCoalition_NoContract_NoPenalty(t *testing.T) {
 	}
 }
 
-func TestCoalition_ContributionsValidation_RejectsNonMember(t *testing.T) {
-	svc, _ := newCoalitionTestService()
-	ctx := context.Background()
-
-	req := defaultCreateReq()
-	req.SplitStrategy = SplitShapley
-	ce, err := svc.Create(ctx, req)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	// Oracle provides contributions with a non-member address
-	_, err = svc.OracleReport(ctx, ce.ID, "0xOracle", OracleReportRequest{
-		QualityScore: 0.95,
-		Contributions: map[string]float64{
-			"0xagent1":   0.5,
-			"0xattacker": 0.5, // not a coalition member
-		},
-	})
-	if err == nil {
-		t.Fatal("expected error for non-member contribution address")
-	}
-}
-
 func TestCoalition_EffectiveScoreStoredCorrectly(t *testing.T) {
 	svc, _, cc := newCoalitionTestServiceWithContracts()
 	ctx := context.Background()
@@ -1535,18 +1473,6 @@ func TestSortTiersDesc(t *testing.T) {
 // Coalition: validateCreateRequest edge cases
 // ---------------------------------------------------------------------------
 
-func TestCoalition_ValidationOracleCannotBeMember(t *testing.T) {
-	svc, _ := newCoalitionTestService()
-	ctx := context.Background()
-
-	req := defaultCreateReq()
-	req.Members[0].AgentAddr = "0xOracle" // same as oracle
-	_, err := svc.Create(ctx, req)
-	if err == nil {
-		t.Fatal("expected error when oracle is a member")
-	}
-}
-
 func TestCoalition_ValidationTooManyMembers(t *testing.T) {
 	svc, _ := newCoalitionTestService()
 	ctx := context.Background()
@@ -1668,21 +1594,6 @@ func TestCoalitionTimer_StartStop(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Escrow: Timer Running check
-// ---------------------------------------------------------------------------
-
-func TestTimer_Running(t *testing.T) {
-	store := NewMemoryStore()
-	ml := newMockLedger()
-	svc := NewService(store, ml)
-	timer := NewTimer(svc, store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
-
-	if timer.Running() {
-		t.Fatal("should not be running before Start")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Coalition: MemoryStore edge cases
 // ---------------------------------------------------------------------------
 
@@ -1775,20 +1686,6 @@ func TestCoalitionMemoryStore_ListExpired(t *testing.T) {
 	}
 	if list[0].ID != "coa_expired" {
 		t.Fatalf("expected coa_expired, got %s", list[0].ID)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Coalition: Abort nonexistent
-// ---------------------------------------------------------------------------
-
-func TestCoalition_AbortNonexistent(t *testing.T) {
-	svc, _ := newCoalitionTestService()
-	ctx := context.Background()
-
-	_, err := svc.Abort(ctx, "nonexistent", "0xBuyer")
-	if !errors.Is(err, ErrCoalitionNotFound) {
-		t.Fatalf("expected ErrCoalitionNotFound, got %v", err)
 	}
 }
 

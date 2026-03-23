@@ -222,19 +222,5 @@ func TestKafkaBusMultipleConsumerGroups(t *testing.T) {
 	cancel()
 }
 
-func TestKafkaBusConfig(t *testing.T) {
-	// Test that NewKafkaBus validates config
-	_, err := eventbus.NewKafkaBus(eventbus.KafkaConfig{}, slog.Default())
-	if err == nil {
-		t.Error("expected error for empty brokers")
-	}
-
-	// Test defaults
-	cfg := eventbus.DefaultKafkaConfig()
-	if len(cfg.Brokers) == 0 {
-		t.Error("default config should have brokers")
-	}
-	if cfg.BatchSize != 100 {
-		t.Errorf("default batch size=%d, want 100", cfg.BatchSize)
-	}
-}
+// TestKafkaBusConfig duplicate checks (empty brokers, default config values)
+// moved to unit tests: TestNewKafkaBus_EmptyBrokers, TestDefaultKafkaConfig.
