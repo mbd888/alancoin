@@ -9,12 +9,14 @@ package ledger
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/mbd888/alancoin/internal/logging"
 	"math/big"
 	"strings"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/logging"
 
 	"github.com/lib/pq"
 	"github.com/mbd888/alancoin/internal/traces"
@@ -83,6 +85,8 @@ type Service interface {
 	ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error
 	SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error
 	SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error
+	SettleHoldWithCallback(ctx context.Context, buyerAddr, sellerAddr, amount, reference string, preCommit func(tx *sql.Tx) error) error
+	SettleHoldWithFeeAndCallback(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string, preCommit func(tx *sql.Tx) error) error
 	EscrowLock(ctx context.Context, agentAddr, amount, reference string) error
 	ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error
 	RefundEscrow(ctx context.Context, agentAddr, amount, reference string) error
@@ -153,6 +157,14 @@ type Store interface {
 	// seller available += sellerAmount, platform available += feeAmount.
 	// All three movements share the same reference.
 	SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error
+
+	// SettleHoldWithCallback is like SettleHold but calls preCommit within the
+	// DB transaction before commit. Used for transactional outbox writes.
+	SettleHoldWithCallback(ctx context.Context, buyerAddr, sellerAddr, amount, reference string, preCommit func(tx *sql.Tx) error) error
+
+	// SettleHoldWithFeeAndCallback is like SettleHoldWithFee but calls preCommit
+	// within the DB transaction before commit. Used for transactional outbox writes.
+	SettleHoldWithFeeAndCallback(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string, preCommit func(tx *sql.Tx) error) error
 
 	// PartialEscrowSettle atomically splits escrowed funds between seller and buyer.
 	// Single transaction: buyer escrowed -= (release+refund), buyer total_out += release,
@@ -564,6 +576,84 @@ func (l *Ledger) SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, s
 	buyerBefore, _ := l.store.GetBalance(ctx, buyer)
 
 	if err := l.store.SettleHoldWithFee(ctx, buyer, seller, sellerAmount, platform, feeAmount, reference); err != nil {
+		return err
+	}
+
+	l.appendEvent(ctx, buyer, "settle_hold_out", usdc.Format(totalBig), reference, seller)
+	l.appendEvent(ctx, seller, "settle_hold_in", sellerAmount, reference, buyer)
+	if feeBig.Sign() > 0 {
+		l.appendEvent(ctx, platform, "fee_in", feeAmount, reference, buyer)
+	}
+
+	buyerAfter, _ := l.store.GetBalance(ctx, buyer)
+	l.logAudit(ctx, buyer, "settle_hold_with_fee", usdc.Format(totalBig), reference, buyerBefore, buyerAfter)
+	return nil
+}
+
+// SettleHoldWithCallback is like SettleHold but calls preCommit within the
+// DB transaction before commit. Used for transactional outbox writes.
+func (l *Ledger) SettleHoldWithCallback(ctx context.Context, buyerAddr, sellerAddr, amount, reference string, preCommit func(tx *sql.Tx) error) error {
+	ctx, span := traces.StartSpan(ctx, "ledger.SettleHoldWithCallback",
+		attribute.String("buyer.addr", buyerAddr), attribute.String("seller.addr", sellerAddr),
+		traces.Amount(amount), traces.Reference(reference))
+	defer span.End()
+
+	amountBig, ok := usdc.Parse(amount)
+	if !ok || amountBig.Sign() <= 0 {
+		span.SetStatus(codes.Error, "invalid amount")
+		return ErrInvalidAmount
+	}
+	_ = amountBig
+
+	buyer := strings.ToLower(buyerAddr)
+	seller := strings.ToLower(sellerAddr)
+	done := observeOp("settle_hold")
+	defer done()
+
+	buyerBefore, _ := l.store.GetBalance(ctx, buyer)
+
+	if err := l.store.SettleHoldWithCallback(ctx, buyer, seller, amount, reference, preCommit); err != nil {
+		return err
+	}
+
+	l.appendEvent(ctx, buyer, "settle_hold_out", amount, reference, seller)
+	l.appendEvent(ctx, seller, "settle_hold_in", amount, reference, buyer)
+
+	buyerAfter, _ := l.store.GetBalance(ctx, buyer)
+	l.logAudit(ctx, buyer, "settle_hold", amount, reference, buyerBefore, buyerAfter)
+	return nil
+}
+
+// SettleHoldWithFeeAndCallback is like SettleHoldWithFee but calls preCommit
+// within the DB transaction before commit. Used for transactional outbox writes.
+func (l *Ledger) SettleHoldWithFeeAndCallback(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string, preCommit func(tx *sql.Tx) error) error {
+	ctx, span := traces.StartSpan(ctx, "ledger.SettleHoldWithFeeAndCallback",
+		attribute.String("buyer.addr", buyerAddr), attribute.String("seller.addr", sellerAddr),
+		attribute.String("seller_amount", sellerAmount), attribute.String("fee_amount", feeAmount),
+		traces.Reference(reference))
+	defer span.End()
+
+	sellerBig, ok1 := usdc.Parse(sellerAmount)
+	feeBig, ok2 := usdc.Parse(feeAmount)
+	if !ok1 || !ok2 || sellerBig.Sign() <= 0 {
+		span.SetStatus(codes.Error, "invalid amount")
+		return ErrInvalidAmount
+	}
+	totalBig := new(big.Int).Add(sellerBig, feeBig)
+	if totalBig.Sign() <= 0 {
+		span.SetStatus(codes.Error, "invalid amount")
+		return ErrInvalidAmount
+	}
+
+	buyer := strings.ToLower(buyerAddr)
+	seller := strings.ToLower(sellerAddr)
+	platform := strings.ToLower(platformAddr)
+	done := observeOp("settle_hold_with_fee")
+	defer done()
+
+	buyerBefore, _ := l.store.GetBalance(ctx, buyer)
+
+	if err := l.store.SettleHoldWithFeeAndCallback(ctx, buyer, seller, sellerAmount, platform, feeAmount, reference, preCommit); err != nil {
 		return err
 	}
 

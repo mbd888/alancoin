@@ -560,6 +560,12 @@ func (p *PostgresStore) ReleaseHold(ctx context.Context, agentAddr, amount, refe
 // SettleHold atomically moves funds from buyer's pending to seller's available.
 // Used by gateway and stream settlement to avoid separate ConfirmHold + Deposit calls.
 func (p *PostgresStore) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error {
+	return p.SettleHoldWithCallback(ctx, buyerAddr, sellerAddr, amount, reference, nil)
+}
+
+// SettleHoldWithCallback is like SettleHold but calls preCommit within the
+// DB transaction before commit. Used for transactional outbox writes.
+func (p *PostgresStore) SettleHoldWithCallback(ctx context.Context, buyerAddr, sellerAddr, amount, reference string, preCommit func(tx *sql.Tx) error) error {
 	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return err
@@ -621,11 +627,24 @@ func (p *PostgresStore) SettleHold(ctx context.Context, buyerAddr, sellerAddr, a
 		return fmt.Errorf("failed to record seller entry: %w", err)
 	}
 
+	// Pre-commit callback (e.g., outbox write within same transaction)
+	if preCommit != nil {
+		if err := preCommit(tx); err != nil {
+			return fmt.Errorf("pre-commit callback failed: %w", err)
+		}
+	}
+
 	return tx.Commit()
 }
 
 // SettleHoldWithFee atomically splits a hold three ways: buyer → seller + platform fee.
 func (p *PostgresStore) SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error {
+	return p.SettleHoldWithFeeAndCallback(ctx, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference, nil)
+}
+
+// SettleHoldWithFeeAndCallback is like SettleHoldWithFee but calls preCommit
+// within the DB transaction before commit. Used for transactional outbox writes.
+func (p *PostgresStore) SettleHoldWithFeeAndCallback(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string, preCommit func(tx *sql.Tx) error) error {
 	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return err
@@ -713,6 +732,13 @@ func (p *PostgresStore) SettleHoldWithFee(ctx context.Context, buyerAddr, seller
 		`, idgen.New(), platformAddr, feeAmount, reference)
 		if err != nil {
 			return fmt.Errorf("failed to record platform fee entry: %w", err)
+		}
+	}
+
+	// Pre-commit callback (e.g., outbox write within same transaction)
+	if preCommit != nil {
+		if err := preCommit(tx); err != nil {
+			return fmt.Errorf("pre-commit callback failed: %w", err)
 		}
 	}
 

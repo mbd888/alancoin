@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"math/big"
 	"sync"
@@ -657,6 +658,16 @@ func (m *MemoryStore) SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAd
 	}
 
 	return nil
+}
+
+// SettleHoldWithCallback delegates to SettleHold (no real transaction in memory).
+func (m *MemoryStore) SettleHoldWithCallback(ctx context.Context, buyerAddr, sellerAddr, amount, reference string, _ func(tx *sql.Tx) error) error {
+	return m.SettleHold(ctx, buyerAddr, sellerAddr, amount, reference)
+}
+
+// SettleHoldWithFeeAndCallback delegates to SettleHoldWithFee (no real transaction in memory).
+func (m *MemoryStore) SettleHoldWithFeeAndCallback(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string, _ func(tx *sql.Tx) error) error {
+	return m.SettleHoldWithFee(ctx, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference)
 }
 
 func (m *MemoryStore) PartialEscrowSettle(ctx context.Context, buyerAddr, sellerAddr, releaseAmount, refundAmount, reference string) error {
