@@ -1984,11 +1984,10 @@ func TestKafkaBus_ImplementsBusInterface(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestErrBufferFull_ImplementsError(t *testing.T) {
-	var err error = ErrBufferFull
-	if err == nil {
-		t.Error("ErrBufferFull should not be nil")
+	if ErrBufferFull.Error() == "" {
+		t.Error("ErrBufferFull should have a non-empty message")
 	}
-	if !errors.Is(err, ErrBufferFull) {
+	if !errors.Is(ErrBufferFull, ErrBufferFull) {
 		t.Error("errors.Is should match ErrBufferFull")
 	}
 }
