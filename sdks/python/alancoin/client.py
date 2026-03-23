@@ -1447,6 +1447,40 @@ class Alancoin:
             params={"limit": limit},
         )
 
+    def recommend_hold(
+        self,
+        price_per_tick: float,
+        tick_rate: float,
+        duration_sec: float,
+        confidence: float = 0.95,
+    ) -> dict:
+        """
+        Calculate the optimal hold amount for a streaming payment.
+
+        Uses Poisson statistics to determine how much to hold so the stream
+        won't exhaust its budget with the given confidence level.
+
+        Args:
+            price_per_tick: Cost per tick in USDC (e.g., 0.001)
+            tick_rate: Expected ticks per second (e.g., 2.0)
+            duration_sec: Expected service duration in seconds (e.g., 300)
+            confidence: Probability the hold won't be exhausted (default 0.95)
+
+        Returns:
+            Dict with recommendedHold, expectedCost, efficiency, confidence,
+            expectedTicks
+        """
+        return self._request(
+            "POST",
+            "/v1/streams/recommend-hold",
+            json={
+                "pricePerTick": price_per_tick,
+                "tickRate": tick_rate,
+                "durationSec": duration_sec,
+                "confidence": confidence,
+            },
+        )
+
     # -------------------------------------------------------------------------
     # Gateway (Transparent Payment Proxy)
     # -------------------------------------------------------------------------

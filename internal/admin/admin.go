@@ -17,13 +17,14 @@ type StuckSession struct {
 
 // ReconciliationReport summarizes the results of a cross-subsystem reconciliation run.
 type ReconciliationReport struct {
-	LedgerMismatches int           `json:"ledgerMismatches"`
-	StuckEscrows     int           `json:"stuckEscrows"`
-	StaleStreams     int           `json:"staleStreams"`
-	OrphanedHolds    int           `json:"orphanedHolds"`
-	Healthy          bool          `json:"healthy"`
-	Duration         time.Duration `json:"durationMs"`
-	Timestamp        time.Time     `json:"timestamp"`
+	LedgerMismatches    int           `json:"ledgerMismatches"`
+	StuckEscrows        int           `json:"stuckEscrows"`
+	StaleStreams        int           `json:"staleStreams"`
+	OrphanedHolds       int           `json:"orphanedHolds"`
+	InvariantViolations int           `json:"invariantViolations"`
+	Healthy             bool          `json:"healthy"`
+	Duration            time.Duration `json:"durationMs"`
+	Timestamp           time.Time     `json:"timestamp"`
 }
 
 // DenialExportRecord is a serializable denial record for ML training data export.

@@ -3007,13 +3007,14 @@ func (a *adminReconcileAdapter) RunAll(ctx context.Context) (*admin.Reconciliati
 		return nil, err
 	}
 	return &admin.ReconciliationReport{
-		LedgerMismatches: report.LedgerMismatches,
-		StuckEscrows:     report.StuckEscrows,
-		StaleStreams:     report.StaleStreams,
-		OrphanedHolds:    report.OrphanedHolds,
-		Healthy:          report.Healthy,
-		Duration:         report.Duration,
-		Timestamp:        report.Timestamp,
+		LedgerMismatches:    report.LedgerMismatches,
+		StuckEscrows:        report.StuckEscrows,
+		StaleStreams:        report.StaleStreams,
+		OrphanedHolds:       report.OrphanedHolds,
+		InvariantViolations: report.InvariantViolations,
+		Healthy:             report.Healthy,
+		Duration:            report.Duration,
+		Timestamp:           report.Timestamp,
 	}, nil
 }
 
