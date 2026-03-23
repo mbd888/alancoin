@@ -46,8 +46,10 @@ func (r *Registry) Register(name string, check Checker) {
 	r.mu.Unlock()
 }
 
-// CheckAll runs all registered checkers and returns the aggregate health
-// status plus individual subsystem results.
+// CheckAll runs all registered checkers concurrently and returns the aggregate
+// health status plus individual subsystem results. All checkers run in parallel
+// with a per-checker timeout, so total wall-clock time is bounded by the
+// slowest single checker rather than the sum of all checkers.
 func (r *Registry) CheckAll(ctx context.Context) (healthy bool, statuses []Status) {
 	r.mu.RLock()
 	checkers := make([]namedChecker, len(r.checkers))
@@ -57,19 +59,31 @@ func (r *Registry) CheckAll(ctx context.Context) (healthy bool, statuses []Statu
 	healthy = true
 	statuses = make([]Status, len(checkers))
 
+	var wg sync.WaitGroup
+	wg.Add(len(checkers))
+
 	for i, nc := range checkers {
-		checkCtx, cancel := context.WithTimeout(ctx, perCheckerTimeout)
-		statuses[i] = nc.check(checkCtx)
-		cancel()
-		if checkCtx.Err() == context.DeadlineExceeded {
-			statuses[i] = Status{
-				Name:    nc.name,
-				Healthy: false,
-				Detail:  "health check timed out",
+		go func(idx int, nc namedChecker) {
+			defer wg.Done()
+			checkCtx, cancel := context.WithTimeout(ctx, perCheckerTimeout)
+			defer cancel()
+			statuses[idx] = nc.check(checkCtx)
+			if checkCtx.Err() == context.DeadlineExceeded {
+				statuses[idx] = Status{
+					Name:    nc.name,
+					Healthy: false,
+					Detail:  "health check timed out",
+				}
 			}
-		}
-		if !statuses[i].Healthy {
+		}(i, nc)
+	}
+
+	wg.Wait()
+
+	for _, s := range statuses {
+		if !s.Healthy {
 			healthy = false
+			break
 		}
 	}
 

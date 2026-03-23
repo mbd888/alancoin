@@ -100,12 +100,32 @@ func (c *idempotencyCache) GetOrReserve(ctx context.Context, sessionID, idempote
 		}
 	}
 
-	// Reject if cache is at capacity (prevents unbounded growth).
+	// Evict oldest completed entry if cache is at capacity.
 	if len(c.entries) >= c.maxSize {
-		c.mu.Unlock()
-		gwIdemCacheFull.Inc()
-		// Process normally without idempotency — better than rejecting the request.
-		return nil, nil, false
+		evicted := false
+		var oldestKey string
+		var oldestTime time.Time
+		for ek, ee := range c.entries {
+			select {
+			case <-ee.done:
+				// Completed entry — candidate for eviction
+				if !evicted || ee.expiresAt.Before(oldestTime) {
+					oldestKey = ek
+					oldestTime = ee.expiresAt
+					evicted = true
+				}
+			default:
+				// In-flight — skip
+			}
+		}
+		if evicted {
+			delete(c.entries, oldestKey)
+		} else {
+			// All entries are in-flight — cannot evict safely
+			c.mu.Unlock()
+			gwIdemCacheFull.Inc()
+			return nil, nil, false
+		}
 	}
 
 	// Reserve the key for this goroutine.
@@ -1236,10 +1256,8 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 		}
 	}
 
-	// Clean up pendingSpend entry if zero (no in-flight requests).
-	if pending.Sign() == 0 {
-		s.pendingSpend.Delete(sessionID)
-	}
+	// Always clean up pendingSpend on close to prevent memory leak.
+	s.pendingSpend.Delete(sessionID)
 
 	s.rateLimit.remove(sessionID)
 

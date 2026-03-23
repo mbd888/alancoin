@@ -4442,7 +4442,7 @@ func TestRateLimiter_Remove(t *testing.T) {
 	}
 }
 
-func TestRateLimiter_SweepKeepsCustomLimit(t *testing.T) {
+func TestRateLimiter_SweepCleansCustomLimit(t *testing.T) {
 	rl := newRateLimiter()
 	rl.window = 1 * time.Millisecond
 
@@ -4451,12 +4451,14 @@ func TestRateLimiter_SweepKeepsCustomLimit(t *testing.T) {
 
 	time.Sleep(5 * time.Millisecond)
 
+	// Custom-limit entries are now swept like any other entry to prevent
+	// memory leaks. The custom limit is restored by setLimit when reused.
 	removed := rl.sweep()
-	if removed != 0 {
-		t.Errorf("expected 0 removed (custom limit), got %d", removed)
+	if removed != 1 {
+		t.Errorf("expected 1 removed (stale entry), got %d", removed)
 	}
-	if rl.size() != 1 {
-		t.Errorf("expected entry preserved with custom limit, got %d", rl.size())
+	if rl.size() != 0 {
+		t.Errorf("expected 0 entries after sweep, got %d", rl.size())
 	}
 }
 
