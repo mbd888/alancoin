@@ -205,6 +205,7 @@ Enterprise cost attribution and budget enforcement for multi-agent pipelines. On
 | `POST /v1/streams/:id/close` | Close and settle |
 | `GET /v1/streams/:id` | Get stream details |
 | `GET /v1/streams/:id/ticks` | List ticks for a stream |
+| `POST /v1/streams/recommend-hold` | Calculate optimal hold amount (Poisson statistics) |
 
 ## Tenants & Dashboard
 
