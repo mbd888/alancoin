@@ -21,6 +21,10 @@ keywords = [
     "web3",
     "ethereum",
     "base",
+    "langgraph",
+    "crewai",
+    "budget",
+    "cost-control",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -34,6 +38,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Office/Business :: Financial",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 requires-python = ">=3.9"
 dependencies = [
@@ -47,6 +52,21 @@ crypto = [
 ]
 mcp = [
     "mcp>=1.7.0",
+]
+langgraph = [
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",
+]
+crewai = [
+    "crewai>=0.100.0",
+]
+openai-agents = [
+    "openai-agents>=0.1.0",
+]
+agents = [
+    "alancoin[langgraph]",
+    "alancoin[crewai]",
+    "alancoin[openai-agents]",
 ]
 dev = [
     "pytest>=7.0.0",
