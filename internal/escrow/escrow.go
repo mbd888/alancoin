@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/eventbus"
 	"github.com/mbd888/alancoin/internal/idgen"
 	"github.com/mbd888/alancoin/internal/metrics"
 	"github.com/mbd888/alancoin/internal/pagination"
@@ -280,7 +281,8 @@ type Service struct {
 	reputation     ReputationImpactor
 	receiptIssuer  ReceiptIssuer
 	webhookEmitter WebhookEmitter
-	trustGate      TrustGate // KYA trust verification before escrow creation
+	trustGate      TrustGate    // KYA trust verification before escrow creation
+	bus            eventbus.Bus // event bus for settlement/dispute events (optional)
 	logger         *slog.Logger
 	locks          sync.Map // per-escrow ID locks to prevent race conditions
 }
@@ -340,6 +342,53 @@ func (s *Service) WithReceiptIssuer(r ReceiptIssuer) *Service {
 func (s *Service) WithWebhookEmitter(e WebhookEmitter) *Service {
 	s.webhookEmitter = e
 	return s
+}
+
+// WithBus adds the event bus for publishing settlement and dispute events.
+func (s *Service) WithBus(bus eventbus.Bus) *Service {
+	s.bus = bus
+	return s
+}
+
+func (s *Service) publishSettlementEvent(ctx context.Context, escrowID, buyerAddr, sellerAddr, amount, serviceID string) {
+	if s.bus == nil {
+		return
+	}
+	evt, err := eventbus.NewEvent(eventbus.TopicSettlement, buyerAddr, eventbus.SettlementPayload{
+		SessionID:   escrowID,
+		BuyerAddr:   buyerAddr,
+		SellerAddr:  sellerAddr,
+		Amount:      amount,
+		ServiceType: "escrow",
+		ServiceID:   serviceID,
+		Reference:   "escrow:" + escrowID,
+	})
+	if err != nil {
+		return
+	}
+	if err := s.bus.Publish(ctx, evt); err != nil {
+		s.logger.Warn("escrow: event publish failed", "escrow_id", escrowID, "error", err)
+	}
+}
+
+func (s *Service) publishDisputeEvent(ctx context.Context, escrowID, buyerAddr, sellerAddr, amount, reason, serviceID string) {
+	if s.bus == nil {
+		return
+	}
+	evt, err := eventbus.NewEvent(eventbus.TopicDispute, sellerAddr, eventbus.DisputePayload{
+		EscrowID:   escrowID,
+		BuyerAddr:  buyerAddr,
+		SellerAddr: sellerAddr,
+		Amount:     amount,
+		Reason:     reason,
+		ServiceID:  serviceID,
+	})
+	if err != nil {
+		return
+	}
+	if err := s.bus.Publish(ctx, evt); err != nil {
+		s.logger.Warn("escrow: dispute event publish failed", "escrow_id", escrowID, "error", err)
+	}
 }
 
 // WithTrustGate adds KYA trust verification before escrow creation.
@@ -609,6 +658,8 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 		go s.webhookEmitter.EmitEscrowReleased(escrow.SellerAddr, escrow.ID, escrow.BuyerAddr, escrow.Amount)
 	}
 
+	s.publishSettlementEvent(ctx, escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ServiceID)
+
 	s.cleanupLock(id)
 	return escrow, nil
 }
@@ -684,6 +735,8 @@ func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitEscrowDisputed(escrow.SellerAddr, escrow.ID, escrow.BuyerAddr, reason)
 	}
+
+	s.publishDisputeEvent(ctx, escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, reason, escrow.ServiceID)
 
 	return escrow, nil
 }
@@ -775,6 +828,8 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitEscrowReleased(escrow.SellerAddr, escrow.ID, escrow.BuyerAddr, escrow.Amount)
 	}
+
+	s.publishSettlementEvent(ctx, escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ServiceID)
 
 	s.cleanupLock(escrow.ID)
 	return nil
