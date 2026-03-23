@@ -15,6 +15,17 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    command: redis-server --maxmemory 100mb --maxmemory-policy allkeys-lru
+
   kafka:
     image: apache/kafka:3.7.0
     environment:
@@ -46,10 +57,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       kafka:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://alancoin:alancoin@postgres:5432/alancoin?sslmode=disable
+      REDIS_URL: redis://redis:6379
       PORT: "8080"
       EVENTBUS_BACKEND: kafka
       KAFKA_BROKERS: kafka:9092

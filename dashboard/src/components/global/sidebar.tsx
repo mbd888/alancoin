@@ -55,9 +55,7 @@ export function Sidebar() {
     >
       {/* Logo */}
       <div className="flex h-14 items-center gap-2 border-b border-[var(--sidebar-border)] px-4">
-        <div className="flex size-7 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-accent-5)]">
-          <span className="text-xs font-bold text-white">A</span>
-        </div>
+        <img src="/alancoin-icon.png" alt="Alancoin" className="size-7 rounded-[var(--radius-md)]" />
         {!sidebarCollapsed && (
           <span className="text-sm font-semibold text-[var(--foreground)]">
             Alancoin
