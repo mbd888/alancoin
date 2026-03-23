@@ -2,12 +2,13 @@ package supervisor
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"math"
 	"math/big"
 	"sync/atomic"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/recovery"
 )
 
 const (
@@ -74,11 +75,7 @@ func (t *BaselineTimer) Stop() {
 }
 
 func (t *BaselineTimer) safeDoWork(ctx context.Context, fn func(context.Context)) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.logger.Error("panic in baseline worker", "panic", fmt.Sprint(r))
-		}
-	}()
+	defer recovery.LogPanic(t.logger, "supervisor_baseline_worker")
 	fn(ctx)
 }
 

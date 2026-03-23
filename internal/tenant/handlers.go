@@ -136,7 +136,10 @@ func (h *Handler) CreateTenant(c *gin.Context) {
 		if customerID, err := h.customerCreator.CreateCustomer(c.Request.Context(), t.ID, t.Name, ""); err == nil {
 			t.StripeCustomerID = customerID
 			t.UpdatedAt = time.Now()
-			_ = h.store.Update(c.Request.Context(), t)
+			if updateErr := h.store.Update(c.Request.Context(), t); updateErr != nil {
+				logging.L(c.Request.Context()).Error("failed to persist Stripe customer ID on tenant",
+					"tenant_id", t.ID, "stripe_customer_id", customerID, "error", updateErr)
+			}
 		}
 	}
 
@@ -154,7 +157,10 @@ func (h *Handler) CreateTenant(c *gin.Context) {
 
 	// Bind the key to this tenant.
 	keyInfo.TenantID = t.ID
-	_ = h.authMgr.Store().Update(c.Request.Context(), keyInfo)
+	if updateErr := h.authMgr.Store().Update(c.Request.Context(), keyInfo); updateErr != nil {
+		logging.L(c.Request.Context()).Error("failed to bind API key to tenant — key exists but is unscoped",
+			"tenant_id", t.ID, "key_id", keyInfo.ID, "error", updateErr)
+	}
 
 	c.JSON(http.StatusCreated, gin.H{
 		"tenant":  t,
@@ -339,7 +345,10 @@ func (h *Handler) RegisterAgent(c *gin.Context) {
 	}
 
 	keyInfo.TenantID = tenantID
-	_ = h.authMgr.Store().Update(c.Request.Context(), keyInfo)
+	if updateErr := h.authMgr.Store().Update(c.Request.Context(), keyInfo); updateErr != nil {
+		logging.L(c.Request.Context()).Error("failed to bind agent API key to tenant — key exists but is unscoped",
+			"tenant_id", tenantID, "key_id", keyInfo.ID, "agent", agent.Address, "error", updateErr)
+	}
 
 	// For MemoryStore, also track the binding.
 	if ms, ok := h.store.(*MemoryStore); ok {
@@ -380,7 +389,10 @@ func (h *Handler) CreateKey(c *gin.Context) {
 	}
 
 	keyInfo.TenantID = tenantID
-	_ = h.authMgr.Store().Update(c.Request.Context(), keyInfo)
+	if updateErr := h.authMgr.Store().Update(c.Request.Context(), keyInfo); updateErr != nil {
+		logging.L(c.Request.Context()).Error("failed to bind API key to tenant — key exists but is unscoped",
+			"tenant_id", tenantID, "key_id", keyInfo.ID, "agent", req.AgentAddr, "error", updateErr)
+	}
 
 	c.JSON(http.StatusCreated, gin.H{
 		"apiKey":  rawKey,

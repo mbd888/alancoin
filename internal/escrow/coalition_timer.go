@@ -2,10 +2,11 @@ package escrow
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/recovery"
 )
 
 // CoalitionTimer periodically checks for expired coalition escrows and auto-settles them.
@@ -63,11 +64,7 @@ func (t *CoalitionTimer) Running() bool {
 }
 
 func (t *CoalitionTimer) safeClose(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.logger.Error("panic in coalition timer", "panic", fmt.Sprint(r))
-		}
-	}()
+	defer recovery.LogPanic(t.logger, "coalition_timer")
 
 	closed, err := t.service.ForceCloseExpired(ctx)
 	if err != nil {

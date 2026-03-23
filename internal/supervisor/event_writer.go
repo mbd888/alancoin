@@ -2,11 +2,12 @@ package supervisor
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"math/big"
 	"sync/atomic"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/recovery"
 )
 
 const (
@@ -123,11 +124,7 @@ func (w *EventWriter) flush(buf []*SpendEventRecord) {
 }
 
 func (w *EventWriter) safeFlush(buf []*SpendEventRecord) {
-	defer func() {
-		if r := recover(); r != nil {
-			w.logger.Error("panic in event writer flush", "panic", fmt.Sprint(r))
-		}
-	}()
+	defer recovery.LogPanic(w.logger, "supervisor_event_writer")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -156,3 +156,170 @@ func TestSpendWithMetadata(t *testing.T) {
 		t.Errorf("SessionID = %q", entry.SessionID)
 	}
 }
+
+func TestListCostCenters(t *testing.T) {
+	svc := newTestService()
+	ctx := context.Background()
+
+	// Create cost centers for two different tenants
+	svc.CreateCostCenter(ctx, "ten_1", "Claims", "Insurance", "", "10000.00", 80)
+	svc.CreateCostCenter(ctx, "ten_1", "Underwriting", "Insurance", "", "8000.00", 80)
+	svc.CreateCostCenter(ctx, "ten_2", "Engineering", "Eng", "", "5000.00", 80)
+
+	// List for ten_1 — should return 2
+	centers, err := svc.ListCostCenters(ctx, "ten_1")
+	if err != nil {
+		t.Fatalf("ListCostCenters(ten_1): %v", err)
+	}
+	if len(centers) != 2 {
+		t.Errorf("ten_1 centers = %d, want 2", len(centers))
+	}
+
+	// List for ten_2 — should return 1
+	centers, err = svc.ListCostCenters(ctx, "ten_2")
+	if err != nil {
+		t.Fatalf("ListCostCenters(ten_2): %v", err)
+	}
+	if len(centers) != 1 {
+		t.Errorf("ten_2 centers = %d, want 1", len(centers))
+	}
+	if centers[0].Name != "Engineering" {
+		t.Errorf("ten_2 center name = %q, want Engineering", centers[0].Name)
+	}
+
+	// List for non-existent tenant — should return empty slice
+	centers, err = svc.ListCostCenters(ctx, "ten_nonexistent")
+	if err != nil {
+		t.Fatalf("ListCostCenters(nonexistent): %v", err)
+	}
+	if len(centers) != 0 {
+		t.Errorf("nonexistent tenant centers = %d, want 0", len(centers))
+	}
+}
+
+func TestHasBudgetRemaining(t *testing.T) {
+	svc := newTestService()
+	ctx := context.Background()
+
+	// No cost centers — should return true (no enforcement)
+	ok, err := svc.HasBudgetRemaining(ctx, "ten_empty")
+	if err != nil {
+		t.Fatalf("HasBudgetRemaining(no centers): %v", err)
+	}
+	if !ok {
+		t.Error("HasBudgetRemaining with no cost centers should return true")
+	}
+
+	// Create a cost center with budget and spend within limits
+	cc, _ := svc.CreateCostCenter(ctx, "ten_1", "Claims", "Insurance", "", "100.00", 80)
+	svc.RecordSpend(ctx, cc.ID, "ten_1", "0xA1", "50.00", "inference", SpendOpts{})
+
+	ok, err = svc.HasBudgetRemaining(ctx, "ten_1")
+	if err != nil {
+		t.Fatalf("HasBudgetRemaining(within budget): %v", err)
+	}
+	if !ok {
+		t.Error("HasBudgetRemaining should return true when within budget")
+	}
+
+	// Exhaust the budget completely
+	svc.RecordSpend(ctx, cc.ID, "ten_1", "0xA1", "50.00", "inference", SpendOpts{})
+
+	ok, err = svc.HasBudgetRemaining(ctx, "ten_1")
+	if err != nil {
+		t.Fatalf("HasBudgetRemaining(exhausted): %v", err)
+	}
+	if ok {
+		t.Error("HasBudgetRemaining should return false when all budget exhausted")
+	}
+}
+
+func TestHasBudgetRemainingMultipleCenters(t *testing.T) {
+	svc := newTestService()
+	ctx := context.Background()
+
+	// Two cost centers: one exhausted, one with remaining budget
+	cc1, _ := svc.CreateCostCenter(ctx, "ten_1", "Team A", "Eng", "", "50.00", 80)
+	cc2, _ := svc.CreateCostCenter(ctx, "ten_1", "Team B", "Eng", "", "100.00", 80)
+
+	// Exhaust cc1
+	svc.RecordSpend(ctx, cc1.ID, "ten_1", "0xA1", "50.00", "inference", SpendOpts{})
+
+	// cc2 still has budget
+	svc.RecordSpend(ctx, cc2.ID, "ten_1", "0xA2", "30.00", "inference", SpendOpts{})
+
+	ok, err := svc.HasBudgetRemaining(ctx, "ten_1")
+	if err != nil {
+		t.Fatalf("HasBudgetRemaining: %v", err)
+	}
+	if !ok {
+		t.Error("HasBudgetRemaining should return true when at least one center has budget")
+	}
+}
+
+func TestHasBudgetRemainingInactiveCenter(t *testing.T) {
+	svc := newTestService()
+	ctx := context.Background()
+
+	// Create a cost center, then deactivate it
+	cc, _ := svc.CreateCostCenter(ctx, "ten_1", "Old Team", "Eng", "", "100.00", 80)
+	cc.Active = false
+	svc.store.UpdateCostCenter(ctx, cc)
+
+	// Only inactive centers — HasBudgetRemaining iterates active centers only.
+	// No active centers pass the budget check, so returns false.
+	ok, err := svc.HasBudgetRemaining(ctx, "ten_1")
+	if err != nil {
+		t.Fatalf("HasBudgetRemaining(inactive): %v", err)
+	}
+	// All centers inactive, none have budget remaining → false
+	if ok {
+		t.Error("HasBudgetRemaining should return false when all centers are inactive")
+	}
+}
+
+func TestMemoryStoreUpdateCostCenter(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	cc := &CostCenter{
+		ID:            "cc_test1",
+		TenantID:      "ten_1",
+		Name:          "Original",
+		Department:    "Eng",
+		MonthlyBudget: "1000.00",
+		WarnAtPercent: 80,
+		Active:        true,
+		CreatedAt:     time.Now(),
+	}
+	store.CreateCostCenter(ctx, cc)
+
+	// Update fields
+	cc.Name = "Updated"
+	cc.MonthlyBudget = "2000.00"
+	cc.WarnAtPercent = 90
+	cc.Active = false
+
+	err := store.UpdateCostCenter(ctx, cc)
+	if err != nil {
+		t.Fatalf("UpdateCostCenter: %v", err)
+	}
+
+	// Verify the update persisted
+	got, err := store.GetCostCenter(ctx, "cc_test1")
+	if err != nil {
+		t.Fatalf("GetCostCenter after update: %v", err)
+	}
+	if got.Name != "Updated" {
+		t.Errorf("Name = %q, want Updated", got.Name)
+	}
+	if got.MonthlyBudget != "2000.00" {
+		t.Errorf("MonthlyBudget = %q, want 2000.00", got.MonthlyBudget)
+	}
+	if got.WarnAtPercent != 90 {
+		t.Errorf("WarnAtPercent = %d, want 90", got.WarnAtPercent)
+	}
+	if got.Active {
+		t.Error("Active should be false after update")
+	}
+}
