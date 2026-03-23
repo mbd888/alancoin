@@ -53,6 +53,7 @@ type BaselineStore interface {
 	GetRecentSpendEvents(ctx context.Context, since time.Time) ([]*SpendEventRecord, error)
 	GetAllAgentsWithEvents(ctx context.Context, since time.Time) ([]string, error)
 	GetHourlyTotals(ctx context.Context, agentAddr string, since time.Time) (map[time.Time]*big.Int, error)
+	GetAllHourlyTotals(ctx context.Context, since time.Time) (map[string]map[time.Time]*big.Int, error)
 
 	// Denials
 	LogDenial(ctx context.Context, rec *DenialRecord) error

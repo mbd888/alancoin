@@ -123,21 +123,16 @@ func (t *BaselineTimer) compute(ctx context.Context) {
 	}
 
 	since := time.Now().Add(-time.Duration(baselineHistoryDays) * 24 * time.Hour)
-	agents, err := t.store.GetAllAgentsWithEvents(ctx, since)
+
+	// Single aggregation query replaces N+1 per-agent queries.
+	allTotals, err := t.store.GetAllHourlyTotals(ctx, since)
 	if err != nil {
-		t.logger.Error("baseline compute: failed to list agents", "error", err)
+		t.logger.Error("baseline compute: failed to get all hourly totals", "error", err)
 		return
 	}
 
 	var batch []*AgentBaseline
-	for _, addr := range agents {
-		totals, err := t.store.GetHourlyTotals(ctx, addr, since)
-		if err != nil {
-			t.logger.Warn("baseline compute: failed to get hourly totals",
-				"agent", addr, "error", err)
-			continue
-		}
-
+	for addr, totals := range allTotals {
 		if len(totals) < baselineMinSampleHours {
 			continue
 		}

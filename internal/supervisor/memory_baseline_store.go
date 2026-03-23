@@ -110,6 +110,26 @@ func (s *MemoryBaselineStore) GetHourlyTotals(_ context.Context, agentAddr strin
 	return totals, nil
 }
 
+func (s *MemoryBaselineStore) GetAllHourlyTotals(_ context.Context, since time.Time) (map[string]map[time.Time]*big.Int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make(map[string]map[time.Time]*big.Int)
+	for _, ev := range s.events {
+		if ev.CreatedAt.Before(since) {
+			continue
+		}
+		hour := ev.CreatedAt.Truncate(time.Hour)
+		if result[ev.AgentAddr] == nil {
+			result[ev.AgentAddr] = make(map[time.Time]*big.Int)
+		}
+		if result[ev.AgentAddr][hour] == nil {
+			result[ev.AgentAddr][hour] = new(big.Int)
+		}
+		result[ev.AgentAddr][hour].Add(result[ev.AgentAddr][hour], ev.Amount)
+	}
+	return result, nil
+}
+
 func (s *MemoryBaselineStore) PruneOldEvents(_ context.Context, before time.Time) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

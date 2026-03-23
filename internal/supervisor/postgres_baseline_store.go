@@ -201,6 +201,37 @@ func (s *PostgresBaselineStore) GetHourlyTotals(ctx context.Context, agentAddr s
 	return totals, rows.Err()
 }
 
+func (s *PostgresBaselineStore) GetAllHourlyTotals(ctx context.Context, since time.Time) (map[string]map[time.Time]*big.Int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT agent_addr, date_trunc('hour', created_at) AS hour, SUM(amount)
+		FROM agent_spend_events
+		WHERE created_at >= $1
+		GROUP BY agent_addr, date_trunc('hour', created_at)
+	`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	result := make(map[string]map[time.Time]*big.Int)
+	for rows.Next() {
+		var (
+			addr     string
+			hour     time.Time
+			totalStr string
+		)
+		if err := rows.Scan(&addr, &hour, &totalStr); err != nil {
+			return nil, err
+		}
+		total, _ := usdc.Parse(totalStr)
+		if result[addr] == nil {
+			result[addr] = make(map[time.Time]*big.Int)
+		}
+		result[addr][hour] = total
+	}
+	return result, rows.Err()
+}
+
 func (s *PostgresBaselineStore) LogDenial(ctx context.Context, rec *DenialRecord) error {
 	return s.db.QueryRowContext(ctx, `
 		INSERT INTO agent_denial_log
