@@ -62,6 +62,35 @@ type SettlementPayload struct {
 	AmountFloat float64 `json:"amountFloat"`
 }
 
+// DisputePayload is the payload for TopicDispute events.
+type DisputePayload struct {
+	EscrowID   string `json:"escrowId"`
+	BuyerAddr  string `json:"buyerAddr"`
+	SellerAddr string `json:"sellerAddr"`
+	Amount     string `json:"amount"`
+	Reason     string `json:"reason"`
+	ServiceID  string `json:"serviceId"`
+}
+
+// AlertPayload is the payload for TopicAlert events.
+type AlertPayload struct {
+	AlertID   string  `json:"alertId"`
+	AgentAddr string  `json:"agentAddr"`
+	Type      string  `json:"type"`
+	Severity  string  `json:"severity"`
+	Message   string  `json:"message"`
+	Score     float64 `json:"score"`
+}
+
+// KYAPayload is the payload for TopicKYA events.
+type KYAPayload struct {
+	CertID    string `json:"certId"`
+	AgentAddr string `json:"agentAddr"`
+	TrustTier string `json:"trustTier"`
+	TenantID  string `json:"tenantId"`
+	ExpiresAt string `json:"expiresAt"`
+}
+
 // Handler processes a batch of events. Return error to trigger retry.
 type Handler func(ctx context.Context, events []Event) error
 

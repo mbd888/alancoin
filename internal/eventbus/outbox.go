@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/metrics"
 )
 
 // Outbox implements the transactional outbox pattern for exactly-once event publishing.
@@ -82,6 +84,17 @@ func (o *Outbox) Poll(ctx context.Context, bus Bus, interval time.Duration) {
 }
 
 func (o *Outbox) publishBatch(ctx context.Context, bus Bus) {
+	// Update lag metric: age of oldest unpublished event.
+	var lagSeconds sql.NullFloat64
+	_ = o.db.QueryRowContext(ctx,
+		`SELECT EXTRACT(EPOCH FROM NOW() - MIN(created_at)) FROM eventbus_outbox WHERE published = FALSE`,
+	).Scan(&lagSeconds)
+	if lagSeconds.Valid {
+		metrics.OutboxPollLag.Set(lagSeconds.Float64)
+	} else {
+		metrics.OutboxPollLag.Set(0)
+	}
+
 	// SELECT FOR UPDATE SKIP LOCKED: only one poller processes each event,
 	// even with multiple server instances. Events locked by other pollers are skipped.
 	rows, err := o.db.QueryContext(ctx, `
