@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,13 +30,20 @@ func TestCDC_PollOnce_PublishesEntries(t *testing.T) {
 		WillReturnRows(rows)
 
 	// Subscribe to capture events
-	var received []Event
+	var (
+		mu       sync.Mutex
+		received []Event
+	)
 	bus.Subscribe("ledger.credit", "test", 10, 100*time.Millisecond, func(_ context.Context, events []Event) error {
+		mu.Lock()
 		received = append(received, events...)
+		mu.Unlock()
 		return nil
 	})
 	bus.Subscribe("ledger.debit", "test2", 10, 100*time.Millisecond, func(_ context.Context, events []Event) error {
+		mu.Lock()
 		received = append(received, events...)
+		mu.Unlock()
 		return nil
 	})
 
