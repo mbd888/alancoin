@@ -22,6 +22,9 @@ type Config struct {
 	// Database
 	DatabaseURL string // PostgreSQL connection string (optional, uses in-memory if not set)
 
+	// Redis (optional — enables distributed rate limiting, idempotency, circuit breaker)
+	RedisURL string // Redis connection URL (e.g. "redis://localhost:6379"), empty = in-memory fallback
+
 	// Blockchain settings
 	RPCURL        string
 	ChainID       int64
@@ -103,6 +106,10 @@ type Config struct {
 	// CDC (Change Data Capture)
 	CDCEnabled bool // Enable ledger CDC watcher
 
+	// Cleanup retention
+	WALRetention    time.Duration // How long to keep processed WAL entries (default 24h)
+	OutboxRetention time.Duration // How long to keep published outbox entries (default 24h)
+
 	// Stripe billing
 	StripeSecretKey         string // Stripe secret key (sk_test_... or sk_live_...)
 	StripeWebhookSecret     string // Stripe webhook signing secret (whsec_...)
@@ -155,6 +162,7 @@ func Load() (*Config, error) {
 		Env:           getEnv("ENV", DefaultEnv),
 		LogLevel:      getEnv("LOG_LEVEL", DefaultLogLevel),
 		DatabaseURL:   os.Getenv("DATABASE_URL"), // Optional, uses in-memory if not set
+		RedisURL:      os.Getenv("REDIS_URL"),    // Optional, enables distributed state
 		RPCURL:        getEnv("RPC_URL", DefaultRPCURL),
 		ChainID:       getEnvInt64("CHAIN_ID", DefaultChainID),
 		PrivateKey:    os.Getenv("PRIVATE_KEY"), // Required, no default
@@ -219,6 +227,9 @@ func Load() (*Config, error) {
 		KafkaSASLPassword:  os.Getenv("KAFKA_SASL_PASSWORD"),
 
 		CDCEnabled: os.Getenv("CDC_ENABLED") == "true",
+
+		WALRetention:    getEnvDuration("WAL_RETENTION", 24*time.Hour),
+		OutboxRetention: getEnvDuration("OUTBOX_RETENTION", 24*time.Hour),
 
 		StripeSecretKey:         os.Getenv("STRIPE_SECRET_KEY"),
 		StripeWebhookSecret:     os.Getenv("STRIPE_WEBHOOK_SECRET"),

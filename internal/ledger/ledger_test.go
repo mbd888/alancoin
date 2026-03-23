@@ -692,25 +692,13 @@ func TestLedger_EscrowHistoryEntries(t *testing.T) {
 	}
 }
 
-// assertFundConservation verifies totalIn - totalOut = available + pending + escrowed
-func assertFundConservation(t *testing.T, bal *Balance, context string) {
+// assertFundConservation delegates to the production CheckInvariant function.
+func assertFundConservation(t *testing.T, bal *Balance, ctx string) {
 	t.Helper()
-	totalIn, _ := usdc.Parse(bal.TotalIn)
-	totalOut, _ := usdc.Parse(bal.TotalOut)
-	available, _ := usdc.Parse(bal.Available)
-	pending, _ := usdc.Parse(bal.Pending)
-	escrowed, _ := usdc.Parse(bal.Escrowed)
-
-	// net = totalIn - totalOut
-	net := new(big.Int).Sub(totalIn, totalOut)
-	// sum = available + pending + escrowed
-	sum := new(big.Int).Add(available, pending)
-	sum.Add(sum, escrowed)
-
-	if net.Cmp(sum) != 0 {
-		t.Errorf("%s: fund conservation violated: totalIn(%s) - totalOut(%s) = %s, but available(%s) + pending(%s) + escrowed(%s) = %s",
-			context, bal.TotalIn, bal.TotalOut, usdc.Format(net),
-			bal.Available, bal.Pending, bal.Escrowed, usdc.Format(sum))
+	if err := CheckInvariant(bal); err != nil {
+		t.Errorf("%s: %v (A=%s P=%s E=%s In=%s Out=%s Credit=%s)",
+			ctx, err, bal.Available, bal.Pending, bal.Escrowed,
+			bal.TotalIn, bal.TotalOut, bal.CreditUsed)
 	}
 }
 

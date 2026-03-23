@@ -43,9 +43,9 @@ func (s *redisIdempotencyStore) GetOrReserve(ctx context.Context, sessionID, ide
 	opCtx, cancel := context.WithTimeout(ctx, idemOpTimeout)
 	defer cancel()
 
-	// Try to reserve with SET NX
+	// Try to reserve with SET NX (atomic set-if-not-exists)
 	start := time.Now()
-	ok, err := s.rdb.SetNX(opCtx, key, idemPendingValue, s.ttl).Result()
+	ok, err := s.rdb.SetNX(opCtx, key, idemPendingValue, s.ttl).Result() //nolint:staticcheck // SetNX is clearer than Set+NX option for this pattern
 	metrics.RedisOpDuration.WithLabelValues("idem_setnx").Observe(time.Since(start).Seconds())
 	if err != nil {
 		metrics.RedisErrors.WithLabelValues("idem_setnx").Inc()

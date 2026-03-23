@@ -59,6 +59,7 @@ type Breaker struct {
 	threshold    int
 	openDuration time.Duration
 	onTransition func(key string, from, to State) // optional callback for metrics
+	redisCB      *redisCircuitBreaker             // non-nil when Redis is configured
 }
 
 // New creates a circuit breaker that opens after threshold consecutive
@@ -87,6 +88,13 @@ func (b *Breaker) OnTransition(fn func(key string, from, to State)) {
 // Allow returns true if a request to key should be allowed.
 // If the circuit is open and openDuration has elapsed, it transitions to half-open.
 func (b *Breaker) Allow(key string) bool {
+	if b.redisCB != nil {
+		allowed, err := b.redisCB.Allow(key)
+		if err == nil {
+			return allowed
+		}
+		// Redis failed — fall through to local
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -114,6 +122,9 @@ func (b *Breaker) Allow(key string) bool {
 // RecordSuccess records a successful request. Resets failure count and
 // closes the circuit if it was half-open.
 func (b *Breaker) RecordSuccess(key string) {
+	if b.redisCB != nil {
+		_ = b.redisCB.RecordSuccess(key) // best-effort; also update local
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -131,6 +142,9 @@ func (b *Breaker) RecordSuccess(key string) {
 // RecordFailure records a failed request. If consecutive failures exceed
 // the threshold, trips the circuit open.
 func (b *Breaker) RecordFailure(key string) {
+	if b.redisCB != nil {
+		_ = b.redisCB.RecordFailure(key) // best-effort; also update local
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

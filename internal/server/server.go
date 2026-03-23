@@ -34,6 +34,7 @@ import (
 	"github.com/mbd888/alancoin/internal/arbitration"
 	"github.com/mbd888/alancoin/internal/auth"
 	"github.com/mbd888/alancoin/internal/billing"
+	"github.com/mbd888/alancoin/internal/cache"
 	"github.com/mbd888/alancoin/internal/chargeback"
 	"github.com/mbd888/alancoin/internal/circuitbreaker"
 	"github.com/mbd888/alancoin/internal/config"
@@ -133,7 +134,10 @@ type Server struct {
 	intelligenceWorker     *intelligence.Worker   // Periodic intelligence computation
 	eventBus               eventbus.Bus           // Settlement event bus (MemoryBus or KafkaBus)
 	eventBusMemory         *eventbus.MemoryBus    // Non-nil only when using MemoryBus (for DLQ admin endpoints)
+	outbox                 *eventbus.Outbox       // Transactional outbox for exactly-once event publishing
+	walStore               *eventbus.WALStore     // WAL for crash recovery (stored for cleanup worker)
 	db                     *sql.DB                // nil if using in-memory
+	redisClient            *cache.RedisClient     // nil if Redis not configured
 	router                 *gin.Engine
 	httpSrv                *http.Server
 	logger                 *slog.Logger
@@ -180,6 +184,17 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		tracerShutdown = func(context.Context) error { return nil }
 	}
 	s.tracerShutdown = tracerShutdown
+
+	// Initialize Redis (optional — enables distributed rate limiting, idempotency, circuit breaker)
+	if cfg.RedisURL != "" {
+		rc, err := cache.NewRedisClient(cfg.RedisURL)
+		if err != nil {
+			s.logger.Warn("failed to connect to Redis, using in-memory fallback", "error", err)
+		} else {
+			s.redisClient = rc
+			s.logger.Info("redis connected")
+		}
+	}
 
 	// Initialize storage (Postgres if DATABASE_URL set, otherwise in-memory)
 	if cfg.DatabaseURL != "" {
@@ -234,6 +249,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.ledgerService = supervisor.New(s.ledger,
 			supervisor.WithLogger(s.logger),
 			supervisor.WithBaselineStore(baselineStore),
+			supervisor.WithBalanceConcentration(),
 		)
 		s.denialExporter = &adminDenialExportAdapter{store: baselineStore}
 		s.eventWriter = supervisor.NewEventWriter(baselineStore, s.logger)
@@ -316,8 +332,15 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		gwLedger := &gatewayLedgerAdapter{s.ledgerService}
 		s.gatewayStore = gwStore
 		gwCB := circuitbreaker.New(s.cfg.CircuitBreakerThreshold, s.cfg.CircuitBreakerDuration)
+		if s.redisClient != nil {
+			gwCB.SetRedisBackend(s.redisClient.Client(), s.logger)
+		}
 		s.gatewayService = gateway.NewService(gwStore, gwResolver, gwForwarder, gwLedger, s.logger).
 			WithCircuitBreaker(gwCB)
+		if s.redisClient != nil {
+			s.gatewayService.WithIdempotencyStore(
+				gateway.NewRedisIdempotencyStore(s.redisClient.Client(), 10*time.Minute, s.logger))
+		}
 		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore, s.logger)
 		s.logger.Info("gateway enabled (postgres)")
 
@@ -405,7 +428,8 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		} else {
 			memBus := eventbus.NewMemoryBus(s.cfg.EventBusBufferSize, s.logger)
 			if db != nil {
-				memBus.WithWAL(eventbus.NewWALStore(db, s.logger))
+				s.walStore = eventbus.NewWALStore(db, s.logger)
+				memBus.WithWAL(s.walStore)
 				s.logger.Info("event bus WAL enabled (postgres)")
 			}
 			s.eventBus = memBus
@@ -419,7 +443,42 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.eventBus.Subscribe(eventbus.TopicSettlement, "webhooks", 20, 500*time.Millisecond,
 			s.makeWebhookConsumer())
 		s.gatewayService.WithEventBus(&eventBusGatewayAdapter{s.eventBus})
-		s.logger.Info("event bus: 3 consumers subscribed")
+
+		// Subscribe to dispute/alert/kya topics with logging consumers
+		s.eventBus.Subscribe(eventbus.TopicDispute, "dispute-logger", 10, time.Second,
+			func(_ context.Context, events []eventbus.Event) error {
+				for _, e := range events {
+					s.logger.Info("dispute event received", "event_id", e.ID, "key", e.Key)
+				}
+				return nil
+			})
+		s.eventBus.Subscribe(eventbus.TopicAlert, "alert-logger", 10, time.Second,
+			func(_ context.Context, events []eventbus.Event) error {
+				for _, e := range events {
+					s.logger.Info("forensics alert event received", "event_id", e.ID, "key", e.Key)
+				}
+				return nil
+			})
+		s.eventBus.Subscribe(eventbus.TopicKYA, "kya-logger", 10, time.Second,
+			func(_ context.Context, events []eventbus.Event) error {
+				for _, e := range events {
+					s.logger.Info("kya event received", "event_id", e.ID, "key", e.Key)
+				}
+				return nil
+			})
+		s.logger.Info("event bus: 6 consumers subscribed (3 settlement + 3 topic loggers)")
+
+		// Transactional outbox: write settlement events inside the ledger transaction
+		// for exactly-once delivery. The outbox poller publishes them to the event bus.
+		if db != nil {
+			s.outbox = eventbus.NewOutbox(db, s.logger)
+			s.gatewayService.WithOutbox(s.outbox)
+			s.logger.Info("transactional outbox enabled")
+		}
+
+		// Wire event bus into escrow and streams for settlement/dispute events
+		s.escrowService.WithBus(s.eventBus)
+		s.streamService.WithBus(s.eventBus)
 
 		// Wire revenue accumulator into all payment paths (GAP-1 fix).
 		// Records seller revenue from gateway, escrow, streams for flywheel
@@ -485,7 +544,8 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			WithLedger(&reconcileLedgerAdapter{eventStore: eventStore, ledgerStore: ledgerStore}).
 			WithEscrow(&reconcileEscrowAdapter{store: escrowStore}).
 			WithStream(&reconcileStreamAdapter{store: streamStore}).
-			WithHold(&reconcileHoldAdapter{db: db})
+			WithHold(&reconcileHoldAdapter{db: db}).
+			WithInvariant(&reconcileInvariantAdapter{eventStore: eventStore, ledgerStore: ledgerStore})
 		s.reconcileTimer = reconciliation.NewTimer(s.reconcileRunner, s.logger)
 		s.logger.Info("reconciliation enabled (postgres)")
 
@@ -509,7 +569,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		memAuditLogger := ledger.NewMemoryAuditLogger()
 		s.ledger = ledger.NewWithEvents(memStore, memEventStore).
 			WithAuditLogger(memAuditLogger)
-		s.ledgerService = supervisor.New(s.ledger, supervisor.WithLogger(s.logger))
+		s.ledgerService = supervisor.New(s.ledger,
+			supervisor.WithLogger(s.logger),
+			supervisor.WithBalanceConcentration(),
+		)
 		s.logger.Info("agent balance tracking enabled (in-memory)")
 
 		// Webhooks with in-memory store
@@ -575,8 +638,15 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		}
 		s.gatewayStore = gwStore2
 		gwCB2 := circuitbreaker.New(s.cfg.CircuitBreakerThreshold, s.cfg.CircuitBreakerDuration)
+		if s.redisClient != nil {
+			gwCB2.SetRedisBackend(s.redisClient.Client(), s.logger)
+		}
 		s.gatewayService = gateway.NewService(gwStore2, gwResolver2, gwForwarder2, &gatewayLedgerAdapter{s.ledgerService}, s.logger).
 			WithCircuitBreaker(gwCB2)
+		if s.redisClient != nil {
+			s.gatewayService.WithIdempotencyStore(
+				gateway.NewRedisIdempotencyStore(s.redisClient.Client(), 10*time.Minute, s.logger))
+		}
 		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore2, s.logger)
 		s.logger.Info("gateway enabled (in-memory)")
 
@@ -644,6 +714,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			s.makeWebhookConsumer())
 		s.gatewayService.WithEventBus(&eventBusGatewayAdapter{s.eventBus})
 		s.logger.Info("event bus enabled (in-memory, 3 consumers)")
+
+		// Wire event bus into escrow and streams (in-memory mode)
+		s.escrowService.WithBus(s.eventBus)
+		s.streamService.WithBus(s.eventBus)
 
 		// Wire revenue accumulator into all payment paths (in-memory mode).
 		s.revenueAccumulator = flywheel.NewRevenueAccumulator(s.logger)
@@ -760,6 +834,17 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			detail := fmt.Sprintf("pending=%d published=%d consumed=%d dropped=%d dlq=%d",
 				m.Pending, m.Published, m.Consumed, m.Dropped, m.DeadLettered)
 			return health.Status{Name: "event_bus", Healthy: healthy, Detail: detail}
+		})
+	}
+
+	// Redis health check
+	if s.redisClient != nil {
+		rc := s.redisClient
+		s.healthRegistry.Register("redis", func(ctx context.Context) health.Status {
+			if err := rc.Healthy(ctx); err != nil {
+				return health.Status{Name: "redis", Healthy: false, Detail: err.Error()}
+			}
+			return health.Status{Name: "redis", Healthy: true, Detail: "ok"}
 		})
 	}
 
@@ -899,6 +984,9 @@ func (s *Server) setupMiddleware() {
 		BurstSize:         s.cfg.RateLimitBurst,
 		CleanupInterval:   time.Minute,
 	})
+	if s.redisClient != nil {
+		s.rateLimiter.SetRedisBackend(s.redisClient.Client(), s.logger)
+	}
 	s.router.Use(s.rateLimiter.Middleware())
 
 	// Prometheus metrics
@@ -1939,6 +2027,12 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.eventBus.Start(runCtx)
 	}
 
+	// Start outbox poller (publishes events written in ledger transactions)
+	if s.outbox != nil && s.eventBus != nil {
+		go s.outbox.Poll(runCtx, s.eventBus, 100*time.Millisecond)
+		s.logger.Info("outbox poller started (100ms interval)")
+	}
+
 	// Start CDC watcher (ledger → event bus)
 	if s.db != nil && s.eventBus != nil && s.cfg.CDCEnabled {
 		cdc := eventbus.NewCDC(s.db, s.eventBus, s.logger)
@@ -1951,6 +2045,14 @@ func (s *Server) Run(ctx context.Context) error {
 		refresher := eventbus.NewMatviewRefresher(s.db, 5*time.Minute, s.logger)
 		go refresher.Start(runCtx)
 		s.logger.Info("materialized view refresher started (5m interval)")
+	}
+
+	// Start WAL/outbox cleanup worker (prevents unbounded table growth)
+	if s.db != nil {
+		cleaner := eventbus.NewCleanupWorker(s.db, s.walStore, s.outbox,
+			1*time.Hour, s.cfg.WALRetention, s.cfg.OutboxRetention, s.logger)
+		go cleaner.Start(runCtx)
+		s.logger.Info("eventbus cleanup worker started (1h interval)")
 	}
 
 	// Start deposit watcher
@@ -2205,6 +2307,15 @@ drainLoop:
 			s.logger.Error("tracer shutdown error", "error", err)
 		} else {
 			s.logger.Info("tracer shutdown complete")
+		}
+	}
+
+	// Close Redis connection
+	if s.redisClient != nil {
+		if err := s.redisClient.Close(); err != nil {
+			s.logger.Error("redis close error", "error", err)
+		} else {
+			s.logger.Info("redis connection closed")
 		}
 	}
 
@@ -2472,6 +2583,14 @@ func (a *gatewayLedgerAdapter) SettleHold(ctx context.Context, buyerAddr, seller
 
 func (a *gatewayLedgerAdapter) SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error {
 	return a.l.SettleHoldWithFee(ctx, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference)
+}
+
+func (a *gatewayLedgerAdapter) SettleHoldWithCallback(ctx context.Context, buyerAddr, sellerAddr, amount, reference string, preCommit func(tx *sql.Tx) error) error {
+	return a.l.SettleHoldWithCallback(ctx, buyerAddr, sellerAddr, amount, reference, preCommit)
+}
+
+func (a *gatewayLedgerAdapter) SettleHoldWithFeeAndCallback(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string, preCommit func(tx *sql.Tx) error) error {
+	return a.l.SettleHoldWithFeeAndCallback(ctx, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference, preCommit)
 }
 
 func (a *gatewayLedgerAdapter) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
@@ -2850,6 +2969,31 @@ func (a *reconcileHoldAdapter) CountOrphaned(ctx context.Context) (int, error) {
 		  )
 	`).Scan(&count)
 	return count, err
+}
+
+// reconcileInvariantAdapter checks the conservation law A+P+E = TotalIn-TotalOut
+// across all agent balances.
+type reconcileInvariantAdapter struct {
+	eventStore  ledger.EventStore
+	ledgerStore ledger.Store
+}
+
+func (a *reconcileInvariantAdapter) CheckAllInvariants(ctx context.Context) (int, error) {
+	agents, err := a.eventStore.GetAllAgents(ctx)
+	if err != nil {
+		return 0, err
+	}
+	violations := 0
+	for _, addr := range agents {
+		bal, err := a.ledgerStore.GetBalance(ctx, addr)
+		if err != nil {
+			continue
+		}
+		if err := ledger.CheckInvariant(bal); err != nil {
+			violations++
+		}
+	}
+	return violations, nil
 }
 
 // adminReconcileAdapter adapts reconciliation.Runner to admin.ReconciliationRunner

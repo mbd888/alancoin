@@ -325,6 +325,57 @@ var (
 		},
 		[]string{"view"},
 	)
+
+	// Redis distributed state metrics
+	RedisOpDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "alancoin",
+			Name:      "redis_operation_duration_seconds",
+			Help:      "Redis operation latency by operation type.",
+			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.5},
+		},
+		[]string{"operation"},
+	)
+
+	RedisErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "alancoin",
+			Name:      "redis_errors_total",
+			Help:      "Total Redis operation errors by operation type.",
+		},
+		[]string{"operation"},
+	)
+
+	RedisFallbacks = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "alancoin",
+			Name:      "redis_fallbacks_total",
+			Help:      "Total times Redis failed and in-memory fallback was used.",
+		},
+		[]string{"component"},
+	)
+
+	// Outbox and CDC lag metrics
+	OutboxPollLag = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "alancoin",
+		Name:      "outbox_poll_lag_seconds",
+		Help:      "Age of the oldest unpublished event in the outbox.",
+	})
+
+	CDCPollLag = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "alancoin",
+		Name:      "cdc_poll_lag_seconds",
+		Help:      "Age of the oldest unprocessed ledger entry for CDC.",
+	})
+
+	CleanupDeletedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "alancoin",
+			Name:      "eventbus_cleanup_deleted_total",
+			Help:      "Total rows deleted by cleanup worker.",
+		},
+		[]string{"component"},
+	)
 )
 
 func init() {
@@ -373,6 +424,12 @@ func init() {
 		EventBusRetries,
 		EventBusDeadLettered,
 		MatviewRefreshDuration,
+		RedisOpDuration,
+		RedisErrors,
+		RedisFallbacks,
+		OutboxPollLag,
+		CDCPollLag,
+		CleanupDeletedTotal,
 	)
 }
 

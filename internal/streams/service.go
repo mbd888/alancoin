@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mbd888/alancoin/internal/eventbus"
 	"github.com/mbd888/alancoin/internal/idgen"
 	"github.com/mbd888/alancoin/internal/logging"
 	"github.com/mbd888/alancoin/internal/retry"
@@ -33,6 +34,7 @@ type Service struct {
 	revenue        RevenueAccumulator
 	receiptIssuer  ReceiptIssuer
 	webhookEmitter WebhookEmitter
+	bus            eventbus.Bus // event bus for settlement events (optional)
 	locks          syncutil.ShardedMutex
 }
 
@@ -42,6 +44,12 @@ func NewService(store Store, ledger LedgerService) *Service {
 		store:  store,
 		ledger: ledger,
 	}
+}
+
+// WithBus adds the event bus for publishing settlement events.
+func (s *Service) WithBus(bus eventbus.Bus) *Service {
+	s.bus = bus
+	return s
 }
 
 // WithRecorder adds a transaction recorder for reputation integration.
@@ -406,6 +414,24 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 		if err := s.receiptIssuer.IssueReceipt(ctx, "stream", stream.ID, stream.BuyerAddr,
 			stream.SellerAddr, stream.SpentAmount, stream.ServiceID, rcptStatus, string(status)); err != nil {
 			logging.L(ctx).Error("stream settle: failed to issue receipt", "stream_id", stream.ID, "error", err)
+		}
+	}
+
+	// Publish settlement event to event bus
+	if s.bus != nil && spentBig.Sign() > 0 {
+		evt, err := eventbus.NewEvent(eventbus.TopicSettlement, stream.BuyerAddr, eventbus.SettlementPayload{
+			SessionID:   stream.ID,
+			BuyerAddr:   stream.BuyerAddr,
+			SellerAddr:  stream.SellerAddr,
+			Amount:      stream.SpentAmount,
+			ServiceType: "stream",
+			ServiceID:   stream.ServiceID,
+			Reference:   "stream:" + stream.ID,
+		})
+		if err == nil {
+			if pubErr := s.bus.Publish(ctx, evt); pubErr != nil {
+				logging.L(ctx).Warn("stream settle: event publish failed", "stream_id", stream.ID, "error", pubErr)
+			}
 		}
 	}
 

@@ -10,13 +10,14 @@ import (
 
 // Report summarizes the results of a reconciliation run.
 type Report struct {
-	LedgerMismatches int           `json:"ledgerMismatches"`
-	StuckEscrows     int           `json:"stuckEscrows"`
-	StaleStreams     int           `json:"staleStreams"`
-	OrphanedHolds    int           `json:"orphanedHolds"`
-	Healthy          bool          `json:"healthy"`
-	Duration         time.Duration `json:"durationMs"`
-	Timestamp        time.Time     `json:"timestamp"`
+	LedgerMismatches    int           `json:"ledgerMismatches"`
+	StuckEscrows        int           `json:"stuckEscrows"`
+	StaleStreams        int           `json:"staleStreams"`
+	OrphanedHolds       int           `json:"orphanedHolds"`
+	InvariantViolations int           `json:"invariantViolations"`
+	Healthy             bool          `json:"healthy"`
+	Duration            time.Duration `json:"durationMs"`
+	Timestamp           time.Time     `json:"timestamp"`
 }
 
 // LedgerChecker reconciles ledger event replay against actual balances.
@@ -39,13 +40,20 @@ type HoldChecker interface {
 	CountOrphaned(ctx context.Context) (int, error)
 }
 
+// InvariantChecker verifies the conservation law A+P+E = TotalIn-TotalOut
+// across all agent balances. Returns the number of violations found.
+type InvariantChecker interface {
+	CheckAllInvariants(ctx context.Context) (violations int, err error)
+}
+
 // Runner runs all reconciliation checks and aggregates results.
 type Runner struct {
-	ledger LedgerChecker
-	escrow EscrowChecker
-	stream StreamChecker
-	hold   HoldChecker
-	logger *slog.Logger
+	ledger    LedgerChecker
+	escrow    EscrowChecker
+	stream    StreamChecker
+	hold      HoldChecker
+	invariant InvariantChecker
+	logger    *slog.Logger
 
 	lastMu     sync.RWMutex
 	lastReport *Report
@@ -77,6 +85,12 @@ func (r *Runner) WithStream(c StreamChecker) *Runner {
 // WithHold sets the hold checker.
 func (r *Runner) WithHold(c HoldChecker) *Runner {
 	r.hold = c
+	return r
+}
+
+// WithInvariant sets the conservation invariant checker.
+func (r *Runner) WithInvariant(c InvariantChecker) *Runner {
+	r.invariant = c
 	return r
 }
 
@@ -129,11 +143,26 @@ func (r *Runner) RunAll(ctx context.Context) (*Report, error) {
 		}
 	}
 
+	if r.invariant != nil {
+		violations, err := r.invariant.CheckAllInvariants(ctx)
+		if err != nil {
+			r.logger.Error("reconciliation: invariant check failed", "error", err)
+			reconcileErrors.Inc()
+		} else {
+			report.InvariantViolations = violations
+			if violations > 0 {
+				r.logger.Error("CRITICAL: conservation invariant violations detected",
+					"violations", violations)
+			}
+		}
+	}
+
 	report.Duration = time.Since(start)
 	report.Healthy = report.LedgerMismatches == 0 &&
 		report.StuckEscrows == 0 &&
 		report.StaleStreams == 0 &&
-		report.OrphanedHolds == 0
+		report.OrphanedHolds == 0 &&
+		report.InvariantViolations == 0
 
 	reconcileDuration.Observe(report.Duration.Seconds())
 
@@ -142,6 +171,7 @@ func (r *Runner) RunAll(ctx context.Context) (*Report, error) {
 		"stuckEscrows", report.StuckEscrows,
 		"staleStreams", report.StaleStreams,
 		"orphanedHolds", report.OrphanedHolds,
+		"invariantViolations", report.InvariantViolations,
 		"healthy", report.Healthy,
 		"duration", report.Duration,
 	)

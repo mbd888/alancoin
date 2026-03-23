@@ -33,10 +33,11 @@ func DefaultConfig() Config {
 
 // Limiter tracks rate limits by key
 type Limiter struct {
-	cfg     Config
-	mu      sync.RWMutex
-	clients map[string]*clientState
-	stop    chan struct{}
+	cfg           Config
+	mu            sync.RWMutex
+	clients       map[string]*clientState
+	stop          chan struct{}
+	allowOverride func(key string, rpm, burst int) bool // non-nil when Redis is configured
 }
 
 type clientState struct {
@@ -88,7 +89,11 @@ func (l *Limiter) Allow(key string) bool {
 }
 
 // AllowWithLimit checks if a request should be allowed using a custom RPM and burst.
+// When a Redis backend is configured, delegates to it for distributed rate limiting.
 func (l *Limiter) AllowWithLimit(key string, rpm, burst int) bool {
+	if l.allowOverride != nil {
+		return l.allowOverride(key, rpm, burst)
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
