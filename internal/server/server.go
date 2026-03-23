@@ -278,12 +278,12 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.coalitionService = escrow.NewCoalitionService(coalitionStore, &escrowLedgerAdapter{s.ledgerService}).
 			WithLogger(s.logger)
 		s.coalitionTimer = escrow.NewCoalitionTimer(s.coalitionService, coalitionStore, s.logger)
-		s.contractService = contracts.NewService(contracts.NewMemoryStore()).WithLogger(s.logger)
-		offerStore := offers.NewMemoryStore()
+		s.contractService = contracts.NewService(contracts.NewPostgresStore(db)).WithLogger(s.logger)
+		offerStore := offers.NewPostgresStore(db)
 		s.offerService = offers.NewService(offerStore, &escrowLedgerAdapter{s.ledgerService}).
 			WithLogger(s.logger)
 		s.offerTimer = offers.NewTimer(s.offerService, s.logger)
-		s.workflowService = workflows.NewService(workflows.NewMemoryStore(), &escrowLedgerAdapter{s.ledgerService}).
+		s.workflowService = workflows.NewService(workflows.NewPostgresStore(db), &escrowLedgerAdapter{s.ledgerService}).
 			WithLogger(s.logger)
 		s.logger.Info("escrow enabled (postgres)")
 
