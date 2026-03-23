@@ -130,8 +130,8 @@ const (
 	DefaultRateLimit    = 100
 
 	// Database pool defaults
-	DefaultDBMaxOpenConns     = 25
-	DefaultDBMaxIdleConns     = 5
+	DefaultDBMaxOpenConns     = 50
+	DefaultDBMaxIdleConns     = 10
 	DefaultDBConnMaxLifetime  = 5 * time.Minute
 	DefaultDBConnMaxIdleTime  = 3 * time.Minute
 	DefaultDBConnectTimeout   = 5     // seconds

@@ -99,7 +99,7 @@ func (p *PostgresStore) GetBalance(ctx context.Context, agentAddr string) (*Bala
 
 // Credit adds funds to an agent's balance, auto-repaying credit first
 func (p *PostgresStore) Credit(ctx context.Context, agentAddr, amount, txHash, description string) error {
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return err
 	}
@@ -137,7 +137,7 @@ func (p *PostgresStore) Credit(ctx context.Context, agentAddr, amount, txHash, d
 // Debit removes funds from an agent's balance with credit support.
 // Uses available balance first, then draws from credit for any shortfall.
 func (p *PostgresStore) Debit(ctx context.Context, agentAddr, amount, reference, description string) error {
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return err
 	}
@@ -188,7 +188,7 @@ func (p *PostgresStore) Debit(ctx context.Context, agentAddr, amount, reference,
 
 // Refund credits back funds to an agent's balance (reverses a failed debit)
 func (p *PostgresStore) Refund(ctx context.Context, agentAddr, amount, reference, description string) error {
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return err
 	}
@@ -247,7 +247,7 @@ func (p *PostgresStore) Refund(ctx context.Context, agentAddr, amount, reference
 
 // Withdraw processes a withdrawal with row-level locking.
 func (p *PostgresStore) Withdraw(ctx context.Context, agentAddr, amount, txHash string) error {
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return err
 	}
@@ -368,7 +368,7 @@ func (p *PostgresStore) Transfer(ctx context.Context, fromAddr, toAddr, amount, 
 // If available < amount, draws the shortfall from credit line.
 // Records a credit_draw_hold entry so ReleaseHold can reverse the credit draw.
 func (p *PostgresStore) Hold(ctx context.Context, agentAddr, amount, reference string) error {
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return err
 	}
@@ -448,7 +448,7 @@ func (p *PostgresStore) Hold(ctx context.Context, agentAddr, amount, reference s
 // ConfirmHold finalizes a held amount (moves from pending to total_out).
 // Called after on-chain transfer is confirmed.
 func (p *PostgresStore) ConfirmHold(ctx context.Context, agentAddr, amount, reference string) error {
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return err
 	}
@@ -500,7 +500,7 @@ func (p *PostgresStore) ConfirmHold(ctx context.Context, agentAddr, amount, refe
 // ReleaseHold returns held funds to available (transfer failed/timed out).
 // Reverses any credit draw that was made during the original Hold.
 func (p *PostgresStore) ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error {
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return err
 	}
@@ -747,7 +747,7 @@ func (p *PostgresStore) SettleHoldWithFeeAndCallback(ctx context.Context, buyerA
 
 // EscrowLock moves funds from available to escrowed.
 func (p *PostgresStore) EscrowLock(ctx context.Context, agentAddr, amount, reference string) error {
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return err
 	}
@@ -857,7 +857,7 @@ func (p *PostgresStore) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr
 
 // RefundEscrow returns escrowed funds to available (dispute refund).
 func (p *PostgresStore) RefundEscrow(ctx context.Context, agentAddr, amount, reference string) error {
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return err
 	}
@@ -1063,7 +1063,7 @@ func (p *PostgresStore) HasDeposit(ctx context.Context, txHash string) (bool, er
 
 // SetCreditLimit sets the maximum credit for an agent
 func (p *PostgresStore) SetCreditLimit(ctx context.Context, agentAddr, limit string) error {
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return err
 	}
@@ -1093,7 +1093,7 @@ func (p *PostgresStore) SetCreditLimit(ctx context.Context, agentAddr, limit str
 
 // UseCredit draws from the agent's credit line
 func (p *PostgresStore) UseCredit(ctx context.Context, agentAddr, amount string) error {
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return err
 	}
@@ -1132,7 +1132,7 @@ func (p *PostgresStore) UseCredit(ctx context.Context, agentAddr, amount string)
 
 // RepayCredit reduces outstanding credit usage
 func (p *PostgresStore) RepayCredit(ctx context.Context, agentAddr, amount string) error {
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return err
 	}
@@ -1282,7 +1282,7 @@ func (p *PostgresStore) GetEntry(ctx context.Context, entryID string) (*Entry, e
 
 // Reverse creates a compensating entry and marks the original as reversed.
 func (p *PostgresStore) Reverse(ctx context.Context, entryID, reason, adminID string) error {
-	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return err
 	}
