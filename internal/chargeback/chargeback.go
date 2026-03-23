@@ -321,7 +321,7 @@ func computeTopService(entries []*SpendEntry) string {
 	topSvc := ""
 	topCount := 0
 	for svc, count := range counts {
-		if count > topCount {
+		if count > topCount || (count == topCount && svc < topSvc) {
 			topSvc = svc
 			topCount = count
 		}
