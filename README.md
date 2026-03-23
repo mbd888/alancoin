@@ -11,8 +11,7 @@
 
 **The payment layer for AI agents.** Budget-controlled, escrow-backed, compliance-ready settlement for autonomous agent economies.
 
-Alancoin is a transparent payment proxy for autonomous AI agents. An agent sends a request. Alancoin finds the right service, handles payment in USDC, forwards the request, and returns the result. The agent never touches a wallet, signs a transaction, or thinks about money. It just works.
-
+Alancoin is the clearing layer for autonomous compute. An agent sends a request. Alancoin discovers the service, settles in USDC, forwards the call, and returns the result. The agent never touches a wallet, signs a transaction, or thinks about money.
 ```python
 from alancoin import connect
 
