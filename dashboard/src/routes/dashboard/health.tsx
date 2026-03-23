@@ -5,10 +5,18 @@ import {
   XCircle,
   Shield,
   Database,
+  RefreshCw,
 } from "lucide-react";
 import { useSystemHealth } from "@/hooks/api/use-dashboard";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { relativeTime } from "@/lib/utils";
+
+function checkValueColor(value: number): string {
+  if (value === 0) return "text-[var(--foreground)]";
+  if (value <= 2) return "text-[var(--color-warning)]";
+  return "text-[var(--color-danger)]";
+}
 
 export function HealthPage() {
   const health = useSystemHealth();
@@ -24,12 +32,27 @@ export function HealthPage() {
   return (
     <div className="min-h-screen">
       <header className="border-b border-[var(--border)] px-8 py-5">
-        <h1 className="text-[16px] font-semibold text-[var(--foreground)]">
-          System Health
-        </h1>
-        <p className="mt-0.5 text-[13px] text-[var(--foreground-muted)]">
-          Infrastructure status, reconciliation, and conservation invariants
-        </p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-[16px] font-semibold text-[var(--foreground)]">
+              System Health
+            </h1>
+            <p className="mt-0.5 text-[13px] text-[var(--foreground-muted)]">
+              Infrastructure status, reconciliation, and conservation invariants
+            </p>
+          </div>
+          <button
+            onClick={() => health.refetch()}
+            disabled={health.isFetching}
+            className="flex items-center gap-1.5 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--background)] px-3 py-1.5 text-[12px] text-[var(--foreground-muted)] hover:text-[var(--foreground)] hover:border-[var(--foreground-muted)] transition-colors disabled:opacity-50"
+          >
+            <RefreshCw
+              size={12}
+              className={health.isFetching ? "animate-spin" : ""}
+            />
+            Refresh
+          </button>
+        </div>
       </header>
 
       <div className="px-8 py-6 space-y-6">
@@ -82,7 +105,7 @@ export function HealthPage() {
               ))}
             </div>
           ) : (
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {(h?.services ?? []).map((svc) => (
                 <div
                   key={svc.name}
@@ -152,12 +175,11 @@ export function HealthPage() {
                     : "Issues Detected"}
                 </Badge>
                 <span className="text-[11px] text-[var(--foreground-muted)] tabular-nums">
-                  Last run:{" "}
-                  {new Date(h.reconciliation.timestamp).toLocaleString()}
+                  Last run: {relativeTime(h.reconciliation.timestamp)}
                 </span>
               </div>
 
-              <div className="grid grid-cols-5 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
                 {[
                   {
                     label: "Ledger Mismatches",
@@ -185,11 +207,7 @@ export function HealthPage() {
                     className="rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--background)] p-3 text-center"
                   >
                     <p
-                      className={`text-[20px] font-semibold tabular-nums ${
-                        check.value > 0
-                          ? "text-[var(--color-danger)]"
-                          : "text-[var(--foreground)]"
-                      }`}
+                      className={`text-[20px] font-semibold tabular-nums ${checkValueColor(check.value)}`}
                     >
                       {check.value}
                     </p>
