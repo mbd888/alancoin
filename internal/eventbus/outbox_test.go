@@ -27,13 +27,9 @@ func TestOutbox_PublishBatch_PublishesAndMarks(t *testing.T) {
 	mock.ExpectQuery("SELECT id, topic, key, payload, request_id, created_at").
 		WillReturnRows(rows)
 
-	// Expect UPDATE for each published event
+	// Expect batch UPDATE for all published events
 	mock.ExpectExec("UPDATE eventbus_outbox SET published = TRUE").
-		WithArgs("evt_1").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("UPDATE eventbus_outbox SET published = TRUE").
-		WithArgs("evt_2").
-		WillReturnResult(sqlmock.NewResult(0, 1))
+		WillReturnResult(sqlmock.NewResult(0, 2))
 
 	outbox.publishBatch(context.Background(), bus)
 

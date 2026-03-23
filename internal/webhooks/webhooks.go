@@ -139,6 +139,14 @@ type Store interface {
 // URLValidator checks if a URL is safe for server-side requests.
 type URLValidator func(rawURL string) error
 
+// subsCacheEntry holds cached subscription lookups.
+type subsCacheEntry struct {
+	subs      []*Subscription
+	expiresAt time.Time
+}
+
+const subsCacheTTL = 30 * time.Second
+
 // Dispatcher sends webhook events
 type Dispatcher struct {
 	store        Store
@@ -146,6 +154,7 @@ type Dispatcher struct {
 	retry        RetryConfig
 	sem          chan struct{} // concurrency limiter
 	urlValidator URLValidator  // nil = use security.ValidateEndpointURL
+	subsCache    sync.Map      // map[string]*subsCacheEntry — keyed by event type or agent addr
 }
 
 const maxConcurrentWebhooks = 50
@@ -186,7 +195,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event *Event) error {
 	)
 	defer span.End()
 
-	subs, err := d.store.GetByEvent(ctx, event.Type)
+	subs, err := d.getByEventCached(ctx, event.Type)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -254,6 +263,51 @@ func (d *Dispatcher) DispatchToAgent(ctx context.Context, agentAddr string, even
 	}
 
 	return nil
+}
+
+// getByEventCached returns subscriptions for an event type, using a 30s TTL cache.
+// Returns copies so goroutines can safely mutate subscription fields (e.g. ConsecutiveFailures).
+func (d *Dispatcher) getByEventCached(ctx context.Context, eventType EventType) ([]*Subscription, error) {
+	key := "evt:" + string(eventType)
+	now := time.Now()
+
+	if v, ok := d.subsCache.Load(key); ok {
+		entry := v.(*subsCacheEntry)
+		if now.Before(entry.expiresAt) {
+			return copySubs(entry.subs), nil
+		}
+	}
+
+	subs, err := d.store.GetByEvent(ctx, eventType)
+	if err != nil {
+		return nil, err
+	}
+
+	d.subsCache.Store(key, &subsCacheEntry{
+		subs:      subs,
+		expiresAt: now.Add(subsCacheTTL),
+	})
+	return copySubs(subs), nil
+}
+
+// copySubs returns shallow copies of each subscription so goroutines
+// can safely write to mutable fields without racing with cached copies.
+func copySubs(subs []*Subscription) []*Subscription {
+	out := make([]*Subscription, len(subs))
+	for i, s := range subs {
+		cp := *s
+		out[i] = &cp
+	}
+	return out
+}
+
+// InvalidateSubsCache clears the subscription cache. Call after webhook
+// create/update/delete operations.
+func (d *Dispatcher) InvalidateSubsCache() {
+	d.subsCache.Range(func(key, _ any) bool {
+		d.subsCache.Delete(key)
+		return true
+	})
 }
 
 func (d *Dispatcher) send(ctx context.Context, sub *Subscription, event *Event) {
@@ -369,6 +423,7 @@ func (d *Dispatcher) updateSuccess(ctx context.Context, sub *Subscription) {
 	if err := d.store.Update(ctx, sub); err != nil {
 		slog.Warn("webhook subscription success update failed", "subscription_id", sub.ID, "error", err)
 	}
+	d.InvalidateSubsCache()
 }
 
 func (d *Dispatcher) updateError(ctx context.Context, sub *Subscription, errMsg string) {
@@ -399,6 +454,8 @@ func (d *Dispatcher) updateError(ctx context.Context, sub *Subscription, errMsg 
 	if err := d.store.Update(ctx, sub); err != nil {
 		slog.Warn("webhook subscription error update failed", "subscription_id", sub.ID, "error", err)
 	}
+	// Invalidate cached subscriptions since failure state changed.
+	d.InvalidateSubsCache()
 }
 
 // isSuspended returns true if the subscription is temporarily paused.

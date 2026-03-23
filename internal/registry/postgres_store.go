@@ -146,12 +146,19 @@ func (p *PostgresStore) DeleteAgent(ctx context.Context, address string) error {
 }
 
 func (p *PostgresStore) ListAgents(ctx context.Context, filter AgentFilter) ([]*Agent, error) {
-	query := `SELECT address FROM agents`
+	// Single query: join agents with LEFT JOIN services and stats to avoid N+1.
+	query := `
+		SELECT a.address, a.name, a.description, a.metadata, a.created_at, a.updated_at,
+		       COALESCE(st.transaction_count, 0), COALESCE(st.total_received, '0'),
+		       COALESCE(st.total_spent, '0'), COALESCE(st.success_rate, 1.0), st.last_active
+		FROM agents a
+		LEFT JOIN agent_stats st ON st.agent_address = a.address`
+
 	var args []interface{}
 	var conditions []string
 
 	if filter.ServiceType != "" {
-		conditions = append(conditions, `address IN (SELECT agent_address FROM services WHERE type = $1 AND active = true)`)
+		conditions = append(conditions, `a.address IN (SELECT agent_address FROM services WHERE type = $1 AND active = true)`)
 		args = append(args, filter.ServiceType)
 	}
 
@@ -159,7 +166,7 @@ func (p *PostgresStore) ListAgents(ctx context.Context, filter AgentFilter) ([]*
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	query += " ORDER BY created_at DESC"
+	query += " ORDER BY a.created_at DESC"
 
 	if filter.Limit > 0 {
 		args = append(args, filter.Limit)
@@ -176,19 +183,63 @@ func (p *PostgresStore) ListAgents(ctx context.Context, filter AgentFilter) ([]*
 	}
 	defer func() { _ = rows.Close() }()
 
+	// Collect agents and their addresses for batch service loading.
 	var agents []*Agent
+	var addresses []string
 	for rows.Next() {
-		var address string
-		if err := rows.Scan(&address); err != nil {
-			return nil, fmt.Errorf("scan agent address: %w", err)
+		var agent Agent
+		var metadata []byte
+		var lastActive sql.NullTime
+
+		if err := rows.Scan(
+			&agent.Address, &agent.Name, &agent.Description, &metadata,
+			&agent.CreatedAt, &agent.UpdatedAt,
+			&agent.Stats.TransactionCount, &agent.Stats.TotalReceived,
+			&agent.Stats.TotalSpent, &agent.Stats.SuccessRate, &lastActive,
+		); err != nil {
+			return nil, fmt.Errorf("scan agent: %w", err)
 		}
-		agent, err := p.GetAgent(ctx, address)
-		if err == nil {
-			agents = append(agents, agent)
+		if lastActive.Valid {
+			agent.Stats.LastActive = lastActive.Time
 		}
+		if err := json.Unmarshal(metadata, &agent.Metadata); err != nil {
+			logging.L(ctx).Warn("failed to unmarshal agent metadata", "address", agent.Address, "error", err)
+		}
+		addresses = append(addresses, agent.Address)
+		agents = append(agents, &agent)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate agents: %w", err)
+	}
+
+	// Batch-load services for all agents in a single query.
+	if len(addresses) > 0 {
+		svcRows, err := p.db.QueryContext(ctx, `
+			SELECT agent_address, id, type, name, description, price, endpoint, active, metadata
+			FROM services WHERE agent_address = ANY($1)
+		`, pq.Array(addresses))
+		if err != nil {
+			logging.L(ctx).Warn("batch service load failed, agents returned without services", "error", err)
+			return agents, nil
+		}
+		defer func() { _ = svcRows.Close() }()
+
+		svcMap := make(map[string][]Service)
+		for svcRows.Next() {
+			var svc Service
+			var agentAddr string
+			var metadata []byte
+			if err := svcRows.Scan(&agentAddr, &svc.ID, &svc.Type, &svc.Name,
+				&svc.Description, &svc.Price, &svc.Endpoint, &svc.Active, &metadata); err != nil {
+				continue
+			}
+			svc.AgentAddress = agentAddr
+			_ = json.Unmarshal(metadata, &svc.Metadata)
+			svcMap[agentAddr] = append(svcMap[agentAddr], svc)
+		}
+		for _, agent := range agents {
+			agent.Services = svcMap[agent.Address]
+		}
 	}
 
 	return agents, nil

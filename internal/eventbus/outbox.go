@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/mbd888/alancoin/internal/metrics"
 )
 
@@ -113,7 +114,7 @@ func (o *Outbox) publishBatch(ctx context.Context, bus Bus) {
 	}
 	defer func() { _ = rows.Close() }()
 
-	var published int
+	var publishedIDs []string
 	for rows.Next() {
 		var e Event
 		var requestID sql.NullString
@@ -128,17 +129,18 @@ func (o *Outbox) publishBatch(ctx context.Context, bus Bus) {
 			continue
 		}
 
-		// Mark as published
-		if _, err := o.db.ExecContext(ctx, `
-			UPDATE eventbus_outbox SET published = TRUE, published_at = NOW() WHERE id = $1
-		`, e.ID); err != nil {
-			o.logger.Error("outbox: mark published failed", "event_id", e.ID, "error", err)
-		}
-		published++
+		publishedIDs = append(publishedIDs, e.ID)
 	}
 
-	if published > 0 {
-		o.logger.Debug("outbox: published batch", "count", published)
+	// Batch-mark all successfully published events in a single UPDATE.
+	if len(publishedIDs) > 0 {
+		if _, err := o.db.ExecContext(ctx, `
+			UPDATE eventbus_outbox SET published = TRUE, published_at = NOW()
+			WHERE id = ANY($1)
+		`, pq.Array(publishedIDs)); err != nil {
+			o.logger.Error("outbox: batch mark published failed", "count", len(publishedIDs), "error", err)
+		}
+		o.logger.Debug("outbox: published batch", "count", len(publishedIDs))
 	}
 }
 

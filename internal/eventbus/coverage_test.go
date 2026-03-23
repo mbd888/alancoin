@@ -968,7 +968,6 @@ func TestOutbox_PublishBatch_WithLagMetric(t *testing.T) {
 		WillReturnRows(rows)
 
 	mock.ExpectExec("UPDATE eventbus_outbox SET published = TRUE").
-		WithArgs("evt_1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	outbox.publishBatch(context.Background(), bus)
@@ -2166,9 +2165,8 @@ func TestOutbox_PublishBatch_MarkPublishedFails(t *testing.T) {
 
 	mock.ExpectQuery("SELECT id").WillReturnRows(rows)
 
-	// Mark published fails
+	// Batch mark published fails
 	mock.ExpectExec("UPDATE eventbus_outbox SET published = TRUE").
-		WithArgs("evt_1").
 		WillReturnError(fmt.Errorf("update failed"))
 
 	outbox.publishBatch(context.Background(), bus)
