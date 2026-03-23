@@ -14,6 +14,7 @@ import {
   TrendingDown,
   Shield,
   Brain,
+  Activity,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
@@ -27,6 +28,7 @@ const NAV_ITEMS = [
   { to: "/chargeback", label: "Chargeback", icon: TrendingDown },
   { to: "/certificates", label: "Certificates", icon: Shield },
   { to: "/intelligence", label: "Intelligence", icon: Brain },
+  { to: "/health", label: "System Health", icon: Activity },
   { divider: true as const },
   { to: "/api-keys", label: "API Keys", icon: Key },
   { divider: true as const },

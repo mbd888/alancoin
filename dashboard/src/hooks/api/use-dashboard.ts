@@ -6,6 +6,7 @@ import type {
   TopServicesResponse,
   DenialsResponse,
   SessionsResponse,
+  SystemHealthResponse,
 } from "@/lib/types";
 
 // Tenant ID from localStorage (set during login) or environment, falling back to "default".
@@ -73,5 +74,16 @@ export function useSessions(limit = 50, cursor?: string) {
         params
       );
     },
+  });
+}
+
+export function useSystemHealth() {
+  return useQuery({
+    queryKey: ["dashboard", "health", TENANT_ID],
+    queryFn: () =>
+      api.get<SystemHealthResponse>(
+        `/tenants/${TENANT_ID}/dashboard/health`
+      ),
+    refetchInterval: 30000, // refresh every 30s
   });
 }

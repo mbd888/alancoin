@@ -13,15 +13,57 @@ import (
 	"github.com/mbd888/alancoin/internal/tenant"
 )
 
+// HealthProvider supplies subsystem health data for the dashboard.
+type HealthProvider interface {
+	CheckAll() ([]SubsystemStatus, string) // returns statuses + overall status string
+}
+
+// ReconciliationProvider supplies the last reconciliation report.
+type ReconciliationProvider interface {
+	LastReport() *ReconciliationSnapshot
+}
+
+// ReconciliationSnapshot is the dashboard-facing view of a reconciliation report.
+type ReconciliationSnapshot struct {
+	LedgerMismatches    int    `json:"ledgerMismatches"`
+	StuckEscrows        int    `json:"stuckEscrows"`
+	StaleStreams        int    `json:"staleStreams"`
+	OrphanedHolds       int    `json:"orphanedHolds"`
+	InvariantViolations int    `json:"invariantViolations"`
+	Healthy             bool   `json:"healthy"`
+	Timestamp           string `json:"timestamp"`
+}
+
+// SubsystemStatus represents one subsystem's health.
+type SubsystemStatus struct {
+	Name   string `json:"name"`
+	Status string `json:"status"` // "up", "down", "degraded"
+	Detail string `json:"detail"`
+}
+
 // Handler provides dashboard API endpoints.
 type Handler struct {
-	gwStore     gateway.Store
-	tenantStore tenant.Store
+	gwStore        gateway.Store
+	tenantStore    tenant.Store
+	healthProvider HealthProvider
+	reconProvider  ReconciliationProvider
 }
 
 // NewHandler creates a new dashboard handler.
 func NewHandler(gwStore gateway.Store, tenantStore tenant.Store) *Handler {
 	return &Handler{gwStore: gwStore, tenantStore: tenantStore}
+}
+
+// WithHealthProvider adds system health data to the dashboard.
+func (h *Handler) WithHealthProvider(hp HealthProvider) *Handler {
+	h.healthProvider = hp
+	return h
+}
+
+// WithReconciliationProvider adds reconciliation data to the dashboard.
+func (h *Handler) WithReconciliationProvider(rp ReconciliationProvider) *Handler {
+	h.reconProvider = rp
+	return h
 }
 
 // checkOwnership verifies the caller owns the tenant or is an admin.
@@ -44,6 +86,37 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/tenants/:id/dashboard/top-services", h.TopServices)
 	r.GET("/tenants/:id/dashboard/denials", h.Denials)
 	r.GET("/tenants/:id/dashboard/sessions", h.Sessions)
+	r.GET("/tenants/:id/dashboard/health", h.Health)
+}
+
+// Health returns system health status including subsystem checks and
+// reconciliation state.
+func (h *Handler) Health(c *gin.Context) {
+	tenantID := c.Param("id")
+	if !checkOwnership(c, tenantID) {
+		return
+	}
+
+	response := gin.H{}
+
+	// Subsystem health
+	if h.healthProvider != nil {
+		statuses, overall := h.healthProvider.CheckAll()
+		response["status"] = overall
+		response["services"] = statuses
+	} else {
+		response["status"] = "unknown"
+		response["services"] = []SubsystemStatus{}
+	}
+
+	// Reconciliation
+	if h.reconProvider != nil {
+		if snap := h.reconProvider.LastReport(); snap != nil {
+			response["reconciliation"] = snap
+		}
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 // Overview returns billing summary + active session count + agent count.

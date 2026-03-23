@@ -109,3 +109,25 @@ export type SessionsResponse = PaginatedResponse & {
 export type AgentsResponse = { agents: Agent[] };
 export type DenialsResponse = { denials: DashboardDenial[]; count: number };
 export type TopServicesResponse = { services: TopService[]; count: number };
+
+export interface SubsystemStatus {
+  name: string;
+  status: "up" | "down" | "degraded";
+  detail: string;
+}
+
+export interface ReconciliationSnapshot {
+  ledgerMismatches: number;
+  stuckEscrows: number;
+  staleStreams: number;
+  orphanedHolds: number;
+  invariantViolations: number;
+  healthy: boolean;
+  timestamp: string;
+}
+
+export interface SystemHealthResponse {
+  status: string;
+  services: SubsystemStatus[];
+  reconciliation?: ReconciliationSnapshot;
+}

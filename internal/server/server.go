@@ -1324,6 +1324,12 @@ func (s *Server) setupRoutes() {
 		// Dashboard analytics routes (tenant-scoped)
 		if s.gatewayStore != nil {
 			dashHandler := dashboard.NewHandler(s.gatewayStore, s.tenantStore)
+			if s.healthRegistry != nil {
+				dashHandler.WithHealthProvider(&dashHealthAdapter{registry: s.healthRegistry})
+			}
+			if s.reconcileRunner != nil {
+				dashHandler.WithReconciliationProvider(&dashReconAdapter{runner: s.reconcileRunner})
+			}
 			dashHandler.RegisterRoutes(protectedTenants)
 		}
 
@@ -2994,6 +3000,55 @@ func (a *reconcileInvariantAdapter) CheckAllInvariants(ctx context.Context) (int
 		}
 	}
 	return violations, nil
+}
+
+// --- Dashboard adapters ---
+
+// dashHealthAdapter adapts health.Registry to dashboard.HealthProvider.
+type dashHealthAdapter struct {
+	registry *health.Registry
+}
+
+func (a *dashHealthAdapter) CheckAll() ([]dashboard.SubsystemStatus, string) {
+	healthy, statuses := a.registry.CheckAll(context.Background())
+	overall := "healthy"
+	if !healthy {
+		overall = "degraded"
+	}
+	var out []dashboard.SubsystemStatus
+	for _, s := range statuses {
+		status := "up"
+		if !s.Healthy {
+			status = "down"
+		}
+		out = append(out, dashboard.SubsystemStatus{
+			Name:   s.Name,
+			Status: status,
+			Detail: s.Detail,
+		})
+	}
+	return out, overall
+}
+
+// dashReconAdapter adapts reconciliation.Runner to dashboard.ReconciliationProvider.
+type dashReconAdapter struct {
+	runner *reconciliation.Runner
+}
+
+func (a *dashReconAdapter) LastReport() *dashboard.ReconciliationSnapshot {
+	report := a.runner.LastReport()
+	if report == nil {
+		return nil
+	}
+	return &dashboard.ReconciliationSnapshot{
+		LedgerMismatches:    report.LedgerMismatches,
+		StuckEscrows:        report.StuckEscrows,
+		StaleStreams:        report.StaleStreams,
+		OrphanedHolds:       report.OrphanedHolds,
+		InvariantViolations: report.InvariantViolations,
+		Healthy:             report.Healthy,
+		Timestamp:           report.Timestamp.Format(time.RFC3339),
+	}
 }
 
 // adminReconcileAdapter adapts reconciliation.Runner to admin.ReconciliationRunner
