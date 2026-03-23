@@ -4,7 +4,14 @@ package health
 import (
 	"context"
 	"sync"
+	"time"
 )
+
+// perCheckerTimeout is the maximum time each individual health checker is
+// allowed to run before being considered unhealthy. This prevents a single
+// slow checker (e.g. a stalled database connection) from blocking the entire
+// health endpoint past Fly.io's 5-second grace period.
+const perCheckerTimeout = 2 * time.Second
 
 // Status represents the health of a single subsystem.
 type Status struct {
@@ -51,7 +58,16 @@ func (r *Registry) CheckAll(ctx context.Context) (healthy bool, statuses []Statu
 	statuses = make([]Status, len(checkers))
 
 	for i, nc := range checkers {
-		statuses[i] = nc.check(ctx)
+		checkCtx, cancel := context.WithTimeout(ctx, perCheckerTimeout)
+		statuses[i] = nc.check(checkCtx)
+		cancel()
+		if checkCtx.Err() == context.DeadlineExceeded {
+			statuses[i] = Status{
+				Name:    nc.name,
+				Healthy: false,
+				Detail:  "health check timed out",
+			}
+		}
 		if !statuses[i].Healthy {
 			healthy = false
 		}

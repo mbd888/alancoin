@@ -2,10 +2,11 @@ package offers
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/recovery"
 )
 
 // Timer periodically expires standing offers past their expiry time.
@@ -61,11 +62,7 @@ func (t *Timer) Running() bool {
 }
 
 func (t *Timer) safeExpire(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.logger.Error("panic in offers timer", "panic", fmt.Sprint(r))
-		}
-	}()
+	defer recovery.LogPanic(t.logger, "offers_timer")
 
 	expired, err := t.service.ForceExpireOffers(ctx)
 	if err != nil {

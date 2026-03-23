@@ -2,10 +2,11 @@ package streams
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/recovery"
 )
 
 // Timer periodically checks for stale streams and auto-closes them.
@@ -66,11 +67,7 @@ func (t *Timer) Stop() {
 }
 
 func (t *Timer) safeCloseStale(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.logger.Error("panic in streams timer", "panic", fmt.Sprint(r))
-		}
-	}()
+	defer recovery.LogPanic(t.logger, "streams_timer")
 	t.closeStale(ctx)
 }
 

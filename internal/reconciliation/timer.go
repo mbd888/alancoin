@@ -2,10 +2,11 @@ package reconciliation
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/recovery"
 )
 
 // Timer periodically runs reconciliation checks.
@@ -61,11 +62,7 @@ func (t *Timer) Stop() {
 }
 
 func (t *Timer) safeRun(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.logger.Error("panic in reconciliation timer", "panic", fmt.Sprint(r))
-		}
-	}()
+	defer recovery.LogPanic(t.logger, "reconciliation_timer")
 
 	if _, err := t.runner.RunAll(ctx); err != nil {
 		t.logger.Warn("reconciliation run failed", "error", err)

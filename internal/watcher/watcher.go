@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/mbd888/alancoin/internal/recovery"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
 	"go.opentelemetry.io/otel/attribute"
@@ -55,14 +56,15 @@ type Config struct {
 
 // Watcher monitors on-chain USDC Transfer events to the platform address.
 type Watcher struct {
-	cfg        Config
-	client     *ethclient.Client
-	creditor   Creditor
-	agents     AgentResolver
-	checkpoint CheckpointStore
-	logger     *slog.Logger
-	stop       chan struct{}
-	running    atomic.Bool
+	cfg              Config
+	client           *ethclient.Client
+	creditor         Creditor
+	agents           AgentResolver
+	checkpoint       CheckpointStore
+	logger           *slog.Logger
+	stop             chan struct{}
+	running          atomic.Bool
+	consecutiveFails int // tracks consecutive poll failures for backoff
 }
 
 // New creates a new deposit watcher.
@@ -104,19 +106,17 @@ func (w *Watcher) Start(ctx context.Context) error {
 		"confirmations", w.cfg.Confirmations,
 		"poll_interval", w.cfg.PollInterval)
 
-	ticker := time.NewTicker(w.cfg.PollInterval)
-	defer ticker.Stop()
-
 	// Initial poll immediately
 	w.safePoll(ctx)
 
 	for {
+		delay := w.backoffDelay()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-w.stop:
 			return nil
-		case <-ticker.C:
+		case <-time.After(delay):
 			w.safePoll(ctx)
 		}
 	}
@@ -135,15 +135,44 @@ func (w *Watcher) Running() bool {
 	return w.running.Load()
 }
 
+// maxBackoffMultiplier caps exponential backoff at 2^6 = 64x the base interval.
+const maxBackoffMultiplier = 6
+
 func (w *Watcher) safePoll(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
+			recovery.PanicRecoveriesTotal.WithLabelValues("watcher").Inc()
 			w.logger.Error("watcher: panic in poll", "panic", r)
+			w.consecutiveFails++
 		}
 	}()
 	if err := w.poll(ctx); err != nil {
-		w.logger.Warn("watcher: poll error", "error", err)
+		w.consecutiveFails++
+		w.logger.Warn("watcher: poll error",
+			"error", err,
+			"consecutive_failures", w.consecutiveFails,
+			"next_delay", w.backoffDelay())
+	} else {
+		if w.consecutiveFails > 0 {
+			w.logger.Info("watcher: poll recovered after failures",
+				"previous_failures", w.consecutiveFails)
+		}
+		w.consecutiveFails = 0
 	}
+}
+
+// backoffDelay returns the poll interval with exponential backoff on consecutive failures.
+// On success (consecutiveFails == 0), returns the configured PollInterval.
+// On failure, doubles the interval up to 64x the base (e.g., 15s → 16min max).
+func (w *Watcher) backoffDelay() time.Duration {
+	if w.consecutiveFails == 0 {
+		return w.cfg.PollInterval
+	}
+	shift := w.consecutiveFails
+	if shift > maxBackoffMultiplier {
+		shift = maxBackoffMultiplier
+	}
+	return w.cfg.PollInterval * time.Duration(1<<uint(shift))
 }
 
 func (w *Watcher) poll(ctx context.Context) error {

@@ -2,10 +2,11 @@ package gateway
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/recovery"
 )
 
 // MeterFlusher flushes accumulated usage counters to the billing provider.
@@ -79,11 +80,7 @@ func (t *Timer) Stop() {
 }
 
 func (t *Timer) safeSweepExpired(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.logger.Error("panic in gateway timer", "panic", fmt.Sprint(r))
-		}
-	}()
+	defer recovery.LogPanic(t.logger, "gateway_timer")
 	t.sweepExpired(ctx)
 }
 

@@ -24,6 +24,7 @@ import (
 
 	"github.com/mbd888/alancoin/internal/logging"
 	"github.com/mbd888/alancoin/internal/metrics"
+	"github.com/mbd888/alancoin/internal/recovery"
 	"github.com/mbd888/alancoin/internal/security"
 	"github.com/mbd888/alancoin/internal/traces"
 	"go.opentelemetry.io/otel/attribute"
@@ -205,12 +206,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event *Event) error {
 			return ctx.Err()
 		}
 		go func(s *Subscription) {
-			defer func() {
-				<-d.sem
-				if r := recover(); r != nil {
-					logging.L(ctx).Error("webhook dispatch panic", "subscription", s.ID, "panic", r)
-				}
-			}()
+			defer func() { <-d.sem }()
+			defer recovery.LogPanic(logging.L(ctx), "webhook_dispatch")
 			d.send(ctx, s, event)
 		}(sub)
 	}
@@ -247,12 +244,8 @@ func (d *Dispatcher) DispatchToAgent(ctx context.Context, agentAddr string, even
 					return ctx.Err()
 				}
 				go func(s *Subscription) {
-					defer func() {
-						<-d.sem
-						if r := recover(); r != nil {
-							logging.L(ctx).Error("webhook dispatch panic", "subscription", s.ID, "panic", r)
-						}
-					}()
+					defer func() { <-d.sem }()
+					defer recovery.LogPanic(logging.L(ctx), "webhook_dispatch")
 					d.send(ctx, s, event)
 				}(sub)
 				break

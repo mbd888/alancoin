@@ -342,14 +342,20 @@ func (s *Service) ClaimOffer(ctx context.Context, offerID, buyerAddr string) (*C
 
 	if err := s.store.UpdateOffer(ctx, offer); err != nil {
 		// Refund on failure
-		_ = s.ledger.RefundEscrow(ctx, buyer, offer.Price, claim.EscrowRef)
+		if refundErr := s.ledger.RefundEscrow(ctx, buyer, offer.Price, claim.EscrowRef); refundErr != nil {
+			s.logger.Error("CRITICAL: failed to refund after offer update failure — funds may be stuck in escrow",
+				"buyer", buyer, "amount", offer.Price, "escrow_ref", claim.EscrowRef, "error", refundErr)
+		}
 		span.RecordError(err)
 		return nil, fmt.Errorf("failed to update offer: %w", err)
 	}
 
 	if err := s.store.CreateClaim(ctx, claim); err != nil {
 		// Refund on failure, restore capacity
-		_ = s.ledger.RefundEscrow(ctx, buyer, offer.Price, claim.EscrowRef)
+		if refundErr := s.ledger.RefundEscrow(ctx, buyer, offer.Price, claim.EscrowRef); refundErr != nil {
+			s.logger.Error("CRITICAL: failed to refund after claim creation failure — funds may be stuck in escrow",
+				"buyer", buyer, "amount", offer.Price, "escrow_ref", claim.EscrowRef, "error", refundErr)
+		}
 		offer.RemainingCap++
 		offer.TotalClaims--
 		if offer.Status == OfferExhausted {
@@ -454,12 +460,18 @@ func (s *Service) CompleteClaim(ctx context.Context, claimID, callerAddr string)
 
 	// Record for reputation
 	if s.recorder != nil {
-		_ = s.recorder.RecordTransaction(ctx, claim.ID, claim.BuyerAddr, claim.SellerAddr, claim.Amount, "", "confirmed")
+		if recErr := s.recorder.RecordTransaction(ctx, claim.ID, claim.BuyerAddr, claim.SellerAddr, claim.Amount, "", "confirmed"); recErr != nil {
+			s.logger.Warn("failed to record transaction for reputation after claim completion",
+				"claim_id", claim.ID, "error", recErr)
+		}
 	}
 
 	// Revenue accumulation for flywheel
 	if s.revenue != nil {
-		_ = s.revenue.AccumulateRevenue(ctx, claim.SellerAddr, claim.Amount, "offer_claim:"+claim.ID)
+		if revErr := s.revenue.AccumulateRevenue(ctx, claim.SellerAddr, claim.Amount, "offer_claim:"+claim.ID); revErr != nil {
+			s.logger.Warn("failed to accumulate revenue after claim completion",
+				"claim_id", claim.ID, "seller", claim.SellerAddr, "error", revErr)
+		}
 	}
 
 	return claim, nil

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mbd888/alancoin/internal/ledger"
+	"github.com/mbd888/alancoin/internal/recovery"
 	"github.com/mbd888/alancoin/internal/usdc"
 )
 
@@ -462,11 +463,7 @@ func (s *Supervisor) buildDenialRecord(agentAddr, counterparty string, amount *b
 
 // logDenialAsync persists a denial record with a bounded timeout.
 func (s *Supervisor) logDenialAsync(rec *DenialRecord) {
-	defer func() {
-		if r := recover(); r != nil {
-			s.logger.Error("panic in denial logger", "panic", fmt.Sprint(r))
-		}
-	}()
+	defer recovery.LogPanic(s.logger, "supervisor_denial_logger")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

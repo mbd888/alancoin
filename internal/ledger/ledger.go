@@ -308,7 +308,6 @@ func (l *Ledger) Spend(ctx context.Context, agentAddr, amount, sessionKeyID stri
 		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
-	_ = amountBig
 
 	addr := strings.ToLower(agentAddr)
 	done := observeOp("spend")
@@ -334,7 +333,6 @@ func (l *Ledger) Transfer(ctx context.Context, from, to, amount, reference strin
 	if !ok || amountBig.Sign() <= 0 {
 		return ErrInvalidAmount
 	}
-	_ = amountBig
 
 	fromAddr := strings.ToLower(from)
 	toAddr := strings.ToLower(to)
@@ -369,7 +367,6 @@ func (l *Ledger) Withdraw(ctx context.Context, agentAddr, amount, txHash string)
 	if !ok || amountBig.Sign() <= 0 {
 		return ErrInvalidAmount
 	}
-	_ = amountBig
 
 	addr := strings.ToLower(agentAddr)
 	done := observeOp("withdrawal")
@@ -409,7 +406,6 @@ func (l *Ledger) Refund(ctx context.Context, agentAddr, amount, reference string
 	if !ok || amountBig.Sign() <= 0 {
 		return ErrInvalidAmount
 	}
-	_ = amountBig
 
 	addr := strings.ToLower(agentAddr)
 	done := observeOp("refund")
@@ -438,7 +434,6 @@ func (l *Ledger) Hold(ctx context.Context, agentAddr, amount, reference string) 
 		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
-	_ = amountBig
 
 	addr := strings.ToLower(agentAddr)
 	done := observeOp("hold")
@@ -467,7 +462,6 @@ func (l *Ledger) ConfirmHold(ctx context.Context, agentAddr, amount, reference s
 		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
-	_ = amountBig
 
 	addr := strings.ToLower(agentAddr)
 	done := observeOp("confirm_hold")
@@ -496,7 +490,6 @@ func (l *Ledger) ReleaseHold(ctx context.Context, agentAddr, amount, reference s
 		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
-	_ = amountBig
 
 	addr := strings.ToLower(agentAddr)
 	done := observeOp("release_hold")
@@ -526,7 +519,6 @@ func (l *Ledger) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, 
 		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
-	_ = amountBig
 
 	buyer := strings.ToLower(buyerAddr)
 	seller := strings.ToLower(sellerAddr)
@@ -603,7 +595,6 @@ func (l *Ledger) SettleHoldWithCallback(ctx context.Context, buyerAddr, sellerAd
 		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
-	_ = amountBig
 
 	buyer := strings.ToLower(buyerAddr)
 	seller := strings.ToLower(sellerAddr)
@@ -745,7 +736,6 @@ func (l *Ledger) EscrowLock(ctx context.Context, agentAddr, amount, reference st
 		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
-	_ = amountBig
 
 	addr := strings.ToLower(agentAddr)
 	done := observeOp("escrow_lock")
@@ -775,7 +765,6 @@ func (l *Ledger) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr, amoun
 		span.SetStatus(codes.Error, "invalid amount")
 		return ErrInvalidAmount
 	}
-	_ = amountBig
 
 	buyer := strings.ToLower(buyerAddr)
 	seller := strings.ToLower(sellerAddr)
@@ -802,7 +791,6 @@ func (l *Ledger) RefundEscrow(ctx context.Context, agentAddr, amount, reference 
 	if !ok || amountBig.Sign() <= 0 {
 		return ErrInvalidAmount
 	}
-	_ = amountBig
 
 	addr := strings.ToLower(agentAddr)
 	done := observeOp("escrow_refund")

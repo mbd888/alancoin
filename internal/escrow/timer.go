@@ -2,10 +2,11 @@ package escrow
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
+
+	"github.com/mbd888/alancoin/internal/recovery"
 )
 
 // Timer periodically checks for expired escrows and auto-releases them.
@@ -63,11 +64,7 @@ func (t *Timer) Stop() {
 }
 
 func (t *Timer) safeReleaseExpired(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.logger.Error("panic in escrow timer", "panic", fmt.Sprint(r))
-		}
-	}()
+	defer recovery.LogPanic(t.logger, "escrow_timer")
 	t.releaseExpired(ctx)
 }
 

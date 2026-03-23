@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 )
 
 // New generates a UUID-like random ID (32 hex chars with dashes).
@@ -12,6 +14,8 @@ import (
 func New() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
+		slog.Error("crypto/rand failed — server cannot generate secure IDs, shutting down",
+			"error", err, "stack", string(debug.Stack()))
 		panic("crypto/rand failed: " + err.Error())
 	}
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
@@ -22,6 +26,8 @@ func New() string {
 func WithPrefix(prefix string) string {
 	b := make([]byte, 12)
 	if _, err := rand.Read(b); err != nil {
+		slog.Error("crypto/rand failed — server cannot generate secure IDs, shutting down",
+			"error", err, "stack", string(debug.Stack()))
 		panic("crypto/rand failed: " + err.Error())
 	}
 	return prefix + hex.EncodeToString(b)
@@ -31,6 +37,8 @@ func WithPrefix(prefix string) string {
 func Hex(numBytes int) string {
 	b := make([]byte, numBytes)
 	if _, err := rand.Read(b); err != nil {
+		slog.Error("crypto/rand failed — server cannot generate secure IDs, shutting down",
+			"error", err, "stack", string(debug.Stack()))
 		panic("crypto/rand failed: " + err.Error())
 	}
 	return hex.EncodeToString(b)
