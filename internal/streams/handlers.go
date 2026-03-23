@@ -38,6 +38,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/streams/:id", h.GetStream)
 	r.GET("/streams/:id/ticks", h.ListTicks)
 	r.GET("/agents/:address/streams", h.ListStreams)
+	r.POST("/streams/recommend-hold", h.RecommendHoldAmount)
 }
 
 // RegisterProtectedRoutes sets up protected (auth-required) stream routes.
@@ -272,5 +273,44 @@ func (h *Handler) ListTicks(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"ticks": ticks,
 		"count": len(ticks),
+	})
+}
+
+// recommendHoldRequest is the input for hold amount recommendation.
+type recommendHoldRequest struct {
+	PricePerTick float64 `json:"pricePerTick" binding:"required,gt=0"`
+	TickRate     float64 `json:"tickRate" binding:"required,gt=0"`
+	DurationSec  float64 `json:"durationSec" binding:"required,gt=0"`
+	Confidence   float64 `json:"confidence"` // default 0.95
+}
+
+// RecommendHoldAmount handles POST /v1/streams/recommend-hold
+// Returns the optimal hold amount based on Poisson statistics for the
+// expected tick pattern. Pure computation — no state changes.
+func (h *Handler) RecommendHoldAmount(c *gin.Context) {
+	var req recommendHoldRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	confidence := req.Confidence
+	if confidence <= 0 || confidence >= 1 {
+		confidence = 0.95
+	}
+
+	recommended := RecommendHold(req.PricePerTick, req.TickRate, req.DurationSec, confidence)
+	expected := ExpectedCost(req.PricePerTick, req.TickRate, req.DurationSec)
+	efficiency := HoldEfficiency(recommended, req.PricePerTick, req.TickRate, req.DurationSec)
+
+	c.JSON(http.StatusOK, gin.H{
+		"recommendedHold": recommended,
+		"expectedCost":    expected,
+		"efficiency":      efficiency,
+		"confidence":      confidence,
+		"expectedTicks":   req.TickRate * req.DurationSec,
 	})
 }
