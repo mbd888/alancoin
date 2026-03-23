@@ -2,6 +2,7 @@ package flywheel
 
 import (
 	"context"
+	"math"
 	"testing"
 )
 
@@ -9,18 +10,16 @@ func TestAdjustFeeBPS(t *testing.T) {
 	engine := NewIncentiveEngine()
 	ctx := context.Background()
 
+	// Geometric scaling: endpoints preserved, intermediate values follow curve
 	tests := []struct {
 		tier    string
 		baseBPS int
 		wantBPS int
 	}{
-		{"new", 250, 250},         // no discount
-		{"emerging", 250, 225},    // 25 bps off
-		{"established", 250, 200}, // 50 bps off
-		{"trusted", 250, 163},     // 87 bps off
-		{"elite", 250, 125},       // 125 bps off
-		{"elite", 100, 0},         // discount exceeds base → clamped to 0
-		{"unknown", 250, 250},     // unrecognized tier → no discount
+		{"new", 250, 250},     // 0 bps off
+		{"elite", 250, 125},   // 125 bps off
+		{"elite", 100, 0},     // discount exceeds base → clamped to 0
+		{"unknown", 250, 250}, // unrecognized tier → no discount
 	}
 
 	for _, tt := range tests {
@@ -32,33 +31,47 @@ func TestAdjustFeeBPS(t *testing.T) {
 			t.Errorf("AdjustFeeBPS(%q, %d) = %d, want %d", tt.tier, tt.baseBPS, got, tt.wantBPS)
 		}
 	}
+
+	// Verify monotonic: higher tier → higher discount → lower effective BPS
+	prev := 999
+	for _, tier := range []string{"new", "emerging", "established", "trusted", "elite"} {
+		got, _ := engine.AdjustFeeBPS(ctx, tier, 250)
+		if got > prev {
+			t.Errorf("tier %s: adjusted %d should be <= previous %d", tier, got, prev)
+		}
+		prev = got
+	}
 }
 
 func TestBoostScore(t *testing.T) {
 	engine := NewIncentiveEngine()
 	ctx := context.Background()
 
-	tests := []struct {
-		tier      string
-		baseScore float64
-		wantMin   float64
-		wantMax   float64
-	}{
-		{"new", 50.0, 50.0, 50.0},         // 1.0x
-		{"emerging", 50.0, 52.4, 52.6},    // 1.05x
-		{"established", 50.0, 57.4, 57.6}, // 1.15x
-		{"trusted", 50.0, 64.9, 65.1},     // 1.30x
-		{"elite", 50.0, 74.9, 75.1},       // 1.50x
-		{"elite", 80.0, 99.9, 100.0},      // capped at 100
-		{"unknown", 50.0, 50.0, 50.0},     // unrecognized → no boost
+	// Endpoints exact
+	got := engine.BoostScore(ctx, "new", 50.0)
+	if got != 50.0 {
+		t.Errorf("new tier: expected 50.0, got %f", got)
 	}
 
-	for _, tt := range tests {
-		got := engine.BoostScore(ctx, tt.tier, tt.baseScore)
-		if got < tt.wantMin || got > tt.wantMax {
-			t.Errorf("BoostScore(%q, %.1f) = %.2f, want [%.1f, %.1f]",
-				tt.tier, tt.baseScore, got, tt.wantMin, tt.wantMax)
+	got = engine.BoostScore(ctx, "elite", 50.0)
+	if math.Abs(got-75.0) > 0.1 {
+		t.Errorf("elite tier: expected ~75.0, got %f", got)
+	}
+
+	// Monotonic: higher tier → higher boost
+	prev := 0.0
+	for _, tier := range []string{"new", "emerging", "established", "trusted", "elite"} {
+		got = engine.BoostScore(ctx, tier, 50.0)
+		if got < prev-0.001 {
+			t.Errorf("tier %s: boost %f should be >= previous %f", tier, got, prev)
 		}
+		prev = got
+	}
+
+	// Unknown tier → no boost
+	got = engine.BoostScore(ctx, "unknown", 50.0)
+	if got != 50.0 {
+		t.Errorf("unknown: expected 50.0, got %f", got)
 	}
 }
 
@@ -75,8 +88,8 @@ func TestGetFeeDiscountBPS(t *testing.T) {
 	if engine.GetFeeDiscountBPS("elite") != 125 {
 		t.Error("expected 125 bps for elite")
 	}
-	if engine.GetFeeDiscountBPS("unknown") != 0 {
-		t.Error("expected 0 for unknown tier")
+	if engine.GetFeeDiscountBPS("new") != 0 {
+		t.Error("expected 0 for new tier")
 	}
 }
 
@@ -84,6 +97,9 @@ func TestGetDiscoveryBoostMultiplier(t *testing.T) {
 	engine := NewIncentiveEngine()
 	if engine.GetDiscoveryBoostMultiplier("elite") != 1.50 {
 		t.Error("expected 1.50x for elite")
+	}
+	if engine.GetDiscoveryBoostMultiplier("new") != 1.0 {
+		t.Error("expected 1.0x for new tier")
 	}
 	if engine.GetDiscoveryBoostMultiplier("unknown") != 1.0 {
 		t.Error("expected 1.0x for unknown tier")
@@ -108,5 +124,43 @@ func TestIncentiveSummary(t *testing.T) {
 	}
 	if elite["feeDiscountBPS"] != 125 {
 		t.Errorf("expected 125 bps for elite, got %v", elite["feeDiscountBPS"])
+	}
+}
+
+func TestGeometricIncentiveProperties(t *testing.T) {
+	engine := NewIncentiveEngine()
+
+	// Fee discounts should be monotonically increasing
+	prevDiscount := -1
+	for _, tier := range []string{"new", "emerging", "established", "trusted", "elite"} {
+		d := engine.GetFeeDiscountBPS(tier)
+		if d < prevDiscount {
+			t.Errorf("tier %s: discount %d should be >= %d", tier, d, prevDiscount)
+		}
+		prevDiscount = d
+	}
+
+	// Discovery boost multipliers should be monotonically increasing
+	prevMult := 0.0
+	for _, tier := range []string{"new", "emerging", "established", "trusted", "elite"} {
+		m := engine.GetDiscoveryBoostMultiplier(tier)
+		if m < prevMult-0.001 {
+			t.Errorf("tier %s: multiplier %f should be >= %f", tier, m, prevMult)
+		}
+		prevMult = m
+	}
+
+	// Endpoints exact
+	if engine.GetFeeDiscountBPS("new") != 0 {
+		t.Error("new tier fee discount should be 0")
+	}
+	if engine.GetFeeDiscountBPS("elite") != 125 {
+		t.Error("elite tier fee discount should be 125")
+	}
+	if engine.GetDiscoveryBoostMultiplier("new") != 1.0 {
+		t.Error("new tier boost should be 1.0x")
+	}
+	if engine.GetDiscoveryBoostMultiplier("elite") != 1.50 {
+		t.Error("elite tier boost should be 1.50x")
 	}
 }

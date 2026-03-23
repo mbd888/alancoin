@@ -1,6 +1,10 @@
 package flywheel
 
-import "context"
+import (
+	"context"
+
+	"github.com/mbd888/alancoin/internal/tiermath"
+)
 
 // IncentiveEngine computes dynamic fee discounts and discovery boosts
 // based on agent reputation. This creates the positive feedback loop:
@@ -8,63 +12,45 @@ import "context"
 //	better reputation → lower fees + higher discovery ranking →
 //	more transactions → even better reputation
 //
-// Fee discounts reward established agents, reducing their cost to operate.
-// Discovery boosts give high-reputation agents more visibility, driving
-// traffic toward reliable services. Both effects compound over time.
+// All incentive schedules are derived from TierCurve (geometric scaling).
+// Two numbers (base, max) define each incentive dimension — no lookup tables.
 type IncentiveEngine struct {
-	feeDiscountBPS map[string]int     // tier → basis point discount
-	discoveryBoost map[string]float64 // tier → score multiplier
+	feeDiscount    tiermath.TierCurve // BPS discount: 0 at new, 125 at elite
+	discoveryBoost tiermath.TierCurve // Additive boost: 0 at new, 0.50 at elite
 }
 
 // NewIncentiveEngine creates an incentive engine with production defaults.
 //
-// Fee discount schedule (basis points off platform take rate):
+// Fee discount schedule (BPS off platform take rate, geometric scaling):
 //
-//	new:         0 bps (0% discount)
-//	emerging:   25 bps (10% discount on typical 250bps take rate)
-//	established: 50 bps (20% discount)
-//	trusted:     87 bps (35% discount)
-//	elite:      125 bps (50% discount)
+//	new:          0 bps
+//	emerging:    ~15 bps
+//	established: ~40 bps
+//	trusted:     ~75 bps
+//	elite:      125 bps
 //
-// Discovery boost multipliers (applied to reputation score in ranking):
+// Discovery boost (additive to reputation score, geometric scaling):
 //
-//	new:         1.00x
-//	emerging:    1.05x
-//	established: 1.15x
-//	trusted:     1.30x
-//	elite:       1.50x
+//	new:         +0.00 → 1.00x
+//	emerging:    +0.06 → 1.06x
+//	established: +0.16 → 1.16x
+//	trusted:     +0.31 → 1.31x
+//	elite:       +0.50 → 1.50x
 func NewIncentiveEngine() *IncentiveEngine {
 	return &IncentiveEngine{
-		feeDiscountBPS: map[string]int{
-			"new":         0,
-			"emerging":    25,
-			"established": 50,
-			"trusted":     87,
-			"elite":       125,
-		},
-		discoveryBoost: map[string]float64{
-			"new":         1.00,
-			"emerging":    1.05,
-			"established": 1.15,
-			"trusted":     1.30,
-			"elite":       1.50,
-		},
+		feeDiscount:    tiermath.TierCurve{Base: 0, Max: 125},
+		discoveryBoost: tiermath.TierCurve{Base: 0, Max: 0.50},
 	}
 }
 
 // AdjustFeeBPS applies a reputation-based fee discount to the base take rate.
 // Returns the effective take rate after discount (never below 0).
-//
-// This satisfies gateway.IncentiveProvider:
-//
-//	type IncentiveProvider interface {
-//	    AdjustFeeBPS(ctx context.Context, tier string, baseBPS int) (int, error)
-//	}
+// Unknown tiers get no discount (conservative default).
 func (e *IncentiveEngine) AdjustFeeBPS(_ context.Context, tier string, baseBPS int) (int, error) {
-	discount, ok := e.feeDiscountBPS[tier]
-	if !ok {
+	if !isKnownTier(tier) {
 		return baseBPS, nil
 	}
+	discount := e.feeDiscount.AtInt(tier)
 	adjusted := baseBPS - discount
 	if adjusted < 0 {
 		adjusted = 0
@@ -73,20 +59,14 @@ func (e *IncentiveEngine) AdjustFeeBPS(_ context.Context, tier string, baseBPS i
 }
 
 // BoostScore applies a flywheel discovery boost to a candidate's reputation
-// score. Higher-reputation agents receive a multiplier that improves their
-// ranking in service discovery results.
-//
-// This satisfies gateway.DiscoveryBooster:
-//
-//	type DiscoveryBooster interface {
-//	    BoostScore(ctx context.Context, tier string, baseScore float64) float64
-//	}
+// score. Higher-reputation agents receive an additive boost.
+// Unknown tiers get no boost (conservative default).
 func (e *IncentiveEngine) BoostScore(_ context.Context, tier string, baseScore float64) float64 {
-	mult, ok := e.discoveryBoost[tier]
-	if !ok {
+	if !isKnownTier(tier) {
 		return baseScore
 	}
-	boosted := baseScore * mult
+	boost := e.discoveryBoost.At(tier)
+	boosted := baseScore * (1.0 + boost)
 	if boosted > 100 {
 		boosted = 100
 	}
@@ -94,28 +74,36 @@ func (e *IncentiveEngine) BoostScore(_ context.Context, tier string, baseScore f
 }
 
 // GetFeeDiscountBPS returns the raw discount amount for a tier.
+// Unknown tiers return 0.
 func (e *IncentiveEngine) GetFeeDiscountBPS(tier string) int {
-	return e.feeDiscountBPS[tier]
+	if !isKnownTier(tier) {
+		return 0
+	}
+	return e.feeDiscount.AtInt(tier)
 }
 
 // GetDiscoveryBoostMultiplier returns the boost multiplier for a tier.
+// Unknown tiers return 1.0 (no boost).
 func (e *IncentiveEngine) GetDiscoveryBoostMultiplier(tier string) float64 {
-	mult, ok := e.discoveryBoost[tier]
-	if !ok {
+	if !isKnownTier(tier) {
 		return 1.0
 	}
-	return mult
+	return 1.0 + e.discoveryBoost.At(tier)
+}
+
+func isKnownTier(tier string) bool {
+	_, ok := tiermath.TierIndex[tier]
+	return ok
 }
 
 // IncentiveSummary returns a snapshot of the incentive schedule.
 func (e *IncentiveEngine) IncentiveSummary() map[string]interface{} {
-	tiers := []string{"new", "emerging", "established", "trusted", "elite"}
-	schedule := make([]map[string]interface{}, 0, len(tiers))
-	for _, tier := range tiers {
+	schedule := make([]map[string]interface{}, 0, tiermath.NumTiers)
+	for _, tier := range tiermath.TierNames {
 		schedule = append(schedule, map[string]interface{}{
 			"tier":               tier,
-			"feeDiscountBPS":     e.feeDiscountBPS[tier],
-			"discoveryBoostMult": e.discoveryBoost[tier],
+			"feeDiscountBPS":     e.GetFeeDiscountBPS(tier),
+			"discoveryBoostMult": e.GetDiscoveryBoostMultiplier(tier),
 		})
 	}
 	return map[string]interface{}{
