@@ -11,12 +11,16 @@ import (
 
 // PostgresStore persists gateway session data in PostgreSQL.
 type PostgresStore struct {
-	db *sql.DB
+	db         *sql.DB
+	hasMatview bool // true if billing_timeseries_hourly matview exists
 }
 
 // NewPostgresStore creates a new PostgreSQL-backed gateway store.
 func NewPostgresStore(db *sql.DB) *PostgresStore {
-	return &PostgresStore{db: db}
+	p := &PostgresStore{db: db}
+	// Probe for matview existence (best-effort, defaults to false).
+	_ = db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_matviews WHERE matviewname = 'billing_timeseries_hourly')`).Scan(&p.hasMatview)
+	return p
 }
 
 func (p *PostgresStore) CreateSession(ctx context.Context, session *Session) error {
@@ -249,6 +253,23 @@ func (p *PostgresStore) ListLogs(ctx context.Context, sessionID string, limit in
 
 func (p *PostgresStore) GetBillingSummary(ctx context.Context, tenantID string) (*BillingSummaryRow, error) {
 	row := &BillingSummaryRow{}
+
+	if p.hasMatview {
+		err := p.db.QueryRowContext(ctx, `
+			SELECT
+				COALESCE(SUM(total_count), 0),
+				COALESCE(SUM(settled_count), 0),
+				COALESCE(SUM(volume), 0),
+				COALESCE(SUM(fees), 0)
+			FROM billing_timeseries_hourly
+			WHERE tenant_id = $1`, tenantID,
+		).Scan(&row.TotalRequests, &row.SettledRequests, &row.SettledVolume, &row.FeesCollected)
+		if err == nil {
+			return row, nil
+		}
+		// Fall through to raw table on error
+	}
+
 	err := p.db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*),
@@ -265,6 +286,52 @@ func (p *PostgresStore) GetBillingSummary(ctx context.Context, tenantID string) 
 }
 
 func (p *PostgresStore) GetBillingTimeSeries(ctx context.Context, tenantID, interval string, from, to time.Time) ([]BillingTimePoint, error) {
+	if p.hasMatview {
+		result, err := p.getBillingTimeSeriesFromMatview(ctx, tenantID, interval, from, to)
+		if err == nil {
+			return result, nil
+		}
+		// Fall through to raw table on error
+	}
+	return p.getBillingTimeSeriesFromRaw(ctx, tenantID, interval, from, to)
+}
+
+func (p *PostgresStore) getBillingTimeSeriesFromMatview(ctx context.Context, tenantID, interval string, from, to time.Time) ([]BillingTimePoint, error) {
+	// Aggregate from hourly matview — works for hour/day/week intervals.
+	truncExpr := "hour"
+	switch interval {
+	case "day":
+		truncExpr = "day"
+	case "week":
+		truncExpr = "week"
+	}
+	query := `SELECT date_trunc('` + truncExpr + `', period) AS bucket,
+		COALESCE(SUM(total_count), 0),
+		COALESCE(SUM(settled_count), 0),
+		COALESCE(SUM(volume), 0),
+		COALESCE(SUM(fees), 0)
+	FROM billing_timeseries_hourly
+	WHERE tenant_id = $1 AND period >= $2 AND period < $3
+	GROUP BY bucket ORDER BY bucket ASC`
+
+	rows, err := p.db.QueryContext(ctx, query, tenantID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var result []BillingTimePoint
+	for rows.Next() {
+		var pt BillingTimePoint
+		if err := rows.Scan(&pt.Bucket, &pt.Requests, &pt.SettledRequests, &pt.Volume, &pt.Fees); err != nil {
+			return nil, err
+		}
+		result = append(result, pt)
+	}
+	return result, rows.Err()
+}
+
+func (p *PostgresStore) getBillingTimeSeriesFromRaw(ctx context.Context, tenantID, interval string, from, to time.Time) ([]BillingTimePoint, error) {
 	// Pre-built queries keyed by interval — no SQL string concatenation.
 	queries := map[string]string{
 		"hour": `SELECT date_trunc('hour', created_at) AS bucket, COUNT(*), COUNT(*) FILTER (WHERE status = 'success'), COALESCE(SUM(amount) FILTER (WHERE status = 'success'), 0), COALESCE(SUM(fee_amount) FILTER (WHERE status = 'success'), 0) FROM gateway_request_logs WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3 GROUP BY bucket ORDER BY bucket ASC`,

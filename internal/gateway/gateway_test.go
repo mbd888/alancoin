@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,6 +59,14 @@ func (m *mockLedger) SettleHoldWithFee(_ context.Context, buyerAddr, sellerAddr,
 	}
 	m.settlements[reference] = sellerAmount
 	return nil
+}
+
+func (m *mockLedger) SettleHoldWithCallback(ctx context.Context, buyerAddr, sellerAddr, amount, reference string, preCommit func(tx *sql.Tx) error) error {
+	return m.SettleHold(ctx, buyerAddr, sellerAddr, amount, reference)
+}
+
+func (m *mockLedger) SettleHoldWithFeeAndCallback(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string, preCommit func(tx *sql.Tx) error) error {
+	return m.SettleHoldWithFee(ctx, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference)
 }
 
 func (m *mockLedger) ReleaseHold(_ context.Context, agentAddr, amount, reference string) error {
@@ -1325,6 +1334,14 @@ func (r *retryMockLedger) SettleHoldWithFee(ctx context.Context, buyerAddr, sell
 	return r.mockLedger.SettleHoldWithFee(ctx, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference)
 }
 
+func (r *retryMockLedger) SettleHoldWithCallback(ctx context.Context, buyerAddr, sellerAddr, amount, reference string, _ func(tx *sql.Tx) error) error {
+	return r.SettleHold(ctx, buyerAddr, sellerAddr, amount, reference)
+}
+
+func (r *retryMockLedger) SettleHoldWithFeeAndCallback(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string, _ func(tx *sql.Tx) error) error {
+	return r.SettleHoldWithFee(ctx, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference)
+}
+
 // TestProxy_SettlementFailure_ReturnsResponse verifies that when settlement
 // fails on ALL retries, the buyer still gets the service response (not a retry
 // to the next candidate). The buyer got value — don't throw it away.
@@ -2248,9 +2265,9 @@ func TestValueScore_SmallPrice(t *testing.T) {
 	if score <= 0 {
 		t.Errorf("expected positive score, got %f", score)
 	}
-	// Weighted formula: 0.7*80 + 0.3*(100/0.50) = 56 + 60 = 116
-	expected := 116.0
-	if score < expected*0.99 || score > expected*1.01 {
+	// Cobb-Douglas: 80^0.65 × (1/0.50)^0.35 ≈ 22.0
+	expected := 22.0
+	if score < expected*0.95 || score > expected*1.05 {
 		t.Errorf("expected ~%.1f, got %f", expected, score)
 	}
 }
@@ -2397,27 +2414,27 @@ func TestIdempotencyCacheSweep(t *testing.T) {
 	cache := newIdempotencyCache(50 * time.Millisecond) // 50ms TTL
 
 	// Reserve and complete an entry
-	_, _, found := cache.getOrReserve(context.Background(), "s1", "key1")
+	_, _, found := cache.GetOrReserve(context.Background(), "s1", "key1")
 	if found {
 		t.Fatal("should not find entry on first call")
 	}
-	cache.complete("s1", "key1", &ProxyResult{AmountPaid: "0.10"})
+	cache.Complete("s1", "key1", &ProxyResult{AmountPaid: "0.10"})
 
 	// Should be in cache
-	if cache.size() != 1 {
-		t.Errorf("expected 1 entry, got %d", cache.size())
+	if cache.Size() != 1 {
+		t.Errorf("expected 1 entry, got %d", cache.Size())
 	}
 
 	// Wait for TTL to expire
 	time.Sleep(60 * time.Millisecond)
 
 	// Sweep should remove expired entry
-	removed := cache.sweep()
+	removed := cache.Sweep()
 	if removed != 1 {
 		t.Errorf("expected 1 removed, got %d", removed)
 	}
-	if cache.size() != 0 {
-		t.Errorf("expected 0 entries after sweep, got %d", cache.size())
+	if cache.Size() != 0 {
+		t.Errorf("expected 0 entries after sweep, got %d", cache.Size())
 	}
 }
 
@@ -4281,15 +4298,15 @@ func TestIdempotencyCache_Complete(t *testing.T) {
 	c := newIdempotencyCache(time.Minute)
 	ctx := context.Background()
 
-	_, _, found := c.getOrReserve(ctx, "s1", "k1")
+	_, _, found := c.GetOrReserve(ctx, "s1", "k1")
 	if found {
 		t.Fatal("expected not found on first call")
 	}
 
 	result := &ProxyResult{AmountPaid: "1.00"}
-	c.complete("s1", "k1", result)
+	c.Complete("s1", "k1", result)
 
-	got, err, found := c.getOrReserve(ctx, "s1", "k1")
+	got, err, found := c.GetOrReserve(ctx, "s1", "k1")
 	if !found {
 		t.Fatal("expected found after complete")
 	}
@@ -4305,15 +4322,15 @@ func TestIdempotencyCache_Cancel(t *testing.T) {
 	c := newIdempotencyCache(time.Minute)
 	ctx := context.Background()
 
-	_, _, found := c.getOrReserve(ctx, "s1", "k1")
+	_, _, found := c.GetOrReserve(ctx, "s1", "k1")
 	if found {
 		t.Fatal("expected not found on first call")
 	}
 
-	c.cancel("s1", "k1")
+	c.Cancel("s1", "k1")
 
 	// Should be able to reserve again after cancel
-	_, _, found = c.getOrReserve(ctx, "s1", "k1")
+	_, _, found = c.GetOrReserve(ctx, "s1", "k1")
 	if found {
 		t.Fatal("expected not found after cancel")
 	}
@@ -4324,15 +4341,15 @@ func TestIdempotencyCache_SweepSkipsInFlight(t *testing.T) {
 	ctx := context.Background()
 
 	// Reserve but don't complete
-	_, _, _ = c.getOrReserve(ctx, "s1", "k1")
+	_, _, _ = c.GetOrReserve(ctx, "s1", "k1")
 
 	time.Sleep(5 * time.Millisecond)
-	removed := c.sweep()
+	removed := c.Sweep()
 	if removed != 0 {
 		t.Errorf("expected 0 removed (in-flight), got %d", removed)
 	}
-	if c.size() != 1 {
-		t.Errorf("expected 1 entry (in-flight), got %d", c.size())
+	if c.Size() != 1 {
+		t.Errorf("expected 1 entry (in-flight), got %d", c.Size())
 	}
 }
 
@@ -4342,13 +4359,13 @@ func TestIdempotencyCache_MaxSize(t *testing.T) {
 	ctx := context.Background()
 
 	// Fill up
-	_, _, _ = c.getOrReserve(ctx, "s1", "k1")
-	c.complete("s1", "k1", &ProxyResult{})
-	_, _, _ = c.getOrReserve(ctx, "s1", "k2")
-	c.complete("s1", "k2", &ProxyResult{})
+	_, _, _ = c.GetOrReserve(ctx, "s1", "k1")
+	c.Complete("s1", "k1", &ProxyResult{})
+	_, _, _ = c.GetOrReserve(ctx, "s1", "k2")
+	c.Complete("s1", "k2", &ProxyResult{})
 
 	// Third should not be found (cache full) but also not cached
-	_, _, found := c.getOrReserve(ctx, "s1", "k3")
+	_, _, found := c.GetOrReserve(ctx, "s1", "k3")
 	if found {
 		t.Fatal("expected not found when cache at capacity")
 	}
@@ -4358,13 +4375,13 @@ func TestIdempotencyCache_ExpiredEntry(t *testing.T) {
 	c := newIdempotencyCache(1 * time.Millisecond)
 	ctx := context.Background()
 
-	_, _, _ = c.getOrReserve(ctx, "s1", "k1")
-	c.complete("s1", "k1", &ProxyResult{AmountPaid: "old"})
+	_, _, _ = c.GetOrReserve(ctx, "s1", "k1")
+	c.Complete("s1", "k1", &ProxyResult{AmountPaid: "old"})
 
 	time.Sleep(5 * time.Millisecond)
 
 	// Expired entry should be deleted on access, allowing re-reserve
-	_, _, found := c.getOrReserve(ctx, "s1", "k1")
+	_, _, found := c.GetOrReserve(ctx, "s1", "k1")
 	if found {
 		t.Fatal("expected not found for expired entry")
 	}
@@ -4374,13 +4391,13 @@ func TestIdempotencyCache_ContextCancelled(t *testing.T) {
 	c := newIdempotencyCache(time.Minute)
 
 	// Reserve a key (in-flight)
-	_, _, _ = c.getOrReserve(context.Background(), "s1", "k1")
+	_, _, _ = c.GetOrReserve(context.Background(), "s1", "k1")
 
 	// Try to get the same key with a cancelled context
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	_, err, found := c.getOrReserve(ctx, "s1", "k1")
+	_, err, found := c.GetOrReserve(ctx, "s1", "k1")
 	if !found {
 		t.Fatal("expected found (blocked then cancelled)")
 	}
@@ -4545,8 +4562,8 @@ func TestService_SweepIdempotencyCache(t *testing.T) {
 	svc.idemCache = newIdempotencyCache(1 * time.Millisecond)
 
 	ctx := context.Background()
-	svc.idemCache.getOrReserve(ctx, "s1", "k1")
-	svc.idemCache.complete("s1", "k1", &ProxyResult{})
+	svc.idemCache.GetOrReserve(ctx, "s1", "k1")
+	svc.idemCache.Complete("s1", "k1", &ProxyResult{})
 
 	time.Sleep(5 * time.Millisecond)
 	removed := svc.SweepIdempotencyCache()
@@ -4896,7 +4913,7 @@ func TestResolver_BestValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	// best_value weights reputation 70% and inverse-price 30%.
+	// best_value uses Cobb-Douglas: rep^0.65 × (1/price)^0.35.
 	// Just verify the strategy runs without error and returns both candidates.
 	if len(candidates) != 2 {
 		t.Errorf("expected 2 candidates, got %d", len(candidates))

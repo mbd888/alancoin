@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/big"
 	"sort"
 
@@ -132,24 +133,42 @@ func sortCandidates(candidates []ServiceCandidate, strategy string) {
 	}
 }
 
+// valueScore computes a Cobb-Douglas utility for ranking service candidates
+// by "best value" — combining reputation quality and price efficiency.
+//
+// The Cobb-Douglas function U = rep^α × (1/price)^(1-α) is the standard
+// microeconomic way to combine two desirable attributes. It has key properties
+// the old linear formula lacked:
+//
+//   - No singularity: when price=0 or rep=0, the score is 0 (not infinite)
+//   - Scale-invariant: doubling all prices doesn't change relative rankings
+//   - Diminishing returns: going from rep 80→90 matters less than 10→20
+//   - The α parameter has clear meaning: fraction of preference on quality
+//
+// α = 0.65 slightly favors reputation over price, matching the platform's
+// trust-first philosophy.
 func valueScore(c ServiceCandidate) float64 {
 	price, _ := usdc.Parse(c.Price)
 	if price == nil || price.Sign() == 0 {
 		return 0
 	}
-	// Use big.Float to avoid Int64() truncation on large values.
-	priceF, _ := new(big.Float).SetInt(price).Float64()
-	if priceF == 0 {
+
+	rep := c.ReputationScore
+	if rep <= 0 {
 		return 0
 	}
-	// Weighted reputation per unit cost (higher = better deal).
-	// price is in USDC base units (6 decimals), so divide by 1e6.
-	// Reputation is weighted 70% and inverse-price 30% to favor trusted agents.
-	repWeight := 0.7
-	priceWeight := 0.3
-	repComponent := repWeight * c.ReputationScore
-	priceComponent := priceWeight * (100.0 / (priceF / 1e6)) // normalize: cheaper = higher score
-	return repComponent + priceComponent
+
+	// Convert price to dollars for the utility computation.
+	priceF, _ := new(big.Float).SetInt(price).Float64()
+	if priceF <= 0 {
+		return 0
+	}
+	priceDollars := priceF / 1e6
+
+	// Cobb-Douglas: U = rep^α × (1/price)^(1-α)
+	// α = 0.65: 65% weight on reputation, 35% on price efficiency
+	const alpha = 0.65
+	return math.Pow(rep, alpha) * math.Pow(1.0/priceDollars, 1.0-alpha)
 }
 
 // intelligenceDiscoveryBoost returns a reputation score boost based on

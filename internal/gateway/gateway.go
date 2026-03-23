@@ -9,6 +9,7 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"math/big"
 	"time"
@@ -169,6 +170,8 @@ type LedgerService interface {
 	Hold(ctx context.Context, agentAddr, amount, reference string) error
 	SettleHold(ctx context.Context, buyerAddr, sellerAddr, amount, reference string) error
 	SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string) error
+	SettleHoldWithCallback(ctx context.Context, buyerAddr, sellerAddr, amount, reference string, preCommit func(tx *sql.Tx) error) error
+	SettleHoldWithFeeAndCallback(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string, preCommit func(tx *sql.Tx) error) error
 	ReleaseHold(ctx context.Context, agentAddr, amount, reference string) error
 }
 

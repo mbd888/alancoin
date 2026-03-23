@@ -12,7 +12,11 @@ import (
 	"sync"
 	"time"
 
+	"database/sql"
+	"encoding/json"
+
 	"github.com/mbd888/alancoin/internal/circuitbreaker"
+	"github.com/mbd888/alancoin/internal/eventbus"
 	"github.com/mbd888/alancoin/internal/idgen"
 	"github.com/mbd888/alancoin/internal/retry"
 	"github.com/mbd888/alancoin/internal/syncutil"
@@ -64,7 +68,7 @@ func (c *idempotencyCache) key(sessionID, idempotencyKey string) string {
 //
 // If another goroutine is currently processing the same key, this blocks
 // until that goroutine calls complete() or cancel(), or ctx is cancelled.
-func (c *idempotencyCache) getOrReserve(ctx context.Context, sessionID, idempotencyKey string) (*ProxyResult, error, bool) {
+func (c *idempotencyCache) GetOrReserve(ctx context.Context, sessionID, idempotencyKey string) (*ProxyResult, error, bool) {
 	k := c.key(sessionID, idempotencyKey)
 
 	c.mu.Lock()
@@ -90,7 +94,7 @@ func (c *idempotencyCache) getOrReserve(ctx context.Context, sessionID, idempote
 				return entry.result, entry.err, true
 			}
 			// Entry was cancelled — fall through to re-reserve below.
-			return c.getOrReserve(ctx, sessionID, idempotencyKey)
+			return c.GetOrReserve(ctx, sessionID, idempotencyKey)
 		case <-ctx.Done():
 			return nil, ctx.Err(), true
 		}
@@ -116,7 +120,7 @@ func (c *idempotencyCache) getOrReserve(ctx context.Context, sessionID, idempote
 
 // complete stores the result and wakes all waiters.
 // Only call this for successful results that should be cached.
-func (c *idempotencyCache) complete(sessionID, idempotencyKey string, result *ProxyResult) {
+func (c *idempotencyCache) Complete(sessionID, idempotencyKey string, result *ProxyResult) {
 	k := c.key(sessionID, idempotencyKey)
 	c.mu.Lock()
 	entry, ok := c.entries[k]
@@ -133,7 +137,7 @@ func (c *idempotencyCache) complete(sessionID, idempotencyKey string, result *Pr
 
 // cancel removes the reservation and wakes waiters so they can retry.
 // Call this when processing fails and the result should NOT be cached.
-func (c *idempotencyCache) cancel(sessionID, idempotencyKey string) {
+func (c *idempotencyCache) Cancel(sessionID, idempotencyKey string) {
 	k := c.key(sessionID, idempotencyKey)
 	c.mu.Lock()
 	entry, ok := c.entries[k]
@@ -149,7 +153,7 @@ func (c *idempotencyCache) cancel(sessionID, idempotencyKey string) {
 // sweep removes expired entries that have completed processing.
 // In-flight entries (done channel still open) are never swept, preventing
 // goroutine leaks from waiters blocking on a deleted entry's done channel.
-func (c *idempotencyCache) sweep() int {
+func (c *idempotencyCache) Sweep() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
@@ -171,7 +175,7 @@ func (c *idempotencyCache) sweep() int {
 }
 
 // size returns the current number of entries.
-func (c *idempotencyCache) size() int {
+func (c *idempotencyCache) Size() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.entries)
@@ -199,11 +203,12 @@ type Service struct {
 	chargeback      ChargebackRecorder   // FinOps cost attribution
 	intelligence    IntelligenceProvider // credit-gated escrow + dynamic fees
 	eventBus        EventPublisher       // settlement event bus (replaces fire-and-forget goroutines)
+	outbox          *eventbus.Outbox     // transactional outbox for exactly-once event publishing (nil = direct publish)
 	budgetCheck     BudgetPreFlight      // pre-flight budget check before proxy
 	platformAddr    string               // ledger address collecting platform fees
 	logger          *slog.Logger
 	locks           syncutil.ShardedMutex
-	idemCache       *idempotencyCache
+	idemCache       IdempotencyStore
 	rateLimit       *rateLimiter
 
 	// pendingSpend tracks in-flight budget reservations per session.
@@ -214,7 +219,7 @@ type Service struct {
 
 // SweepIdempotencyCache removes expired entries. Called by the Timer.
 func (s *Service) SweepIdempotencyCache() int {
-	return s.idemCache.sweep()
+	return s.idemCache.Sweep()
 }
 
 // SweepRateLimiter removes stale rate limit entries. Called by the Timer.
@@ -307,6 +312,57 @@ func (s *Service) WithBudgetPreFlight(bp BudgetPreFlight) *Service {
 func (s *Service) WithEventBus(ep EventPublisher) *Service {
 	s.eventBus = ep
 	return s
+}
+
+// WithOutbox adds transactional outbox for exactly-once event publishing.
+// When configured, settlement events are written inside the ledger transaction
+// and published asynchronously by the outbox poller.
+func (s *Service) WithOutbox(ob *eventbus.Outbox) *Service {
+	s.outbox = ob
+	return s
+}
+
+// WithIdempotencyStore replaces the default in-memory idempotency cache
+// with a distributed implementation (e.g. Redis-backed).
+func (s *Service) WithIdempotencyStore(store IdempotencyStore) *Service {
+	s.idemCache = store
+	return s
+}
+
+// makeOutboxCallback returns a preCommit callback that writes a settlement event
+// to the outbox table within the ledger transaction. Returns nil if no outbox is configured.
+func (s *Service) makeOutboxCallback(ctx context.Context, sessionID, tenantID, buyerAddr, sellerAddr, amount, fee, serviceType, serviceID, reference string, latencyMs int64) func(tx *sql.Tx) error {
+	if s.outbox == nil {
+		return nil
+	}
+	return func(tx *sql.Tx) error {
+		amountFloat, _ := strconv.ParseFloat(amount, 64)
+		payload := eventbus.SettlementPayload{
+			SessionID:   sessionID,
+			TenantID:    tenantID,
+			BuyerAddr:   buyerAddr,
+			SellerAddr:  sellerAddr,
+			Amount:      amount,
+			ServiceType: serviceType,
+			ServiceID:   serviceID,
+			Fee:         fee,
+			Reference:   reference,
+			LatencyMs:   latencyMs,
+			AmountFloat: amountFloat,
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("marshal settlement payload: %w", err)
+		}
+		evt := eventbus.Event{
+			ID:        idgen.WithPrefix("evt_"),
+			Topic:     eventbus.TopicSettlement,
+			Key:       buyerAddr,
+			Payload:   data,
+			Timestamp: time.Now(),
+		}
+		return s.outbox.WriteInTx(ctx, tx, evt)
+	}
 }
 
 // WithIncentives adds flywheel incentive support (fee discounts by reputation).
@@ -562,7 +618,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 	// Idempotency: if the client provides a key, check cache or reserve for processing.
 	idemReserved := false
 	if req.IdempotencyKey != "" {
-		result, err, found := s.idemCache.getOrReserve(ctx, sessionID, req.IdempotencyKey)
+		result, err, found := s.idemCache.GetOrReserve(ctx, sessionID, req.IdempotencyKey)
 		if found {
 			return result, err
 		}
@@ -573,7 +629,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 	// Wrapper to handle idempotency cleanup on all exit paths.
 	cancelIdem := func() {
 		if idemReserved {
-			s.idemCache.cancel(sessionID, req.IdempotencyKey)
+			s.idemCache.Cancel(sessionID, req.IdempotencyKey)
 		}
 	}
 
@@ -864,10 +920,11 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 				if settleAttempt > 1 {
 					gwSettlementRetries.Inc()
 				}
+				outboxCb := s.makeOutboxCallback(ctx, sessionIDCopy, tenantIDCopy, agentAddr, candidate.AgentAddress, candidate.Price, feeAmountStr, req.ServiceType, candidate.ServiceID, ref, fwdResp.LatencyMs)
 				if feeAmountStr != "0.000000" && s.platformAddr != "" {
-					return s.ledger.SettleHoldWithFee(ctx, agentAddr, candidate.AgentAddress, sellerAmountStr, s.platformAddr, feeAmountStr, ref)
+					return s.ledger.SettleHoldWithFeeAndCallback(ctx, agentAddr, candidate.AgentAddress, sellerAmountStr, s.platformAddr, feeAmountStr, ref, outboxCb)
 				}
-				return s.ledger.SettleHold(ctx, agentAddr, candidate.AgentAddress, candidate.Price, ref)
+				return s.ledger.SettleHoldWithCallback(ctx, agentAddr, candidate.AgentAddress, candidate.Price, ref, outboxCb)
 			})
 		if settleErr != nil {
 			// Service was delivered but payment to seller failed.
@@ -904,7 +961,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			}
 
 			if idemReserved {
-				s.idemCache.complete(sessionID, req.IdempotencyKey, result)
+				s.idemCache.Complete(sessionID, req.IdempotencyKey, result)
 			}
 			return result, nil
 		}
@@ -953,25 +1010,28 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 			go s.webhookEmitter.EmitProxySuccess(agentAddr, sessionIDCopy, candidate.AgentAddress, priceStr)
 		}
 
-		// Publish settlement event to event bus (preferred) or fall back to direct goroutines.
-		// The event bus provides batching, backpressure, and durability.
-		if s.eventBus != nil {
-			_ = s.eventBus.PublishSettlement(context.Background(),
-				sessionIDCopy, tenantIDCopy, agentAddr, candidate.AgentAddress,
-				priceStr, feeAmountStr, req.ServiceType, candidate.ServiceID,
-				ref, fwdResp.LatencyMs)
-		} else {
-			// Legacy fire-and-forget path (no event bus configured)
-			if s.forensics != nil {
-				pf, _ := strconv.ParseFloat(candidate.Price, 64)
-				go func() { //nolint:gosec // G118: fire-and-forget outlives request context
-					_ = s.forensics.IngestSpend(context.Background(), agentAddr, candidate.AgentAddress, pf, req.ServiceType)
-				}()
-			}
-			if s.chargeback != nil && tenantIDCopy != "" {
-				go func() { //nolint:gosec // G118: fire-and-forget outlives request context
-					_ = s.chargeback.RecordGatewaySpend(context.Background(), tenantIDCopy, agentAddr, priceStr, req.ServiceType, sessionIDCopy)
-				}()
+		// Publish settlement event to event bus.
+		// When outbox is configured, the event was already written inside the ledger transaction
+		// and will be published by the outbox poller — skip direct publishing.
+		if s.outbox == nil {
+			if s.eventBus != nil {
+				_ = s.eventBus.PublishSettlement(context.Background(),
+					sessionIDCopy, tenantIDCopy, agentAddr, candidate.AgentAddress,
+					priceStr, feeAmountStr, req.ServiceType, candidate.ServiceID,
+					ref, fwdResp.LatencyMs)
+			} else {
+				// Legacy fire-and-forget path (no event bus configured)
+				if s.forensics != nil {
+					pf, _ := strconv.ParseFloat(candidate.Price, 64)
+					go func() { //nolint:gosec // G118: fire-and-forget outlives request context
+						_ = s.forensics.IngestSpend(context.Background(), agentAddr, candidate.AgentAddress, pf, req.ServiceType)
+					}()
+				}
+				if s.chargeback != nil && tenantIDCopy != "" {
+					go func() { //nolint:gosec // G118: fire-and-forget outlives request context
+						_ = s.chargeback.RecordGatewaySpend(context.Background(), tenantIDCopy, agentAddr, priceStr, req.ServiceType, sessionIDCopy)
+					}()
+				}
 			}
 		}
 
@@ -1002,7 +1062,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 
 		// Cache successful result for idempotency.
 		if idemReserved {
-			s.idemCache.complete(sessionID, req.IdempotencyKey, result)
+			s.idemCache.Complete(sessionID, req.IdempotencyKey, result)
 		}
 
 		// Record usage for billing metering (async, off hot path).
