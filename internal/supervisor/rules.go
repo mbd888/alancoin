@@ -88,15 +88,6 @@ func DefaultRules() []EvalRule {
 // VelocityRule: spend rate exceeds window limit
 // ---------------------------------------------------------------------------
 
-// velocityLimit maps tier to hourly spend limit (in 6-decimal USDC units).
-var velocityLimit = map[string]*big.Int{
-	"new":         mustParse("50"),     // $50/hr
-	"emerging":    mustParse("500"),    // $500/hr
-	"established": mustParse("5000"),   // $5,000/hr
-	"trusted":     mustParse("25000"),  // $25,000/hr
-	"elite":       mustParse("100000"), // $100,000/hr
-}
-
 type VelocityRule struct{}
 
 func (r *VelocityRule) Name() string { return "velocity" }
@@ -107,10 +98,7 @@ func (r *VelocityRule) Evaluate(_ context.Context, graph *SpendGraph, ec *EvalCo
 		return nil // no history, allow
 	}
 
-	limit, ok := velocityLimit[ec.Tier]
-	if !ok {
-		limit = velocityLimit["established"]
-	}
+	limit := VelocityLimitForTier(ec.Tier)
 
 	// Check 1hr window (index 2) — project new total
 	projected := new(big.Int).Add(snap.WindowTotals[2], ec.Amount)
@@ -129,37 +117,30 @@ func (r *VelocityRule) Evaluate(_ context.Context, graph *SpendGraph, ec *EvalCo
 // Concurrency limits: used by Supervisor.Hold / EscrowLock via atomic acquire
 // ---------------------------------------------------------------------------
 
-// concurrencyLimitByTier maps tier to max simultaneous holds+escrows.
+// Concurrency limits are now computed by ConcurrencyLimitForTier()
+// in tierscale.go via geometric scaling: 3, 7, 17, 42, 100.
 // Enforcement is in Supervisor.Hold / EscrowLock using TryAcquireHold /
 // TryAcquireEscrow to avoid the TOCTOU race a rule-based snapshot check has.
-var concurrencyLimitByTier = map[string]int{
-	"new":         3,
-	"emerging":    10,
-	"established": 25,
-	"trusted":     50,
-	"elite":       100,
-}
 
 // ---------------------------------------------------------------------------
 // NewAgentRule: "new" tier agent with >$5 per transaction
 // ---------------------------------------------------------------------------
 
-var newAgentPerTxLimit = mustParse("5") // $5
-
+// NewAgentRule enforces a per-transaction limit that scales geometrically
+// with tier. For "new" agents this is $5, growing to effectively unlimited
+// at "elite" (where velocity is the binding constraint anyway).
 type NewAgentRule struct{}
 
 func (r *NewAgentRule) Name() string { return "new_agent_limit" }
 
 func (r *NewAgentRule) Evaluate(_ context.Context, _ *SpendGraph, ec *EvalContext) *Verdict {
-	if ec.Tier != "new" {
-		return nil
-	}
-	if ec.Amount.Cmp(newAgentPerTxLimit) > 0 {
+	limit := PerTxLimitForTier(ec.Tier)
+	if ec.Amount.Cmp(limit) > 0 {
 		return &Verdict{
 			Action: Deny,
 			Rule:   r.Name(),
-			Reason: fmt.Sprintf("new agent per-tx limit exceeded: %s > %s",
-				ec.Amount.String(), newAgentPerTxLimit.String()),
+			Reason: fmt.Sprintf("per-tx limit exceeded for tier %q: %s > %s",
+				ec.Tier, ec.Amount.String(), limit.String()),
 		}
 	}
 	return nil
@@ -291,10 +272,7 @@ func (r *BaselineRule) Evaluate(_ context.Context, graph *SpendGraph, ec *EvalCo
 
 	// Floor = 50% of tier velocity limit (prevents baselines from being
 	// more restrictive than half the hard limit)
-	tierLimit, ok := velocityLimit[ec.Tier]
-	if !ok {
-		tierLimit = velocityLimit["established"]
-	}
+	tierLimit := VelocityLimitForTier(ec.Tier)
 	floor := new(big.Int).Div(tierLimit, big.NewInt(2))
 
 	// Effective threshold = max(threshold, floor)

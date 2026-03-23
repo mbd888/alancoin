@@ -10,60 +10,17 @@ import (
 )
 
 // SpendEvent records a single spending observation.
+// Retained for edge event tracking (cycle detection needs discrete events).
 type SpendEvent struct {
 	Amount *big.Int
 	At     time.Time
 }
 
-// VelocityWindow tracks spend events within a rolling time window.
-type VelocityWindow struct {
-	Duration time.Duration
-	Events   []SpendEvent
-	Total    *big.Int // running sum of event amounts
-}
-
-func newVelocityWindow(d time.Duration) *VelocityWindow {
-	return &VelocityWindow{
-		Duration: d,
-		Total:    new(big.Int),
-	}
-}
-
-// add appends an event and updates the running total. Caller holds write lock.
-func (w *VelocityWindow) add(amount *big.Int, now time.Time) {
-	w.Events = append(w.Events, SpendEvent{Amount: new(big.Int).Set(amount), At: now})
-	w.Total.Add(w.Total, amount)
-}
-
-// evict removes expired events. Caller holds write lock.
-func (w *VelocityWindow) evict(now time.Time) {
-	cutoff := now.Add(-w.Duration)
-	i := 0
-	for i < len(w.Events) && w.Events[i].At.Before(cutoff) {
-		w.Total.Sub(w.Total, w.Events[i].Amount)
-		i++
-	}
-	if i > 0 {
-		w.Events = w.Events[i:]
-	}
-}
-
-// snapshot returns a copy of Total filtered for the current window without
-// mutating the real window. Used for read-only access under read lock.
-func (w *VelocityWindow) snapshot(now time.Time) *big.Int {
-	cutoff := now.Add(-w.Duration)
-	total := new(big.Int)
-	for _, e := range w.Events {
-		if !e.At.Before(cutoff) {
-			total.Add(total, e.Amount)
-		}
-	}
-	return total
-}
-
 // AgentNode tracks behavioral state for a single agent.
+// Velocity is tracked via EWMA cascade (O(1) per event, O(1) memory)
+// instead of fixed windows that stored every event.
 type AgentNode struct {
-	Windows       [3]*VelocityWindow // 1min, 5min, 1hr
+	Cascade       *EWMACascade // EWMA at 1min, 5min, 1hr time constants
 	ActiveHolds   int
 	ActiveEscrows int
 	TotalSpent    *big.Int
@@ -71,11 +28,7 @@ type AgentNode struct {
 
 func newAgentNode() *AgentNode {
 	return &AgentNode{
-		Windows: [3]*VelocityWindow{
-			newVelocityWindow(1 * time.Minute),
-			newVelocityWindow(5 * time.Minute),
-			newVelocityWindow(1 * time.Hour),
-		},
+		Cascade:    NewEWMACascade(),
 		TotalSpent: new(big.Int),
 	}
 }
@@ -133,8 +86,8 @@ func edgeKey(from, to string) string {
 	return strings.ToLower(from) + ":" + strings.ToLower(to)
 }
 
-// RecordEvent logs a spending event for an agent. Evicts expired events
-// from all velocity windows under write lock.
+// RecordEvent logs a spending event for an agent. Updates EWMA cascade
+// (O(1) per event) and total spent counter.
 func (g *SpendGraph) RecordEvent(agent, counterparty string, amount *big.Int, now time.Time) {
 	agent = strings.ToLower(agent)
 
@@ -143,11 +96,8 @@ func (g *SpendGraph) RecordEvent(agent, counterparty string, amount *big.Int, no
 
 	node := g.getOrCreate(agent)
 
-	// Evict expired events, then add new one
-	for _, w := range node.Windows {
-		w.evict(now)
-		w.add(amount, now)
-	}
+	// Update EWMA cascade — O(1), no eviction needed
+	node.Cascade.Update(float64(amount.Int64()), now)
 	node.TotalSpent.Add(node.TotalSpent, amount)
 
 	// Update edge
@@ -218,9 +168,7 @@ func (g *SpendGraph) GetNode(agent string) *AgentSnapshot {
 		ActiveHolds:   node.ActiveHolds,
 		ActiveEscrows: node.ActiveEscrows,
 		TotalSpent:    new(big.Int).Set(node.TotalSpent),
-	}
-	for i, w := range node.Windows {
-		snap.WindowTotals[i] = w.snapshot(now)
+		WindowTotals:  node.Cascade.Estimates(now),
 	}
 	return snap
 }

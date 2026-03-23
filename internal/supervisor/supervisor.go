@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -76,6 +77,19 @@ func WithBaselineStore(store BaselineStore) Option {
 			&CircularFlowRule{},
 			&CounterpartyConcentrationRule{},
 		)
+	}
+}
+
+// WithBalanceConcentration adds the BalanceConcentrationRule to the rule
+// engine. This rule flags agents with >90% of funds in pending holds or
+// escrow — a risk signal invisible to velocity-based rules.
+//
+// The rule uses the inner ledger (not the supervisor) to fetch balances,
+// avoiding recursive evaluation.
+func WithBalanceConcentration() Option {
+	return func(s *Supervisor) {
+		rule := &BalanceConcentrationRule{BalanceProvider: s.inner}
+		s.engine = NewRuleEngine(append(s.engine.rules, rule)...)
 	}
 }
 
@@ -238,6 +252,37 @@ func (s *Supervisor) SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAdd
 	}
 	// Track the seller payment for spend graph + baseline learning.
 	// Fee goes to platform — no spend-graph edge needed for that.
+	s.recordEdge(buyerAddr, sellerAddr, sellerAmount)
+	totalBig, ok1 := usdc.Parse(sellerAmount)
+	feeBig, ok2 := usdc.Parse(feeAmount)
+	if ok1 && ok2 {
+		totalBig.Add(totalBig, feeBig)
+		s.persistSpend(buyerAddr, sellerAddr, usdc.Format(totalBig))
+	} else {
+		s.persistSpend(buyerAddr, sellerAddr, sellerAmount)
+	}
+	if !s.graph.ReleaseActiveHold(buyerAddr) {
+		s.logger.Error("settle hold with fee underflow", "agent", buyerAddr)
+	}
+	return nil
+}
+
+func (s *Supervisor) SettleHoldWithCallback(ctx context.Context, buyerAddr, sellerAddr, amount, reference string, preCommit func(tx *sql.Tx) error) error {
+	if err := s.inner.SettleHoldWithCallback(ctx, buyerAddr, sellerAddr, amount, reference, preCommit); err != nil {
+		return err
+	}
+	s.recordEdge(buyerAddr, sellerAddr, amount)
+	s.persistSpend(buyerAddr, sellerAddr, amount)
+	if !s.graph.ReleaseActiveHold(buyerAddr) {
+		s.logger.Error("settle hold underflow", "agent", buyerAddr)
+	}
+	return nil
+}
+
+func (s *Supervisor) SettleHoldWithFeeAndCallback(ctx context.Context, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference string, preCommit func(tx *sql.Tx) error) error {
+	if err := s.inner.SettleHoldWithFeeAndCallback(ctx, buyerAddr, sellerAddr, sellerAmount, platformAddr, feeAmount, reference, preCommit); err != nil {
+		return err
+	}
 	s.recordEdge(buyerAddr, sellerAddr, sellerAmount)
 	totalBig, ok1 := usdc.Parse(sellerAmount)
 	feeBig, ok2 := usdc.Parse(feeAmount)
@@ -472,13 +517,9 @@ func (s *Supervisor) persistSpend(agent, counterparty, amount string) {
 	s.eventWriter.Send(agent, counterparty, amountBig, time.Now())
 }
 
-// concurrencyLimitForTier looks up the concurrency limit for a pre-computed tier.
+// concurrencyLimitForTier computes the concurrency limit via geometric scaling.
 func concurrencyLimitForTier(tier string) int {
-	limit, ok := concurrencyLimitByTier[tier]
-	if !ok {
-		limit = concurrencyLimitByTier["established"]
-	}
-	return limit
+	return ConcurrencyLimitForTier(tier)
 }
 
 // getTier returns the agent's reputation tier, defaulting to "established"
