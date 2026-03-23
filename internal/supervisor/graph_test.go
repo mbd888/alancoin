@@ -7,10 +7,10 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// FlowEdge unit tests
+// FlowEdge circular buffer unit tests
 // ---------------------------------------------------------------------------
 
-func TestFlowEdge_EvictOld(t *testing.T) {
+func TestFlowEdge_CircularBuffer(t *testing.T) {
 	e := &FlowEdge{
 		From:   "a",
 		To:     "b",
@@ -19,24 +19,26 @@ func TestFlowEdge_EvictOld(t *testing.T) {
 
 	base := time.Now()
 	// Add events spread over 2 hours
-	e.Events = []SpendEvent{
-		{Amount: big.NewInt(100), At: base.Add(-2 * time.Hour)},
-		{Amount: big.NewInt(200), At: base.Add(-30 * time.Minute)},
-		{Amount: big.NewInt(300), At: base},
+	e.addEvent(SpendEvent{Amount: big.NewInt(100), At: base.Add(-2 * time.Hour)})
+	e.addEvent(SpendEvent{Amount: big.NewInt(200), At: base.Add(-30 * time.Minute)})
+	e.addEvent(SpendEvent{Amount: big.NewInt(300), At: base})
+
+	if e.count != 3 {
+		t.Fatalf("expected 3 events, got %d", e.count)
 	}
 
-	e.evictOld(base)
-
-	// First event (2hr ago) should be evicted (edgeEventRetention = 1hr)
-	if len(e.Events) != 2 {
-		t.Fatalf("expected 2 events after evict, got %d", len(e.Events))
+	// recentEvents with 1hr window should exclude the 2hr-old event
+	cutoff := base.Add(-edgeEventRetention)
+	recent := e.recentEvents(cutoff)
+	if len(recent) != 2 {
+		t.Fatalf("expected 2 recent events, got %d", len(recent))
 	}
-	if e.Events[0].Amount.Int64() != 200 {
-		t.Fatalf("expected first remaining event to be 200, got %d", e.Events[0].Amount.Int64())
+	if recent[0].Amount.Int64() != 200 {
+		t.Fatalf("expected first recent event to be 200, got %d", recent[0].Amount.Int64())
 	}
 }
 
-func TestFlowEdge_EvictOldNone(t *testing.T) {
+func TestFlowEdge_CircularBufferOverflow(t *testing.T) {
 	e := &FlowEdge{
 		From:   "a",
 		To:     "b",
@@ -44,14 +46,46 @@ func TestFlowEdge_EvictOldNone(t *testing.T) {
 	}
 
 	now := time.Now()
-	e.Events = []SpendEvent{
-		{Amount: big.NewInt(100), At: now},
-		{Amount: big.NewInt(200), At: now},
+	// Fill beyond capacity — oldest entries should be overwritten
+	for i := 0; i < maxEdgeEvents+10; i++ {
+		e.addEvent(SpendEvent{Amount: big.NewInt(int64(i)), At: now})
 	}
 
-	e.evictOld(now)
-	if len(e.Events) != 2 {
-		t.Fatalf("expected 2 events (none evicted), got %d", len(e.Events))
+	if e.count != maxEdgeEvents {
+		t.Fatalf("expected count capped at %d, got %d", maxEdgeEvents, e.count)
+	}
+
+	// All events are recent
+	recent := e.recentEvents(now.Add(-1 * time.Hour))
+	if len(recent) != maxEdgeEvents {
+		t.Fatalf("expected %d recent events, got %d", maxEdgeEvents, len(recent))
+	}
+
+	// The oldest surviving event should be #10 (the first 10 were overwritten)
+	if recent[0].Amount.Int64() != 10 {
+		t.Fatalf("expected oldest surviving event amount 10, got %d", recent[0].Amount.Int64())
+	}
+}
+
+func TestFlowEdge_HasRecentEvent(t *testing.T) {
+	e := &FlowEdge{
+		From:   "a",
+		To:     "b",
+		Volume: new(big.Int),
+	}
+
+	now := time.Now()
+	e.addEvent(SpendEvent{Amount: big.NewInt(100), At: now.Add(-2 * time.Hour)})
+
+	// Only old events — no recent within 1hr
+	if e.hasRecentEvent(now.Add(-1 * time.Hour)) {
+		t.Fatal("expected no recent event")
+	}
+
+	// Add a recent one
+	e.addEvent(SpendEvent{Amount: big.NewInt(200), At: now})
+	if !e.hasRecentEvent(now.Add(-1 * time.Hour)) {
+		t.Fatal("expected recent event")
 	}
 }
 
@@ -350,6 +384,28 @@ func TestSpendGraph_HasCyclicFlowThreeNodeCycle(t *testing.T) {
 	// Should be [a, b, c, a]
 	if len(cycle) != 4 {
 		t.Fatalf("expected cycle length 4, got %d: %v", len(cycle), cycle)
+	}
+}
+
+func TestSpendGraph_HasCyclicFlowDepthBounded(t *testing.T) {
+	g := NewSpendGraph()
+	now := time.Now()
+
+	// Create a chain longer than maxDFSDepth
+	agents := make([]string, maxDFSDepth+3)
+	for i := range agents {
+		agents[i] = "0x" + string(rune('a'+i))
+	}
+	for i := 0; i < len(agents)-1; i++ {
+		g.RecordEvent(agents[i], agents[i+1], big.NewInt(100), now)
+	}
+	// Close the cycle
+	g.RecordEvent(agents[len(agents)-1], agents[0], big.NewInt(100), now)
+
+	// Should NOT detect cycle because chain exceeds maxDFSDepth
+	cycle := g.HasCyclicFlow(agents[0], 1*time.Hour)
+	if cycle != nil {
+		t.Fatalf("expected no cycle detection beyond maxDFSDepth, got %v", cycle)
 	}
 }
 

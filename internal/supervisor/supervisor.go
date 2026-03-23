@@ -24,6 +24,15 @@ type ReputationProvider interface {
 	GetScore(ctx context.Context, address string) (float64, string, error)
 }
 
+// tierCacheEntry caches a reputation tier lookup to avoid synchronous
+// DB queries on every Hold/EscrowLock.
+type tierCacheEntry struct {
+	tier      string
+	expiresAt time.Time
+}
+
+const tierCacheTTL = 60 * time.Second
+
 // Supervisor is a ledger.Service decorator that evaluates agent spending
 // patterns before allowing money-moving operations through to the inner
 // service.
@@ -33,6 +42,9 @@ type Supervisor struct {
 	engine     *RuleEngine
 	reputation ReputationProvider
 	logger     *slog.Logger
+
+	// Tier cache: avoids synchronous reputation lookup on hot path
+	tierCache sync.Map // map[string]*tierCacheEntry
 
 	// Baseline learning fields (nil without WithBaselineStore)
 	baselineCache map[string]*AgentBaseline
@@ -520,17 +532,36 @@ func concurrencyLimitForTier(tier string) int {
 }
 
 // getTier returns the agent's reputation tier, defaulting to "established"
-// if no reputation provider is available.
+// if no reputation provider is available. Results are cached for tierCacheTTL
+// to avoid synchronous DB queries on the hot path.
 func (s *Supervisor) getTier(ctx context.Context, agentAddr string) string {
 	if s.reputation == nil {
 		return "established"
 	}
+
+	key := strings.ToLower(agentAddr)
+	now := time.Now()
+
+	// Check cache first
+	if v, ok := s.tierCache.Load(key); ok {
+		entry := v.(*tierCacheEntry)
+		if now.Before(entry.expiresAt) {
+			return entry.tier
+		}
+	}
+
+	// Cache miss or expired — fetch from provider
 	_, tier, err := s.reputation.GetScore(ctx, agentAddr)
 	if err != nil {
-		return "new"
+		tier = "new"
 	}
 	if tier == "" {
-		return "established"
+		tier = "established"
 	}
+
+	s.tierCache.Store(key, &tierCacheEntry{
+		tier:      tier,
+		expiresAt: now.Add(tierCacheTTL),
+	})
 	return tier
 }

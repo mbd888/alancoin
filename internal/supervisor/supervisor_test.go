@@ -913,6 +913,9 @@ func (s *panicDenialStore) GetAllAgentsWithEvents(_ context.Context, _ time.Time
 func (s *panicDenialStore) GetHourlyTotals(_ context.Context, _ string, _ time.Time) (map[time.Time]*big.Int, error) {
 	return nil, nil
 }
+func (s *panicDenialStore) GetAllHourlyTotals(_ context.Context, _ time.Time) (map[string]map[time.Time]*big.Int, error) {
+	return nil, nil
+}
 func (s *panicDenialStore) PruneOldEvents(_ context.Context, _ time.Time) (int64, error) {
 	return 0, nil
 }

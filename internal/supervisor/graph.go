@@ -3,6 +3,7 @@
 package supervisor
 
 import (
+	"hash/fnv"
 	"math/big"
 	"strings"
 	"sync"
@@ -45,45 +46,96 @@ type AgentSnapshot struct {
 // Matches the cycle detection window used by CircularFlowRule.
 const edgeEventRetention = 1 * time.Hour
 
+// maxEdgeEvents is the fixed capacity of the per-edge circular buffer.
+// Prevents unbounded growth for high-frequency agent pairs.
+const maxEdgeEvents = 128
+
+// maxDFSDepth limits cycle detection traversal depth to prevent O(N)
+// graph walks on every transaction.
+const maxDFSDepth = 8
+
+// graphShards is the number of shards. Must be a power of 2.
+const graphShards = 128
+
 // FlowEdge tracks bilateral volume between two agents.
+// Events are stored in a fixed-capacity circular buffer.
 type FlowEdge struct {
 	From      string
 	To        string
 	Volume    *big.Int
 	LastEvent time.Time
-	Events    []SpendEvent
+	events    [maxEdgeEvents]SpendEvent // circular buffer (fixed size, no alloc)
+	head      int                       // next write position
+	count     int                       // number of valid entries (≤ maxEdgeEvents)
 }
 
-// evictOld removes events older than edgeEventRetention to prevent unbounded growth.
-func (e *FlowEdge) evictOld(now time.Time) {
-	cutoff := now.Add(-edgeEventRetention)
-	i := 0
-	for i < len(e.Events) && e.Events[i].At.Before(cutoff) {
-		i++
-	}
-	if i > 0 {
-		e.Events = append(e.Events[:0], e.Events[i:]...)
+// addEvent appends an event to the circular buffer, overwriting the oldest
+// entry when full. O(1) per call, no slice allocation.
+func (e *FlowEdge) addEvent(ev SpendEvent) {
+	e.events[e.head] = ev
+	e.head = (e.head + 1) % maxEdgeEvents
+	if e.count < maxEdgeEvents {
+		e.count++
 	}
 }
 
-// SpendGraph is the in-memory behavioral graph. All access is serialized
-// by a sync.RWMutex.
-type SpendGraph struct {
+// recentEvents returns events within the given window. The returned slice
+// is a copy safe for use outside the lock.
+func (e *FlowEdge) recentEvents(cutoff time.Time) []SpendEvent {
+	var out []SpendEvent
+	for i := 0; i < e.count; i++ {
+		idx := (e.head - e.count + i + maxEdgeEvents) % maxEdgeEvents
+		ev := e.events[idx]
+		if !ev.At.Before(cutoff) {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// hasRecentEvent reports whether any event in the buffer is at or after cutoff.
+func (e *FlowEdge) hasRecentEvent(cutoff time.Time) bool {
+	for i := 0; i < e.count; i++ {
+		idx := (e.head - e.count + i + maxEdgeEvents) % maxEdgeEvents
+		if !e.events[idx].At.Before(cutoff) {
+			return true
+		}
+	}
+	return false
+}
+
+// graphShard holds a subset of agents and their outgoing edges.
+type graphShard struct {
 	mu    sync.RWMutex
 	nodes map[string]*AgentNode
 	edges map[string]*FlowEdge // key: "from:to"
 }
 
+// SpendGraph is the in-memory behavioral graph. Access is sharded by agent
+// address (128 shards) to eliminate global lock contention on the hot path.
+type SpendGraph struct {
+	shards [graphShards]graphShard
+}
+
 // NewSpendGraph creates an empty graph.
 func NewSpendGraph() *SpendGraph {
-	return &SpendGraph{
-		nodes: make(map[string]*AgentNode),
-		edges: make(map[string]*FlowEdge),
+	g := &SpendGraph{}
+	for i := range g.shards {
+		g.shards[i].nodes = make(map[string]*AgentNode)
+		g.shards[i].edges = make(map[string]*FlowEdge)
 	}
+	return g
 }
 
 func edgeKey(from, to string) string {
 	return strings.ToLower(from) + ":" + strings.ToLower(to)
+}
+
+// shardFor returns the shard index for a given agent address.
+func shardFor(agent string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(agent))
+	return h.Sum32() & (graphShards - 1)
 }
 
 // RecordEvent logs a spending event for an agent. Updates EWMA cascade
@@ -91,33 +143,34 @@ func edgeKey(from, to string) string {
 func (g *SpendGraph) RecordEvent(agent, counterparty string, amount *big.Int, now time.Time) {
 	agent = strings.ToLower(agent)
 
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	shard := &g.shards[shardFor(agent)]
+	shard.mu.Lock()
 
-	node := g.getOrCreate(agent)
+	node := shard.getOrCreate(agent)
 
 	// Update EWMA cascade — O(1), no eviction needed
 	node.Cascade.Update(float64(amount.Int64()), now)
 	node.TotalSpent.Add(node.TotalSpent, amount)
 
-	// Update edge
+	// Update edge (edges are stored in the "from" agent's shard)
 	if counterparty != "" {
 		counterparty = strings.ToLower(counterparty)
 		key := edgeKey(agent, counterparty)
-		edge, ok := g.edges[key]
+		edge, ok := shard.edges[key]
 		if !ok {
 			edge = &FlowEdge{
 				From:   agent,
 				To:     counterparty,
 				Volume: new(big.Int),
 			}
-			g.edges[key] = edge
+			shard.edges[key] = edge
 		}
 		edge.Volume.Add(edge.Volume, amount)
 		edge.LastEvent = now
-		edge.evictOld(now)
-		edge.Events = append(edge.Events, SpendEvent{Amount: new(big.Int).Set(amount), At: now})
+		edge.addEvent(SpendEvent{Amount: new(big.Int).Set(amount), At: now})
 	}
+
+	shard.mu.Unlock()
 }
 
 // RecordEdgeOnly updates only the bilateral flow edge between agent and
@@ -131,23 +184,24 @@ func (g *SpendGraph) RecordEdgeOnly(agent, counterparty string, amount *big.Int,
 	agent = strings.ToLower(agent)
 	counterparty = strings.ToLower(counterparty)
 
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	shard := &g.shards[shardFor(agent)]
+	shard.mu.Lock()
 
 	key := edgeKey(agent, counterparty)
-	edge, ok := g.edges[key]
+	edge, ok := shard.edges[key]
 	if !ok {
 		edge = &FlowEdge{
 			From:   agent,
 			To:     counterparty,
 			Volume: new(big.Int),
 		}
-		g.edges[key] = edge
+		shard.edges[key] = edge
 	}
 	edge.Volume.Add(edge.Volume, amount)
 	edge.LastEvent = now
-	edge.evictOld(now)
-	edge.Events = append(edge.Events, SpendEvent{Amount: new(big.Int).Set(amount), At: now})
+	edge.addEvent(SpendEvent{Amount: new(big.Int).Set(amount), At: now})
+
+	shard.mu.Unlock()
 }
 
 // GetNode returns a snapshot of an agent's behavioral state.
@@ -156,10 +210,11 @@ func (g *SpendGraph) GetNode(agent string) *AgentSnapshot {
 	agent = strings.ToLower(agent)
 	now := time.Now()
 
-	g.mu.RLock()
-	defer g.mu.RUnlock()
+	shard := &g.shards[shardFor(agent)]
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
 
-	node, ok := g.nodes[agent]
+	node, ok := shard.nodes[agent]
 	if !ok {
 		return nil
 	}
@@ -175,10 +230,14 @@ func (g *SpendGraph) GetNode(agent string) *AgentSnapshot {
 
 // GetEdge returns the flow edge between two agents. Returns nil if none.
 func (g *SpendGraph) GetEdge(from, to string) *FlowEdge {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
+	from = strings.ToLower(from)
+	to = strings.ToLower(to)
 
-	edge, ok := g.edges[edgeKey(from, to)]
+	shard := &g.shards[shardFor(from)]
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+
+	edge, ok := shard.edges[edgeKey(from, to)]
 	if !ok {
 		return nil
 	}
@@ -199,10 +258,11 @@ func (g *SpendGraph) GetEdge(from, to string) *FlowEdge {
 func (g *SpendGraph) TryAcquireHold(agent string, limit int) bool {
 	agent = strings.ToLower(agent)
 
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	shard := &g.shards[shardFor(agent)]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	node := g.getOrCreate(agent)
+	node := shard.getOrCreate(agent)
 	if node.ActiveHolds+node.ActiveEscrows >= limit {
 		return false
 	}
@@ -217,10 +277,11 @@ func (g *SpendGraph) TryAcquireHold(agent string, limit int) bool {
 func (g *SpendGraph) ReleaseActiveHold(agent string) bool {
 	agent = strings.ToLower(agent)
 
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	shard := &g.shards[shardFor(agent)]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	node, ok := g.nodes[agent]
+	node, ok := shard.nodes[agent]
 	if !ok || node.ActiveHolds <= 0 {
 		return false
 	}
@@ -234,10 +295,11 @@ func (g *SpendGraph) ReleaseActiveHold(agent string) bool {
 func (g *SpendGraph) TryAcquireEscrow(agent string, limit int) bool {
 	agent = strings.ToLower(agent)
 
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	shard := &g.shards[shardFor(agent)]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	node := g.getOrCreate(agent)
+	node := shard.getOrCreate(agent)
 	if node.ActiveHolds+node.ActiveEscrows >= limit {
 		return false
 	}
@@ -250,10 +312,11 @@ func (g *SpendGraph) TryAcquireEscrow(agent string, limit int) bool {
 func (g *SpendGraph) ReleaseActiveEscrow(agent string) bool {
 	agent = strings.ToLower(agent)
 
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	shard := &g.shards[shardFor(agent)]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	node, ok := g.nodes[agent]
+	node, ok := shard.nodes[agent]
 	if !ok || node.ActiveEscrows <= 0 {
 		return false
 	}
@@ -264,30 +327,35 @@ func (g *SpendGraph) ReleaseActiveEscrow(agent string) bool {
 // HasCyclicFlow checks for A->B->...->A cycles reachable from start
 // using edges with events within the given time window.
 // Returns the cycle path (e.g. ["A","B","C","A"]) or nil.
+//
+// Traversal is bounded by maxDFSDepth to prevent O(N) walks on large graphs.
 func (g *SpendGraph) HasCyclicFlow(start string, window time.Duration) []string {
 	start = strings.ToLower(start)
 	cutoff := time.Now().Add(-window)
 
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-
-	// Build adjacency list from recent edges
+	// Build adjacency list from recent edges across all shards.
+	// Take read locks one shard at a time to avoid holding all locks.
 	adj := make(map[string][]string)
-	for _, edge := range g.edges {
-		for _, ev := range edge.Events {
-			if !ev.At.Before(cutoff) {
+	for i := range g.shards {
+		shard := &g.shards[i]
+		shard.mu.RLock()
+		for _, edge := range shard.edges {
+			if edge.hasRecentEvent(cutoff) {
 				adj[edge.From] = append(adj[edge.From], edge.To)
-				break // one recent event is enough to include the edge
 			}
 		}
+		shard.mu.RUnlock()
 	}
 
-	// DFS from start looking for a path back to start
+	// DFS from start looking for a path back to start, bounded by depth.
 	visited := make(map[string]bool)
 	path := []string{start}
 
-	var dfs func(current string) []string
-	dfs = func(current string) []string {
+	var dfs func(current string, depth int) []string
+	dfs = func(current string, depth int) []string {
+		if depth >= maxDFSDepth {
+			return nil
+		}
 		for _, next := range adj[current] {
 			if next == start && len(path) > 1 {
 				return append(path, start)
@@ -297,7 +365,7 @@ func (g *SpendGraph) HasCyclicFlow(start string, window time.Duration) []string 
 			}
 			visited[next] = true
 			path = append(path, next)
-			if result := dfs(next); result != nil {
+			if result := dfs(next, depth+1); result != nil {
 				return result
 			}
 			path = path[:len(path)-1]
@@ -307,16 +375,16 @@ func (g *SpendGraph) HasCyclicFlow(start string, window time.Duration) []string 
 	}
 
 	visited[start] = true
-	return dfs(start)
+	return dfs(start, 0)
 }
 
 // getOrCreate returns the node for agent, creating it if needed.
-// Caller must hold write lock.
-func (g *SpendGraph) getOrCreate(agent string) *AgentNode {
-	node, ok := g.nodes[agent]
+// Caller must hold shard write lock.
+func (s *graphShard) getOrCreate(agent string) *AgentNode {
+	node, ok := s.nodes[agent]
 	if !ok {
 		node = newAgentNode()
-		g.nodes[agent] = node
+		s.nodes[agent] = node
 	}
 	return node
 }
