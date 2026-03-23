@@ -7,89 +7,6 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// VelocityWindow unit tests
-// ---------------------------------------------------------------------------
-
-func TestVelocityWindow_AddAndEvict(t *testing.T) {
-	w := newVelocityWindow(1 * time.Minute)
-
-	base := time.Now()
-
-	// Add two events
-	w.add(big.NewInt(100), base)
-	w.add(big.NewInt(200), base.Add(10*time.Second))
-
-	if w.Total.Int64() != 300 {
-		t.Fatalf("expected total 300, got %d", w.Total.Int64())
-	}
-	if len(w.Events) != 2 {
-		t.Fatalf("expected 2 events, got %d", len(w.Events))
-	}
-
-	// Evict at 70s later — first event at base is now >1min old
-	w.evict(base.Add(70 * time.Second))
-	if w.Total.Int64() != 200 {
-		t.Fatalf("expected total 200 after evict, got %d", w.Total.Int64())
-	}
-	if len(w.Events) != 1 {
-		t.Fatalf("expected 1 event after evict, got %d", len(w.Events))
-	}
-}
-
-func TestVelocityWindow_Snapshot(t *testing.T) {
-	w := newVelocityWindow(1 * time.Minute)
-
-	base := time.Now()
-	w.add(big.NewInt(100), base.Add(-90*time.Second)) // already expired
-	w.add(big.NewInt(200), base.Add(-30*time.Second)) // still active
-	w.add(big.NewInt(300), base)                      // still active
-
-	snap := w.snapshot(base)
-	if snap.Int64() != 500 {
-		t.Fatalf("expected snapshot 500, got %d", snap.Int64())
-	}
-
-	// snapshot should NOT mutate the original Total
-	if w.Total.Int64() != 600 {
-		t.Fatalf("snapshot should not mutate Total, got %d", w.Total.Int64())
-	}
-}
-
-func TestVelocityWindow_EvictNone(t *testing.T) {
-	w := newVelocityWindow(1 * time.Hour)
-
-	now := time.Now()
-	w.add(big.NewInt(100), now)
-	w.add(big.NewInt(200), now)
-
-	// Evict at same time — nothing expired
-	w.evict(now)
-	if w.Total.Int64() != 300 {
-		t.Fatalf("expected 300 (no eviction), got %d", w.Total.Int64())
-	}
-	if len(w.Events) != 2 {
-		t.Fatalf("expected 2 events (no eviction), got %d", len(w.Events))
-	}
-}
-
-func TestVelocityWindow_EvictAll(t *testing.T) {
-	w := newVelocityWindow(1 * time.Minute)
-
-	base := time.Now()
-	w.add(big.NewInt(100), base)
-	w.add(big.NewInt(200), base)
-
-	// Evict 2 minutes later — everything is expired
-	w.evict(base.Add(2 * time.Minute))
-	if w.Total.Int64() != 0 {
-		t.Fatalf("expected 0 after full evict, got %d", w.Total.Int64())
-	}
-	if len(w.Events) != 0 {
-		t.Fatalf("expected 0 events after full evict, got %d", len(w.Events))
-	}
-}
-
-// ---------------------------------------------------------------------------
 // FlowEdge unit tests
 // ---------------------------------------------------------------------------
 
@@ -156,10 +73,15 @@ func TestSpendGraph_RecordEventAndGetNode(t *testing.T) {
 	if snap.TotalSpent.Int64() != 3000000 {
 		t.Fatalf("expected TotalSpent 3000000, got %d", snap.TotalSpent.Int64())
 	}
-	// All three windows should have the total
+	// EWMA windows should approximate the total (float64 rounding tolerance)
 	for i, total := range snap.WindowTotals {
-		if total.Int64() != 3000000 {
-			t.Errorf("window %d: expected 3000000, got %d", i, total.Int64())
+		diff := total.Int64() - 3000000
+		if diff < 0 {
+			diff = -diff
+		}
+		// Allow 0.1% tolerance for float64 rounding in EWMA
+		if diff > 3000 {
+			t.Errorf("window %d: expected ~3000000, got %d (diff %d)", i, total.Int64(), diff)
 		}
 	}
 }

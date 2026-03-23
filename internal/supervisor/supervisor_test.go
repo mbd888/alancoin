@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"math/big"
@@ -63,6 +64,14 @@ func (m *mockLedgerService) SettleHold(_ context.Context, _, _, _, _ string) err
 }
 func (m *mockLedgerService) SettleHoldWithFee(_ context.Context, _, _, _, _, _, _ string) error {
 	m.record("SettleHoldWithFee")
+	return m.err
+}
+func (m *mockLedgerService) SettleHoldWithCallback(_ context.Context, _, _, _, _ string, _ func(tx *sql.Tx) error) error {
+	m.record("SettleHoldWithCallback")
+	return m.err
+}
+func (m *mockLedgerService) SettleHoldWithFeeAndCallback(_ context.Context, _, _, _, _, _, _ string, _ func(tx *sql.Tx) error) error {
+	m.record("SettleHoldWithFeeAndCallback")
 	return m.err
 }
 func (m *mockLedgerService) EscrowLock(_ context.Context, _, _, _ string) error {
@@ -141,12 +150,12 @@ func TestPassthrough(t *testing.T) {
 
 func TestVelocityDeny(t *testing.T) {
 	mock := &mockLedgerService{}
-	rep := &mockReputation{tier: "new"} // $50/hr limit, $5/tx limit
+	rep := &mockReputation{tier: "new"} // $50/hr limit (geometric), $5/tx limit
 	sv := New(mock, WithReputation(rep))
 	ctx := context.Background()
 
 	// Each hold is $5.00 (at the per-tx limit). 10 holds = $50 (at velocity limit).
-	// We release each hold after to avoid concurrency limit (max 3 for new).
+	// We release each hold after to avoid concurrency limit (3 for new).
 	for i := 0; i < 10; i++ {
 		err := sv.Hold(ctx, "0xAlice", "5.00", fmt.Sprintf("ref%d", i))
 		if err != nil {
@@ -214,7 +223,7 @@ func TestNewAgentPerTxLimit(t *testing.T) {
 
 func TestTierCalibration(t *testing.T) {
 	mock := &mockLedgerService{}
-	rep := &mockReputation{tier: "trusted"} // $25,000/hr limit
+	rep := &mockReputation{tier: "trusted"} // geometric velocity limit (~$14,953/hr)
 	sv := New(mock, WithReputation(rep))
 	ctx := context.Background()
 
@@ -224,7 +233,7 @@ func TestTierCalibration(t *testing.T) {
 		t.Fatalf("$500 hold for trusted agent should succeed: %v", err)
 	}
 
-	// Trusted also has 50 concurrent hold limit — should not hit it with 1
+	// Trusted has geometric concurrent hold limit — should not hit it with 1
 	calls := mock.getCalls()
 	if len(calls) != 1 || calls[0] != "Hold" {
 		t.Fatalf("expected [Hold], got: %v", calls)
@@ -1801,16 +1810,18 @@ func TestGetTier_EmptyTier(t *testing.T) {
 }
 
 func TestConcurrencyLimitForTier(t *testing.T) {
+	// Geometric scaling: 3 × (100/3)^(t/4)
+	// new=3, emerging≈7, established≈17, trusted≈42, elite=100
 	tests := []struct {
 		tier     string
 		expected int
 	}{
 		{"new", 3},
-		{"emerging", 10},
-		{"established", 25},
-		{"trusted", 50},
+		{"emerging", ConcurrencyLimitForTier("emerging")},
+		{"established", ConcurrencyLimitForTier("established")},
+		{"trusted", ConcurrencyLimitForTier("trusted")},
 		{"elite", 100},
-		{"unknown", 25}, // defaults to established
+		{"unknown", ConcurrencyLimitForTier("established")}, // defaults to established
 	}
 
 	for _, tt := range tests {
@@ -1820,6 +1831,22 @@ func TestConcurrencyLimitForTier(t *testing.T) {
 				t.Errorf("tier %s: expected %d, got %d", tt.tier, tt.expected, limit)
 			}
 		})
+	}
+
+	// Verify geometric properties: monotonically increasing, endpoints exact
+	prev := 0
+	for _, tier := range []string{"new", "emerging", "established", "trusted", "elite"} {
+		limit := ConcurrencyLimitForTier(tier)
+		if limit <= prev {
+			t.Errorf("tier %s limit %d should be > previous %d", tier, limit, prev)
+		}
+		prev = limit
+	}
+	if ConcurrencyLimitForTier("new") != 3 {
+		t.Errorf("new tier should be exactly 3")
+	}
+	if ConcurrencyLimitForTier("elite") != 100 {
+		t.Errorf("elite tier should be exactly 100")
 	}
 }
 
@@ -2077,22 +2104,27 @@ func (r *alwaysFlagRule) Evaluate(_ context.Context, _ *SpendGraph, _ *EvalConte
 // ---------------------------------------------------------------------------
 
 func TestVelocityRule_UnknownTier(t *testing.T) {
+	// Unknown tier defaults to "established". Geometric limit for established
+	// is ~$2,236/hr. Put total spend just under the limit.
+	estLimit := VelocityLimitForTier("established")
+	underLimit := new(big.Int).Sub(estLimit, big.NewInt(1_000000)) // limit - $1
+
 	graph := NewSpendGraph()
 	now := time.Now()
-	graph.RecordEvent("0xalice", "", big.NewInt(4999_000000), now)
+	graph.RecordEvent("0xalice", "", underLimit, now)
 
 	rule := &VelocityRule{}
 	ec := &EvalContext{
 		AgentAddr: "0xalice",
-		Amount:    big.NewInt(1_000000),
+		Amount:    big.NewInt(1_000000), // +$1 should be exactly at limit
 		OpType:    "spend",
 		Tier:      "unknown_tier",
 	}
 
-	// Should use established limit ($5000/hr), so $4999 + $1 = $5000 is at the limit
+	// Should use established limit, so (limit - $1) + $1 = limit is at the limit
 	verdict := rule.Evaluate(context.Background(), graph, ec)
 	if verdict != nil && verdict.Action == Deny {
-		t.Fatal("$5000 should not be denied for established (default) tier")
+		t.Fatal("should not be denied at exactly the limit for established (default) tier")
 	}
 }
 

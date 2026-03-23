@@ -386,9 +386,11 @@ func TestGraphRebuildFromEvents(t *testing.T) {
 		t.Fatal("expected node in graph after rebuild")
 	}
 
-	// 1hr window should have both events: $5 + $3 = $8
-	if snap.WindowTotals[2].Int64() != 8000000 {
-		t.Errorf("expected 1hr total 8000000, got %d", snap.WindowTotals[2].Int64())
+	// EWMA 1hr window: events at -30min and -15min are exponentially weighted.
+	// The estimate should be >50% of the raw sum (both events within 1τ).
+	hourlyTotal := snap.WindowTotals[2].Int64()
+	if hourlyTotal < 4000000 || hourlyTotal > 8100000 {
+		t.Errorf("expected 1hr EWMA total in [4M, 8.1M], got %d", hourlyTotal)
 	}
 
 	// Edge should exist
