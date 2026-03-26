@@ -164,9 +164,10 @@ type OracleReportRequest struct {
 // DefaultCoalitionAutoSettle is the default auto-settle timeout.
 const DefaultCoalitionAutoSettle = 30 * time.Minute
 
-// RealtimeBroadcaster broadcasts coalition lifecycle events to WebSocket subscribers.
+// RealtimeBroadcaster broadcasts lifecycle events to WebSocket subscribers.
 type RealtimeBroadcaster interface {
 	BroadcastCoalitionEvent(eventType string, coalitionID, buyerAddr, status string)
+	BroadcastEscrowEvent(eventType, escrowID, buyer, seller, amount, status string)
 }
 
 // ContractChecker retrieves and applies behavioral contract penalties.

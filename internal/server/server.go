@@ -196,6 +196,10 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		}
 	}
 
+	// Create realtime hub for WebSocket streaming (before init blocks so adapters can reference it)
+	s.realtimeHub = realtime.NewHub(s.logger)
+	s.logger.Info("realtime streaming enabled")
+
 	// Initialize storage (Postgres if DATABASE_URL set, otherwise in-memory)
 	if cfg.DatabaseURL != "" {
 		dbDSN := appendDSNParams(cfg.DatabaseURL, cfg.DBConnectTimeout, cfg.DBStatementTimeout)
@@ -360,6 +364,13 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			if s.contractService != nil {
 				s.coalitionService.WithContractChecker(&coalitionContractAdapter{s.contractService})
 			}
+		}
+
+		// Wire realtime broadcasting into gateway, escrow, and streams for live dashboard events.
+		if s.realtimeHub != nil {
+			s.gatewayService.WithRealtimeBroadcaster(&gatewayRealtimeAdapter{s.realtimeHub})
+			s.escrowService.WithRealtimeBroadcaster(&escrowRealtimeAdapter{s.realtimeHub})
+			s.streamService.WithRealtimeBroadcaster(&streamRealtimeAdapter{s.realtimeHub})
 		}
 
 		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
@@ -675,6 +686,13 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			}
 		}
 
+		// Wire realtime broadcasting into gateway, escrow, and streams for live dashboard events.
+		if s.realtimeHub != nil {
+			s.gatewayService.WithRealtimeBroadcaster(&gatewayRealtimeAdapter{s.realtimeHub})
+			s.escrowService.WithRealtimeBroadcaster(&escrowRealtimeAdapter{s.realtimeHub})
+			s.streamService.WithRealtimeBroadcaster(&streamRealtimeAdapter{s.realtimeHub})
+		}
+
 		// Wire receipt issuer into all payment paths
 		if s.receiptService != nil {
 			rcptAdapter := &receiptIssuerAdapter{s.receiptService}
@@ -877,10 +895,6 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 	} else {
 		s.logger.Warn("deposit watcher not enabled (set DEPOSIT_WATCHER_ENABLED=true to enable)")
 	}
-
-	// Create realtime hub for WebSocket streaming
-	s.realtimeHub = realtime.NewHub(s.logger)
-	s.logger.Info("realtime streaming enabled")
 
 	// Configure gin
 	if cfg.IsProduction() {
@@ -1329,6 +1343,18 @@ func (s *Server) setupRoutes() {
 			}
 			if s.reconcileRunner != nil {
 				dashHandler.WithReconciliationProvider(&dashReconAdapter{runner: s.reconcileRunner})
+			}
+			if s.escrowService != nil {
+				dashHandler.WithEscrowLister(&dashEscrowAdapter{svc: s.escrowService})
+			}
+			if s.workflowService != nil {
+				dashHandler.WithWorkflowLister(&dashWorkflowAdapter{svc: s.workflowService})
+			}
+			if s.streamService != nil {
+				dashHandler.WithStreamLister(&dashStreamAdapter{svc: s.streamService})
+			}
+			if s.offerService != nil {
+				dashHandler.WithOfferLister(&dashOfferAdapter{svc: s.offerService})
 			}
 			dashHandler.RegisterRoutes(protectedTenants)
 		}
@@ -2849,6 +2875,73 @@ func (a *coalitionRealtimeAdapter) BroadcastCoalitionEvent(eventType string, coa
 	})
 }
 
+func (a *coalitionRealtimeAdapter) BroadcastEscrowEvent(eventType, escrowID, buyer, seller, amount, status string) {
+	a.hub.BroadcastEscrowEvent(realtime.EventType(eventType), map[string]interface{}{
+		"escrowId": escrowID,
+		"from":     buyer,
+		"to":       seller,
+		"amount":   amount,
+		"status":   status,
+	})
+}
+
+// gatewayRealtimeAdapter adapts realtime.Hub to gateway.RealtimeBroadcaster
+type gatewayRealtimeAdapter struct {
+	hub *realtime.Hub
+}
+
+func (a *gatewayRealtimeAdapter) BroadcastProxySettlement(sessionID, buyer, seller, serviceType, amount string, latencyMs int64) {
+	a.hub.BroadcastSessionEvent(realtime.EventProxySettlement, map[string]interface{}{
+		"sessionId":   sessionID,
+		"from":        buyer,
+		"to":          seller,
+		"serviceType": serviceType,
+		"amount":      amount,
+		"latencyMs":   latencyMs,
+	})
+}
+
+func (a *gatewayRealtimeAdapter) BroadcastSessionCreated(agent, sessionID, maxTotal string) {
+	a.hub.BroadcastSessionEvent(realtime.EventSessionCreated, map[string]interface{}{
+		"authorAddr": agent,
+		"sessionId":  sessionID,
+		"maxTotal":   maxTotal,
+	})
+}
+
+func (a *gatewayRealtimeAdapter) BroadcastSessionClosed(agent, sessionID, totalSpent, status string) {
+	a.hub.BroadcastSessionEvent(realtime.EventSessionClosed, map[string]interface{}{
+		"authorAddr": agent,
+		"sessionId":  sessionID,
+		"totalSpent": totalSpent,
+		"status":     status,
+	})
+}
+
+// escrowRealtimeAdapter adapts realtime.Hub to escrow.RealtimeBroadcaster
+type escrowRealtimeAdapter struct {
+	hub *realtime.Hub
+}
+
+func (a *escrowRealtimeAdapter) BroadcastCoalitionEvent(eventType string, coalitionID, buyerAddr, status string) {
+	a.hub.BroadcastCoalition(map[string]interface{}{
+		"event":       eventType,
+		"coalitionId": coalitionID,
+		"buyerAddr":   buyerAddr,
+		"status":      status,
+	})
+}
+
+func (a *escrowRealtimeAdapter) BroadcastEscrowEvent(eventType, escrowID, buyer, seller, amount, status string) {
+	a.hub.BroadcastEscrowEvent(realtime.EventType(eventType), map[string]interface{}{
+		"escrowId": escrowID,
+		"from":     buyer,
+		"to":       seller,
+		"amount":   amount,
+		"status":   status,
+	})
+}
+
 // adminCoalitionAdapter adapts escrow.CoalitionService to admin.CoalitionService
 type adminCoalitionAdapter struct {
 	svc *escrow.CoalitionService
@@ -3049,6 +3142,142 @@ func (a *dashReconAdapter) LastReport() *dashboard.ReconciliationSnapshot {
 		Healthy:             report.Healthy,
 		Timestamp:           report.Timestamp.Format(time.RFC3339),
 	}
+}
+
+// streamRealtimeAdapter adapts realtime.Hub to streams.RealtimeBroadcaster
+type streamRealtimeAdapter struct {
+	hub *realtime.Hub
+}
+
+func (a *streamRealtimeAdapter) BroadcastStreamOpened(streamID, buyer, seller, holdAmount string) {
+	a.hub.BroadcastStreamEvent(realtime.EventStreamOpened, map[string]interface{}{
+		"streamId": streamID,
+		"from":     buyer,
+		"to":       seller,
+		"amount":   holdAmount,
+	})
+}
+
+func (a *streamRealtimeAdapter) BroadcastStreamClosed(streamID, buyer, seller, spentAmount, status string) {
+	a.hub.BroadcastStreamEvent(realtime.EventStreamClosed, map[string]interface{}{
+		"streamId": streamID,
+		"from":     buyer,
+		"to":       seller,
+		"amount":   spentAmount,
+		"status":   status,
+	})
+}
+
+// dashStreamAdapter adapts streams.Service to dashboard.StreamLister
+type dashStreamAdapter struct {
+	svc *streams.Service
+}
+
+func (a *dashStreamAdapter) ListByAgent(ctx context.Context, agentAddr string, limit int) ([]dashboard.StreamSummary, error) {
+	items, err := a.svc.ListByAgent(ctx, agentAddr, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dashboard.StreamSummary, 0, len(items))
+	for _, s := range items {
+		out = append(out, dashboard.StreamSummary{
+			ID:           s.ID,
+			BuyerAddr:    s.BuyerAddr,
+			SellerAddr:   s.SellerAddr,
+			HoldAmount:   s.HoldAmount,
+			SpentAmount:  s.SpentAmount,
+			PricePerTick: s.PricePerTick,
+			TickCount:    s.TickCount,
+			Status:       string(s.Status),
+			CreatedAt:    s.CreatedAt,
+		})
+	}
+	return out, nil
+}
+
+// dashOfferAdapter adapts offers.Service to dashboard.OfferLister
+type dashOfferAdapter struct {
+	svc *offers.Service
+}
+
+func (a *dashOfferAdapter) ListActive(ctx context.Context, serviceType string, limit int) ([]dashboard.OfferSummary, error) {
+	items, err := a.svc.ListOffers(ctx, serviceType, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dashboard.OfferSummary, 0, len(items))
+	for _, o := range items {
+		out = append(out, dashboard.OfferSummary{
+			ID:           o.ID,
+			SellerAddr:   o.SellerAddr,
+			ServiceType:  o.ServiceType,
+			Description:  o.Description,
+			Price:        o.Price,
+			Capacity:     o.Capacity,
+			RemainingCap: o.RemainingCap,
+			Status:       string(o.Status),
+			ExpiresAt:    o.ExpiresAt,
+			CreatedAt:    o.CreatedAt,
+		})
+	}
+	return out, nil
+}
+
+// dashEscrowAdapter adapts escrow.Service to dashboard.EscrowLister
+type dashEscrowAdapter struct {
+	svc *escrow.Service
+}
+
+func (a *dashEscrowAdapter) ListByAgent(ctx context.Context, agentAddr string, limit int) ([]dashboard.EscrowSummary, error) {
+	escrows, err := a.svc.ListByAgent(ctx, agentAddr, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dashboard.EscrowSummary, 0, len(escrows))
+	for _, e := range escrows {
+		out = append(out, dashboard.EscrowSummary{
+			ID:            e.ID,
+			BuyerAddr:     e.BuyerAddr,
+			SellerAddr:    e.SellerAddr,
+			Amount:        e.Amount,
+			ServiceID:     e.ServiceID,
+			Status:        string(e.Status),
+			AutoReleaseAt: e.AutoReleaseAt,
+			DeliveredAt:   e.DeliveredAt,
+			DisputeReason: e.DisputeReason,
+			CreatedAt:     e.CreatedAt,
+			UpdatedAt:     e.UpdatedAt,
+		})
+	}
+	return out, nil
+}
+
+// dashWorkflowAdapter adapts workflows.Service to dashboard.WorkflowLister
+type dashWorkflowAdapter struct {
+	svc *workflows.Service
+}
+
+func (a *dashWorkflowAdapter) ListByAgent(ctx context.Context, agentAddr string, limit int) ([]dashboard.WorkflowSummary, error) {
+	wfs, err := a.svc.ListByOwner(ctx, agentAddr, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dashboard.WorkflowSummary, 0, len(wfs))
+	for _, w := range wfs {
+		out = append(out, dashboard.WorkflowSummary{
+			ID:             w.ID,
+			BuyerAddr:      w.OwnerAddr,
+			Name:           w.Name,
+			TotalBudget:    w.BudgetTotal,
+			SpentAmount:    w.BudgetSpent,
+			Status:         string(w.Status),
+			TotalSteps:     w.StepsTotal,
+			CompletedSteps: w.StepsDone,
+			CreatedAt:      w.CreatedAt,
+			UpdatedAt:      w.UpdatedAt,
+		})
+	}
+	return out, nil
 }
 
 // adminReconcileAdapter adapts reconciliation.Runner to admin.ReconciliationRunner

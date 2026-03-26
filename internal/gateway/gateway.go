@@ -271,6 +271,13 @@ type DiscoveryBooster interface {
 	BoostScore(ctx context.Context, tier string, baseScore float64) float64
 }
 
+// RealtimeBroadcaster pushes events to WebSocket clients for live dashboard.
+type RealtimeBroadcaster interface {
+	BroadcastProxySettlement(sessionID, buyer, seller, serviceType, amount string, latencyMs int64)
+	BroadcastSessionCreated(agent, sessionID, maxTotal string)
+	BroadcastSessionClosed(agent, sessionID, totalSpent, status string)
+}
+
 // MoneyError wraps an error with funds-state context so callers know
 // whether their money is safe and what to do next.
 type MoneyError struct {

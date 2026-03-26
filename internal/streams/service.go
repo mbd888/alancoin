@@ -26,6 +26,12 @@ type WebhookEmitter interface {
 	EmitStreamClosed(buyerAddr, streamID, sellerAddr, spentAmount, status string)
 }
 
+// RealtimeBroadcaster pushes stream lifecycle events to WebSocket clients.
+type RealtimeBroadcaster interface {
+	BroadcastStreamOpened(streamID, buyer, seller, holdAmount string)
+	BroadcastStreamClosed(streamID, buyer, seller, spentAmount, status string)
+}
+
 // Service implements streaming micropayment business logic.
 type Service struct {
 	store          Store
@@ -34,6 +40,7 @@ type Service struct {
 	revenue        RevenueAccumulator
 	receiptIssuer  ReceiptIssuer
 	webhookEmitter WebhookEmitter
+	realtime       RealtimeBroadcaster
 	bus            eventbus.Bus // event bus for settlement events (optional)
 	locks          syncutil.ShardedMutex
 }
@@ -44,6 +51,12 @@ func NewService(store Store, ledger LedgerService) *Service {
 		store:  store,
 		ledger: ledger,
 	}
+}
+
+// WithRealtimeBroadcaster adds WebSocket event broadcasting for live dashboard.
+func (s *Service) WithRealtimeBroadcaster(r RealtimeBroadcaster) *Service {
+	s.realtime = r
+	return s
 }
 
 // WithBus adds the event bus for publishing settlement events.
@@ -142,6 +155,9 @@ func (s *Service) Open(ctx context.Context, req OpenRequest) (_ *Stream, retErr 
 
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitStreamOpened(stream.SellerAddr, stream.ID, stream.BuyerAddr, stream.HoldAmount)
+	}
+	if s.realtime != nil {
+		go s.realtime.BroadcastStreamOpened(stream.ID, stream.BuyerAddr, stream.SellerAddr, stream.HoldAmount)
 	}
 
 	return stream, nil
@@ -385,6 +401,9 @@ func (s *Service) settle(ctx context.Context, stream *Stream, status Status, rea
 
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitStreamClosed(stream.BuyerAddr, stream.ID, stream.SellerAddr, stream.SpentAmount, string(stream.Status))
+	}
+	if s.realtime != nil {
+		go s.realtime.BroadcastStreamClosed(stream.ID, stream.BuyerAddr, stream.SellerAddr, stream.SpentAmount, string(stream.Status))
 	}
 
 	// Record transaction for reputation

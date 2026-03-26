@@ -225,6 +225,7 @@ type Service struct {
 	eventBus        EventPublisher       // settlement event bus (replaces fire-and-forget goroutines)
 	outbox          *eventbus.Outbox     // transactional outbox for exactly-once event publishing (nil = direct publish)
 	budgetCheck     BudgetPreFlight      // pre-flight budget check before proxy
+	realtime        RealtimeBroadcaster  // WebSocket event broadcasting for live dashboard
 	platformAddr    string               // ledger address collecting platform fees
 	logger          *slog.Logger
 	locks           syncutil.ShardedMutex
@@ -323,6 +324,12 @@ func (s *Service) WithChargeback(c ChargebackRecorder) *Service {
 // WithBudgetPreFlight adds a chargeback budget check before proxy calls.
 func (s *Service) WithBudgetPreFlight(bp BudgetPreFlight) *Service {
 	s.budgetCheck = bp
+	return s
+}
+
+// WithRealtimeBroadcaster adds WebSocket event broadcasting for live dashboard.
+func (s *Service) WithRealtimeBroadcaster(r RealtimeBroadcaster) *Service {
+	s.realtime = r
 	return s
 }
 
@@ -593,6 +600,9 @@ func (s *Service) CreateSession(ctx context.Context, agentAddr, tenantID string,
 
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitSessionCreated(session.AgentAddr, session.ID, session.MaxTotal)
+	}
+	if s.realtime != nil {
+		go s.realtime.BroadcastSessionCreated(session.AgentAddr, session.ID, session.MaxTotal)
 	}
 
 	return session, nil
@@ -1029,6 +1039,9 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		if s.webhookEmitter != nil {
 			go s.webhookEmitter.EmitProxySuccess(agentAddr, sessionIDCopy, candidate.AgentAddress, priceStr)
 		}
+		if s.realtime != nil {
+			go s.realtime.BroadcastProxySettlement(sessionIDCopy, agentAddr, candidate.AgentAddress, req.ServiceType, priceStr, fwdResp.LatencyMs)
+		}
 
 		// Publish settlement event to event bus.
 		// When outbox is configured, the event was already written inside the ledger transaction
@@ -1302,6 +1315,9 @@ func (s *Service) CloseSession(ctx context.Context, sessionID, callerAddr string
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitSessionClosed(session.AgentAddr, session.ID, session.TotalSpent, string(session.Status))
 	}
+	if s.realtime != nil {
+		go s.realtime.BroadcastSessionClosed(session.AgentAddr, session.ID, session.TotalSpent, string(session.Status))
+	}
 
 	return session, nil
 }
@@ -1517,6 +1533,9 @@ func (s *Service) AutoCloseExpired(ctx context.Context, session *Session) error 
 		gwActiveSessions.Dec()
 		if s.webhookEmitter != nil {
 			go s.webhookEmitter.EmitSessionClosed(fresh.AgentAddr, fresh.ID, fresh.TotalSpent, string(fresh.Status))
+		}
+		if s.realtime != nil {
+			go s.realtime.BroadcastSessionClosed(fresh.AgentAddr, fresh.ID, fresh.TotalSpent, string(fresh.Status))
 		}
 		return nil
 	}

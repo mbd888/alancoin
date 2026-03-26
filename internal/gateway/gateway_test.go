@@ -3821,6 +3821,22 @@ func (m *mockWebhookEmitter) EmitSettlementFailed(agentAddr, sessionID, sellerAd
 	m.settleFailed++
 }
 
+type mockRealtimeBroadcaster struct {
+	proxySettlements int
+	sessionsCreated  int
+	sessionsClosed   int
+}
+
+func (m *mockRealtimeBroadcaster) BroadcastProxySettlement(sessionID, buyer, seller, serviceType, amount string, latencyMs int64) {
+	m.proxySettlements++
+}
+func (m *mockRealtimeBroadcaster) BroadcastSessionCreated(agent, sessionID, maxTotal string) {
+	m.sessionsCreated++
+}
+func (m *mockRealtimeBroadcaster) BroadcastSessionClosed(agent, sessionID, totalSpent, status string) {
+	m.sessionsClosed++
+}
+
 type mockUsageMeter struct {
 	requests int
 	volumes  int
@@ -4110,6 +4126,9 @@ func TestService_WithMethods(t *testing.T) {
 	}
 	if got := svc.WithBudgetPreFlight(&mockBudgetPreFlight{}); got != svc {
 		t.Error("WithBudgetPreFlight should return same service")
+	}
+	if got := svc.WithRealtimeBroadcaster(&mockRealtimeBroadcaster{}); got != svc {
+		t.Error("WithRealtimeBroadcaster should return same service")
 	}
 	if got := svc.WithEventBus(&mockEventPublisher{}); got != svc {
 		t.Error("WithEventBus should return same service")
@@ -4943,5 +4962,39 @@ func TestService_WithHealthMonitor(t *testing.T) {
 	svc.WithHealthMonitor(hm)
 	if svc.HealthMonitor() != hm {
 		t.Error("expected health monitor set")
+	}
+}
+
+// --- RealtimeBroadcaster tests ---
+
+func TestRealtimeBroadcaster_SessionLifecycle(t *testing.T) {
+	ml := newMockLedger()
+	reg := &mockRegistry{}
+	svc := newTestService(ml, reg)
+	rt := &mockRealtimeBroadcaster{}
+	svc.WithRealtimeBroadcaster(rt)
+
+	// Create session should broadcast
+	sess, err := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
+		MaxTotal:      "10.000000",
+		MaxPerRequest: "5.000000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Broadcast is async (goroutine) — give it a moment
+	time.Sleep(10 * time.Millisecond)
+	if rt.sessionsCreated != 1 {
+		t.Errorf("expected 1 session created broadcast, got %d", rt.sessionsCreated)
+	}
+
+	// Close session should broadcast
+	_, err = svc.CloseSession(context.Background(), sess.ID, "0xbuyer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if rt.sessionsClosed != 1 {
+		t.Errorf("expected 1 session closed broadcast, got %d", rt.sessionsClosed)
 	}
 }

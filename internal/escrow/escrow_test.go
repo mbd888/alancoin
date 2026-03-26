@@ -2025,6 +2025,9 @@ func TestEscrowService_WithMethods(t *testing.T) {
 	if got := svc.WithWebhookEmitter(nil); got != svc {
 		t.Error("WithWebhookEmitter should return same service")
 	}
+	if got := svc.WithRealtimeBroadcaster(nil); got != svc {
+		t.Error("WithRealtimeBroadcaster should return same service")
+	}
 	if got := svc.WithTrustGate(nil); got != svc {
 		t.Error("WithTrustGate should return same service")
 	}
@@ -3336,5 +3339,120 @@ func TestEscrow_Create_TrustGateAllow(t *testing.T) {
 	}
 	if esc.Status != StatusPending {
 		t.Fatalf("expected pending, got %s", esc.Status)
+	}
+}
+
+// --- RealtimeBroadcaster tests ---
+
+type mockEscrowRealtime struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (m *mockEscrowRealtime) BroadcastCoalitionEvent(eventType string, coalitionID, buyerAddr, status string) {
+}
+func (m *mockEscrowRealtime) BroadcastEscrowEvent(eventType, escrowID, buyer, seller, amount, status string) {
+	m.mu.Lock()
+	m.events = append(m.events, eventType)
+	m.mu.Unlock()
+}
+func (m *mockEscrowRealtime) countEvent(eventType string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, e := range m.events {
+		if e == eventType {
+			n++
+		}
+	}
+	return n
+}
+func (m *mockEscrowRealtime) totalEvents() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.events)
+}
+
+func TestRealtimeBroadcaster_EscrowLifecycle(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml)
+	rt := &mockEscrowRealtime{}
+	svc.WithRealtimeBroadcaster(rt)
+
+	ctx := context.Background()
+
+	// Create should broadcast
+	esc, err := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "10.000000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if rt.countEvent("escrow_created") != 1 {
+		t.Errorf("expected 1 escrow_created, got %d", rt.countEvent("escrow_created"))
+	}
+
+	// MarkDelivered should broadcast
+	_, err = svc.MarkDelivered(ctx, esc.ID, "0xseller")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if rt.countEvent("escrow_delivered") != 1 {
+		t.Errorf("expected 1 escrow_delivered, got %d", rt.countEvent("escrow_delivered"))
+	}
+
+	// Confirm should broadcast
+	_, err = svc.Confirm(ctx, esc.ID, "0xbuyer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if rt.countEvent("escrow_confirmed") != 1 {
+		t.Errorf("expected 1 escrow_confirmed, got %d", rt.countEvent("escrow_confirmed"))
+	}
+	if rt.totalEvents() != 3 {
+		t.Errorf("expected 3 total events, got %d", rt.totalEvents())
+	}
+}
+
+func TestRealtimeBroadcaster_EscrowDispute(t *testing.T) {
+	store := NewMemoryStore()
+	ml := newMockLedger()
+	svc := NewService(store, ml)
+	rt := &mockEscrowRealtime{}
+	svc.WithRealtimeBroadcaster(rt)
+
+	ctx := context.Background()
+
+	esc, err := svc.Create(ctx, CreateRequest{
+		BuyerAddr:  "0xbuyer",
+		SellerAddr: "0xseller",
+		Amount:     "5.000000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = svc.MarkDelivered(ctx, esc.ID, "0xseller")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Dispute should broadcast
+	_, err = svc.Dispute(ctx, esc.ID, "0xbuyer", "service not delivered properly")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if rt.countEvent("escrow_disputed") != 1 {
+		t.Errorf("expected 1 escrow_disputed, got %d", rt.countEvent("escrow_disputed"))
+	}
+	if rt.totalEvents() != 3 {
+		t.Errorf("expected 3 total events, got %d", rt.totalEvents())
 	}
 }
