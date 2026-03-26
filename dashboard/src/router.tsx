@@ -14,6 +14,12 @@ import { ChargebackPage } from "@/routes/dashboard/chargeback";
 import { CertificatesPage } from "@/routes/dashboard/certificates";
 import { IntelligencePage } from "@/routes/dashboard/intelligence";
 import { HealthPage } from "@/routes/dashboard/health";
+import { LiveFeedPage } from "@/routes/dashboard/live-feed";
+import { EscrowPage } from "@/routes/dashboard/escrow";
+import { BudgetPage } from "@/routes/dashboard/budget";
+import { WorkflowsPage } from "@/routes/dashboard/workflows";
+import { StreamsPage } from "@/routes/dashboard/streams";
+import { MarketplacePage } from "@/routes/dashboard/marketplace";
 import { ApiKeysPage } from "@/routes/settings/api-keys";
 import { SettingsPage } from "@/routes/settings/general";
 
@@ -81,6 +87,42 @@ const healthRoute = createRoute({
   component: HealthPage,
 });
 
+const liveFeedRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/live-feed",
+  component: LiveFeedPage,
+});
+
+const escrowRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/escrow",
+  component: EscrowPage,
+});
+
+const budgetRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/budget",
+  component: BudgetPage,
+});
+
+const workflowsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/workflows",
+  component: WorkflowsPage,
+});
+
+const streamsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/streams",
+  component: StreamsPage,
+});
+
+const marketplaceRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/marketplace",
+  component: MarketplacePage,
+});
+
 const apiKeysRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/api-keys",
@@ -98,6 +140,12 @@ const routeTree = rootRoute.addChildren([
   overviewRoute,
   sessionsRoute,
   agentsRoute,
+  liveFeedRoute,
+  escrowRoute,
+  budgetRoute,
+  workflowsRoute,
+  streamsRoute,
+  marketplaceRoute,
   alertsRoute,
   chargebackRoute,
   certificatesRoute,

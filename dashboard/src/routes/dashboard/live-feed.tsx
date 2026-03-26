@@ -1,0 +1,137 @@
+import { useState, useEffect, useRef } from "react";
+import { Badge } from "@/components/ui/badge";
+import { useRealtimeStore } from "@/stores/realtime-store";
+import { relativeTime } from "@/lib/utils";
+
+const EVENT_VARIANTS: Record<string, string> = {
+  transaction: "accent",
+  proxy_settlement: "accent",
+  session_created: "success",
+  session_closed: "default",
+  escrow_created: "warning",
+  escrow_delivered: "success",
+  escrow_confirmed: "success",
+  escrow_disputed: "danger",
+  stream_opened: "accent",
+  stream_closed: "default",
+  coalition: "accent",
+  agent_joined: "success",
+  milestone: "accent",
+  price_alert: "warning",
+};
+
+const ALL_EVENT_TYPES = Object.keys(EVENT_VARIANTS);
+
+function EventCard({ event }: { event: { type: string; timestamp: string; data: Record<string, unknown> } }) {
+  const data = event.data;
+  const from = (data.from ?? data.authorAddr ?? "") as string;
+  const to = (data.to ?? "") as string;
+  const amount = (data.amount ?? "") as string;
+
+  return (
+    <div className="flex items-center gap-4 border-b border-[var(--border-subtle)] px-4 py-2.5 text-[13px] transition-[background-color] duration-150 hover:bg-[var(--background-interactive)]">
+      <Badge variant={(EVENT_VARIANTS[event.type] ?? "default") as "accent" | "success" | "default" | "warning" | "danger"}>
+        {event.type}
+      </Badge>
+      <div className="flex-1 space-x-3">
+        {from && (
+          <span className="font-mono text-[12px] text-[var(--foreground-muted)]">
+            {from.slice(0, 8)}...
+          </span>
+        )}
+        {to && (
+          <>
+            <span className="text-[var(--foreground-disabled)]">&rarr;</span>
+            <span className="font-mono text-[12px] text-[var(--foreground-muted)]">
+              {to.slice(0, 8)}...
+            </span>
+          </>
+        )}
+        {amount && (
+          <span className="text-[12px] font-medium text-[var(--foreground)]">
+            ${amount}
+          </span>
+        )}
+      </div>
+      <span className="text-[11px] text-[var(--foreground-disabled)]">
+        {relativeTime(event.timestamp)}
+      </span>
+    </div>
+  );
+}
+
+export function LiveFeedPage() {
+  const { connected, events, connect, disconnect, clearEvents } = useRealtimeStore();
+  const [filters, setFilters] = useState<Set<string>>(new Set(ALL_EVENT_TYPES));
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    connect();
+    return () => disconnect();
+  }, [connect, disconnect]);
+
+  const toggleFilter = (type: string) => {
+    setFilters((prev) => {
+      const next = new Set(prev);
+      if (next.has(type)) next.delete(type);
+      else next.add(type);
+      return next;
+    });
+  };
+
+  const filteredEvents = events.filter((e) => filters.has(e.type));
+
+  return (
+    <div className="min-h-screen">
+      <header className="flex items-center justify-between border-b border-[var(--border)] px-8 py-5">
+        <div>
+          <div className="flex items-center gap-2">
+            <h1 className="text-[16px] font-semibold text-[var(--foreground)]">Live Feed</h1>
+            <span
+              className="inline-block size-2 rounded-full"
+              style={{ backgroundColor: connected ? "var(--color-success)" : "var(--color-danger)" }}
+              title={connected ? "Connected" : "Disconnected"}
+            />
+          </div>
+          <p className="mt-0.5 text-[13px] text-[var(--foreground-muted)]">
+            Real-time event stream from WebSocket
+          </p>
+        </div>
+        <button
+          onClick={clearEvents}
+          className="rounded-[var(--radius-md)] border border-[var(--border)] px-3 py-1.5 text-[12px] text-[var(--foreground-muted)] transition-colors hover:bg-[var(--background-interactive)]"
+        >
+          Clear
+        </button>
+      </header>
+
+      {/* Filters */}
+      <div className="flex flex-wrap gap-1.5 border-b border-[var(--border)] px-8 py-3">
+        {ALL_EVENT_TYPES.map((type) => (
+          <button
+            key={type}
+            onClick={() => toggleFilter(type)}
+            className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+              filters.has(type)
+                ? "bg-[var(--color-accent-3)] text-[var(--color-accent-11)]"
+                : "bg-[var(--color-gray-3)] text-[var(--foreground-disabled)]"
+            }`}
+          >
+            {type.replace(/_/g, " ")}
+          </button>
+        ))}
+      </div>
+
+      {/* Event list */}
+      <div ref={listRef} className="max-h-[calc(100vh-180px)] overflow-y-auto">
+        {filteredEvents.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-20 text-[var(--foreground-disabled)]">
+            <p className="text-[14px]">{connected ? "Waiting for events..." : "Not connected"}</p>
+          </div>
+        ) : (
+          filteredEvents.map((event, i) => <EventCard key={`${event.timestamp}-${i}`} event={event} />)
+        )}
+      </div>
+    </div>
+  );
+}

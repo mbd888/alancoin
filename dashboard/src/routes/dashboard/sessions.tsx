@@ -1,5 +1,6 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { MoreHorizontal, Eye, XCircle, DollarSign } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { DataTable, type Column } from "@/components/ui/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Tabs } from "@/components/ui/tabs";
@@ -7,6 +8,7 @@ import { DropdownMenu, DropdownItem, DropdownSeparator } from "@/components/ui/d
 import { useSessions } from "@/hooks/api/use-dashboard";
 import { formatCurrency, relativeTime } from "@/lib/utils";
 import { toast } from "sonner";
+import { useRealtimeStore } from "@/stores/realtime-store";
 import type { GatewaySession } from "@/lib/types";
 
 const STATUS_VARIANT = {
@@ -64,6 +66,21 @@ export function SessionsPage() {
   const [history, setHistory] = useState<string[]>([]);
   const [statusFilter, setStatusFilter] = useState("all");
   const sessions = useSessions(50, cursor);
+  const queryClient = useQueryClient();
+  const { events, connect, disconnect } = useRealtimeStore();
+
+  // Auto-refresh sessions when relevant WebSocket events arrive
+  useEffect(() => {
+    connect();
+    return () => disconnect();
+  }, [connect, disconnect]);
+
+  useEffect(() => {
+    const last = events[0];
+    if (last && (last.type === "session_created" || last.type === "session_closed" || last.type === "proxy_settlement")) {
+      queryClient.invalidateQueries({ queryKey: ["dashboard", "sessions"] });
+    }
+  }, [events, queryClient]);
 
   const filteredSessions = useMemo(() => {
     const all = sessions.data?.sessions ?? [];

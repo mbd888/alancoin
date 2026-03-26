@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
+import { api, getTenantId } from "@/lib/api-client";
 import type {
   DashboardOverview,
   DashboardUsage,
@@ -9,15 +9,6 @@ import type {
   SystemHealthResponse,
 } from "@/lib/types";
 
-// Tenant ID from localStorage (set during login) or environment, falling back to "default".
-// When a proper auth context is added, this should read from it instead.
-function getTenantId(): string {
-  if (typeof window !== "undefined") {
-    const stored = localStorage.getItem("alancoin_tenant_id");
-    if (stored) return stored;
-  }
-  return import.meta.env.VITE_TENANT_ID || "default";
-}
 const TENANT_ID = getTenantId();
 
 export function useOverview() {

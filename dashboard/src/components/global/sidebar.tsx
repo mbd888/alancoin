@@ -15,6 +15,12 @@ import {
   Shield,
   Brain,
   Activity,
+  Rss,
+  Lock,
+  Wallet,
+  GitBranch,
+  Zap,
+  Store,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
@@ -23,6 +29,13 @@ const NAV_ITEMS = [
   { to: "/overview", label: "Overview", icon: LayoutDashboard },
   { to: "/sessions", label: "Sessions", icon: Radio },
   { to: "/agents", label: "Agents", icon: Bot },
+  { to: "/live-feed", label: "Live Feed", icon: Rss },
+  { divider: true as const },
+  { to: "/escrow", label: "Escrow", icon: Lock },
+  { to: "/budget", label: "Budget", icon: Wallet },
+  { to: "/workflows", label: "Workflows", icon: GitBranch },
+  { to: "/streams", label: "Streams", icon: Zap },
+  { to: "/marketplace", label: "Marketplace", icon: Store },
   { divider: true as const },
   { to: "/alerts", label: "Alerts", icon: ShieldAlert },
   { to: "/chargeback", label: "Chargeback", icon: TrendingDown },

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Activity,
   DollarSign,
@@ -9,6 +9,7 @@ import {
   Percent,
   Brain,
   Shield,
+  Rss,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { KpiCard } from "@/components/ui/kpi-card";
@@ -18,6 +19,7 @@ import { Tabs } from "@/components/ui/tabs";
 import { useOverview, useUsage, useTopServices, useDenials } from "@/hooks/api/use-dashboard";
 import { api } from "@/lib/api-client";
 import { formatCurrency, formatCompact, relativeTime } from "@/lib/utils";
+import { useRealtimeStore } from "@/stores/realtime-store";
 import {
   AreaChart,
   Area,
@@ -380,6 +382,80 @@ export function OverviewPage() {
             </div>
           </div>
         </div>
+
+        {/* Live Activity widget */}
+        <LiveActivityWidget />
+      </div>
+    </div>
+  );
+}
+
+function LiveActivityWidget() {
+  const { connected, events, connect, disconnect } = useRealtimeStore();
+
+  useEffect(() => {
+    connect();
+    return () => disconnect();
+  }, [connect, disconnect]);
+
+  const recent = events.slice(0, 5);
+
+  return (
+    <div className="rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--card-bg)]">
+      <div className="flex items-center justify-between border-b border-[var(--border)] px-5 py-3">
+        <div className="flex items-center gap-2">
+          <Rss size={14} className="text-[var(--foreground-muted)]" />
+          <h3 className="text-[13px] font-semibold text-[var(--foreground)]">Live Activity</h3>
+        </div>
+        <span
+          className="inline-block size-2 rounded-full"
+          style={{ backgroundColor: connected ? "var(--color-success)" : "var(--color-danger)" }}
+          title={connected ? "Connected" : "Disconnected"}
+        />
+      </div>
+      <div className="divide-y divide-[var(--border-subtle)]">
+        {recent.length === 0 ? (
+          <p className="px-5 py-4 text-[12px] text-[var(--foreground-disabled)]">
+            {connected ? "Waiting for events..." : "Connecting..."}
+          </p>
+        ) : (
+          recent.map((event, i) => {
+            const data = event.data as Record<string, string>;
+            const from = data.from ?? data.authorAddr ?? "";
+            const amount = data.amount ?? "";
+            return (
+              <div
+                key={`${event.timestamp}-${i}`}
+                className="flex items-center justify-between px-5 py-2"
+              >
+                <div className="flex items-center gap-2 text-[12px]">
+                  <Badge
+                    variant={
+                      event.type.includes("dispute") || event.type.includes("alert")
+                        ? "danger"
+                        : event.type.includes("created") || event.type.includes("confirmed")
+                          ? "success"
+                          : "default"
+                    }
+                  >
+                    {event.type.replace(/_/g, " ")}
+                  </Badge>
+                  {from && (
+                    <span className="font-mono text-[11px] text-[var(--foreground-muted)]">
+                      {from.slice(0, 8)}...
+                    </span>
+                  )}
+                  {amount && (
+                    <span className="text-[11px] font-medium">${amount}</span>
+                  )}
+                </div>
+                <span className="text-[11px] text-[var(--foreground-disabled)]">
+                  {relativeTime(event.timestamp)}
+                </span>
+              </div>
+            );
+          })
+        )}
       </div>
     </div>
   );
