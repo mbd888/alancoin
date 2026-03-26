@@ -484,3 +484,218 @@ func TestParseTimeRange_CustomRange(t *testing.T) {
 	assert.Equal(t, expectedFrom, from)
 	assert.Equal(t, expectedTo, to)
 }
+
+// ---------------------------------------------------------------------------
+// Mock listers for Escrows, Workflows, Streams, Offers
+// ---------------------------------------------------------------------------
+
+type mockEscrowLister struct {
+	data map[string][]EscrowSummary // keyed by agent address
+}
+
+func (m *mockEscrowLister) ListByAgent(_ context.Context, agentAddr string, limit int) ([]EscrowSummary, error) {
+	items := m.data[agentAddr]
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
+}
+
+type mockWorkflowLister struct {
+	data map[string][]WorkflowSummary
+}
+
+func (m *mockWorkflowLister) ListByAgent(_ context.Context, agentAddr string, limit int) ([]WorkflowSummary, error) {
+	items := m.data[agentAddr]
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
+}
+
+type mockStreamLister struct {
+	data map[string][]StreamSummary
+}
+
+func (m *mockStreamLister) ListByAgent(_ context.Context, agentAddr string, limit int) ([]StreamSummary, error) {
+	items := m.data[agentAddr]
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
+}
+
+type mockOfferLister struct {
+	data []OfferSummary
+}
+
+func (m *mockOfferLister) ListActive(_ context.Context, serviceType string, limit int) ([]OfferSummary, error) {
+	if serviceType == "" {
+		if len(m.data) > limit {
+			return m.data[:limit], nil
+		}
+		return m.data, nil
+	}
+	var filtered []OfferSummary
+	for _, o := range m.data {
+		if o.ServiceType == serviceType {
+			filtered = append(filtered, o)
+		}
+	}
+	if len(filtered) > limit {
+		filtered = filtered[:limit]
+	}
+	return filtered, nil
+}
+
+// ---------------------------------------------------------------------------
+// Escrows handler tests
+// ---------------------------------------------------------------------------
+
+func TestEscrows_Success(t *testing.T) {
+	handler, _, tenantStore := setupTestHandler()
+	tenantStore.BindAgent("0xagent_esc", "ten_a")
+
+	mock := &mockEscrowLister{data: map[string][]EscrowSummary{
+		"0xagent_esc": {
+			{ID: "esc_1", BuyerAddr: "0xagent_esc", SellerAddr: "0xseller", Amount: "10.00", Status: "pending", CreatedAt: time.Now()},
+			{ID: "esc_2", BuyerAddr: "0xagent_esc", SellerAddr: "0xseller", Amount: "5.00", Status: "released", CreatedAt: time.Now()},
+		},
+	}}
+	handler.WithEscrowLister(mock)
+
+	w := makeRequest(t, handler.Escrows, "ten_a", "ten_a", false)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	escrows := resp["escrows"].([]interface{})
+	assert.Equal(t, 2, len(escrows))
+}
+
+func TestEscrows_NoLister(t *testing.T) {
+	handler, _, _ := setupTestHandler()
+	// No escrow lister configured
+
+	w := makeRequest(t, handler.Escrows, "ten_a", "ten_a", false)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	escrows := resp["escrows"].([]interface{})
+	assert.Equal(t, 0, len(escrows))
+}
+
+func TestEscrows_CrossTenantIsolation(t *testing.T) {
+	handler, _, _ := setupTestHandler()
+	handler.WithEscrowLister(&mockEscrowLister{data: map[string][]EscrowSummary{}})
+
+	w := makeRequest(t, handler.Escrows, "ten_b", "ten_a", false)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+// ---------------------------------------------------------------------------
+// Workflows handler tests
+// ---------------------------------------------------------------------------
+
+func TestWorkflows_Success(t *testing.T) {
+	handler, _, tenantStore := setupTestHandler()
+	tenantStore.BindAgent("0xagent_wf", "ten_a")
+
+	mock := &mockWorkflowLister{data: map[string][]WorkflowSummary{
+		"0xagent_wf": {
+			{ID: "wf_1", BuyerAddr: "0xagent_wf", Name: "pipeline", Status: "active", CreatedAt: time.Now()},
+		},
+	}}
+	handler.WithWorkflowLister(mock)
+
+	w := makeRequest(t, handler.Workflows, "ten_a", "ten_a", false)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	workflows := resp["workflows"].([]interface{})
+	assert.Equal(t, 1, len(workflows))
+}
+
+func TestWorkflows_NoLister(t *testing.T) {
+	handler, _, _ := setupTestHandler()
+
+	w := makeRequest(t, handler.Workflows, "ten_a", "ten_a", false)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	workflows := resp["workflows"].([]interface{})
+	assert.Equal(t, 0, len(workflows))
+}
+
+func TestWorkflows_CrossTenantIsolation(t *testing.T) {
+	handler, _, _ := setupTestHandler()
+	handler.WithWorkflowLister(&mockWorkflowLister{data: map[string][]WorkflowSummary{}})
+
+	w := makeRequest(t, handler.Workflows, "ten_b", "ten_a", false)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+// ---------------------------------------------------------------------------
+// Streams handler tests
+// ---------------------------------------------------------------------------
+
+func TestStreams_Success(t *testing.T) {
+	handler, _, tenantStore := setupTestHandler()
+	tenantStore.BindAgent("0xagent_str", "ten_a")
+
+	mock := &mockStreamLister{data: map[string][]StreamSummary{
+		"0xagent_str": {
+			{ID: "str_1", BuyerAddr: "0xagent_str", SellerAddr: "0xseller", HoldAmount: "20.00", SpentAmount: "5.00", Status: "open", CreatedAt: time.Now()},
+		},
+	}}
+	handler.WithStreamLister(mock)
+
+	w := makeRequest(t, handler.Streams, "ten_a", "ten_a", false)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	streams := resp["streams"].([]interface{})
+	assert.Equal(t, 1, len(streams))
+}
+
+func TestStreams_CrossTenantIsolation(t *testing.T) {
+	handler, _, _ := setupTestHandler()
+	handler.WithStreamLister(&mockStreamLister{data: map[string][]StreamSummary{}})
+
+	w := makeRequest(t, handler.Streams, "ten_b", "ten_a", false)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+// ---------------------------------------------------------------------------
+// Offers handler tests
+// ---------------------------------------------------------------------------
+
+func TestOffers_Success(t *testing.T) {
+	handler, _, _ := setupTestHandler()
+
+	mock := &mockOfferLister{data: []OfferSummary{
+		{ID: "off_1", SellerAddr: "0xs1", ServiceType: "llm", Price: "5.00", Status: "active", CreatedAt: time.Now()},
+		{ID: "off_2", SellerAddr: "0xs2", ServiceType: "translation", Price: "3.00", Status: "active", CreatedAt: time.Now()},
+	}}
+	handler.WithOfferLister(mock)
+
+	w := makeRequest(t, handler.Offers, "ten_a", "ten_a", false)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	offers := resp["offers"].([]interface{})
+	assert.Equal(t, 2, len(offers))
+}
+
+func TestOffers_CrossTenantIsolation(t *testing.T) {
+	handler, _, _ := setupTestHandler()
+	handler.WithOfferLister(&mockOfferLister{data: []OfferSummary{}})
+
+	w := makeRequest(t, handler.Offers, "ten_b", "ten_a", false)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
