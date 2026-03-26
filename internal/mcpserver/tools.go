@@ -140,6 +140,78 @@ var ToolFileDispute = mcp.NewTool("file_dispute",
 		mcp.Description("Optional: behavioral contract ID for auto-resolution")),
 )
 
+// --- Marketplace / Offers Tools ---
+
+var ToolBrowseMarketplace = mcp.NewTool("browse_marketplace",
+	mcp.WithDescription(
+		"Browse the Alancoin marketplace for standing service offers. "+
+			"Shows available offers with pricing, capacity, and seller details. "+
+			"Use this to find pre-posted offers before claiming them with claim_offer."),
+	mcp.WithString("service_type",
+		mcp.Description("Filter by service type (e.g. 'translation', 'inference')")),
+	mcp.WithNumber("limit",
+		mcp.Description("Maximum number of offers to return (default 20)")),
+)
+
+var ToolPostOffer = mcp.NewTool("post_offer",
+	mcp.WithDescription(
+		"Post a standing offer to sell a service on the Alancoin marketplace. "+
+			"Other agents (or LLMs) can claim your offer to purchase your service. "+
+			"Set a price per claim, total capacity, and an endpoint to receive work requests."),
+	mcp.WithString("service_type",
+		mcp.Required(),
+		mcp.Description("Type of service you're offering (e.g. 'translation', 'inference', 'summarization')")),
+	mcp.WithString("price",
+		mcp.Required(),
+		mcp.Description("Price per claim in USDC (e.g. '0.50')")),
+	mcp.WithNumber("capacity",
+		mcp.Required(),
+		mcp.Description("Total number of claims this offer can accept")),
+	mcp.WithString("description",
+		mcp.Description("Human-readable description of what the service does")),
+	mcp.WithString("endpoint",
+		mcp.Description("HTTPS URL where work requests will be sent when the offer is claimed")),
+)
+
+var ToolClaimOffer = mcp.NewTool("claim_offer",
+	mcp.WithDescription(
+		"Claim a standing offer from the marketplace. "+
+			"This atomically locks your USDC in escrow and reserves capacity on the offer. "+
+			"The seller will then deliver the service. Use complete_claim to release payment after delivery."),
+	mcp.WithString("offer_id",
+		mcp.Required(),
+		mcp.Description("The offer ID to claim (from browse_marketplace results)")),
+)
+
+var ToolCancelOffer = mcp.NewTool("cancel_offer",
+	mcp.WithDescription(
+		"Cancel your own standing offer. Only the seller who posted the offer can cancel it. "+
+			"Existing claims are not affected — only prevents new claims."),
+	mcp.WithString("offer_id",
+		mcp.Required(),
+		mcp.Description("The offer ID to cancel")),
+)
+
+var ToolDeliverClaim = mcp.NewTool("deliver_claim",
+	mcp.WithDescription(
+		"Mark a claimed offer as delivered (seller action). "+
+			"Call this after you've completed the work for a claimed offer. "+
+			"The buyer can then confirm and release payment with complete_claim."),
+	mcp.WithString("claim_id",
+		mcp.Required(),
+		mcp.Description("The claim ID to mark as delivered")),
+)
+
+var ToolCompleteClaim = mcp.NewTool("complete_claim",
+	mcp.WithDescription(
+		"Confirm delivery and release payment to the seller (buyer action). "+
+			"Call this after the seller has delivered the service for your claimed offer. "+
+			"USDC is released from escrow to the seller's balance."),
+	mcp.WithString("claim_id",
+		mcp.Required(),
+		mcp.Description("The claim ID to complete")),
+)
+
 var ToolGetAlerts = mcp.NewTool("get_alerts",
 	mcp.WithDescription(
 		"Get spend anomaly alerts for your agent from the forensics engine. "+

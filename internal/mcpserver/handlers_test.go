@@ -1508,3 +1508,162 @@ func TestClient_SlowServer_Timeout(t *testing.T) {
 	require.Error(t, err)
 	assert.Less(t, elapsed, 33*time.Second, "should timeout around 30s, not hang forever")
 }
+
+// ============================================================
+// Marketplace / Offers handler tests
+// ============================================================
+
+func TestHandleBrowseMarketplace_Success(t *testing.T) {
+	h, cleanup := newTestSetup(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/offers", r.URL.Path)
+		assert.Equal(t, "translation", r.URL.Query().Get("type"))
+		w.Write([]byte(`{"offers":[
+			{"id":"off_1","sellerAddr":"0xSELLER","serviceType":"translation","price":"1.000000","remainingCap":5}
+		]}`))
+	}))
+	defer cleanup()
+
+	result, err := h.HandleBrowseMarketplace(context.Background(), makeRequest(map[string]any{
+		"service_type": "translation",
+	}))
+	require.NoError(t, err)
+	text := resultText(t, result)
+	assert.Contains(t, text, "1 marketplace offers")
+	assert.Contains(t, text, "translation")
+	assert.Contains(t, text, "off_1")
+}
+
+func TestHandleBrowseMarketplace_Empty(t *testing.T) {
+	h, cleanup := newTestSetup(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"offers":[]}`))
+	}))
+	defer cleanup()
+
+	result, err := h.HandleBrowseMarketplace(context.Background(), makeRequest(map[string]any{
+		"service_type": "nonexistent",
+	}))
+	require.NoError(t, err)
+	text := resultText(t, result)
+	assert.Contains(t, text, "No offers found")
+}
+
+func TestHandlePostOffer_Success(t *testing.T) {
+	h, cleanup := newTestSetup(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/v1/offers", r.URL.Path)
+
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]any
+		json.Unmarshal(body, &req)
+		assert.Equal(t, "inference", req["serviceType"])
+		assert.Equal(t, "2.50", req["price"])
+		assert.Equal(t, float64(10), req["capacity"])
+
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"offer":{"id":"off_new"}}`))
+	}))
+	defer cleanup()
+
+	result, err := h.HandlePostOffer(context.Background(), makeRequest(map[string]any{
+		"service_type": "inference",
+		"price":        "2.50",
+		"capacity":     float64(10),
+		"description":  "LLM inference service",
+	}))
+	require.NoError(t, err)
+	text := resultText(t, result)
+	assert.Contains(t, text, "off_new")
+	assert.Contains(t, text, "posted successfully")
+}
+
+func TestHandlePostOffer_MissingRequired(t *testing.T) {
+	h, cleanup := newTestSetup(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("should not reach server")
+	}))
+	defer cleanup()
+
+	// Missing service_type
+	result, err := h.HandlePostOffer(context.Background(), makeRequest(map[string]any{
+		"price":    "1.00",
+		"capacity": float64(5),
+	}))
+	require.NoError(t, err)
+	text := resultText(t, result)
+	assert.Contains(t, text, "service_type is required")
+}
+
+func TestHandleClaimOffer_Success(t *testing.T) {
+	h, cleanup := newTestSetup(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/offers/off_123/claim", r.URL.Path)
+		w.Write([]byte(`{"claim":{"id":"clm_456","offerId":"off_123"}}`))
+	}))
+	defer cleanup()
+
+	result, err := h.HandleClaimOffer(context.Background(), makeRequest(map[string]any{
+		"offer_id": "off_123",
+	}))
+	require.NoError(t, err)
+	text := resultText(t, result)
+	assert.Contains(t, text, "clm_456")
+	assert.Contains(t, text, "claimed successfully")
+}
+
+func TestHandleCancelOffer_Success(t *testing.T) {
+	h, cleanup := newTestSetup(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/offers/off_789/cancel", r.URL.Path)
+		w.Write([]byte(`{}`))
+	}))
+	defer cleanup()
+
+	result, err := h.HandleCancelOffer(context.Background(), makeRequest(map[string]any{
+		"offer_id": "off_789",
+	}))
+	require.NoError(t, err)
+	text := resultText(t, result)
+	assert.Contains(t, text, "off_789")
+	assert.Contains(t, text, "cancelled")
+}
+
+func TestHandleDeliverClaim_Success(t *testing.T) {
+	h, cleanup := newTestSetup(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/claims/clm_deliver/deliver", r.URL.Path)
+		w.Write([]byte(`{}`))
+	}))
+	defer cleanup()
+
+	result, err := h.HandleDeliverClaim(context.Background(), makeRequest(map[string]any{
+		"claim_id": "clm_deliver",
+	}))
+	require.NoError(t, err)
+	text := resultText(t, result)
+	assert.Contains(t, text, "clm_deliver")
+	assert.Contains(t, text, "delivered")
+}
+
+func TestHandleCompleteClaim_Success(t *testing.T) {
+	h, cleanup := newTestSetup(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/claims/clm_done/complete", r.URL.Path)
+		w.Write([]byte(`{}`))
+	}))
+	defer cleanup()
+
+	result, err := h.HandleCompleteClaim(context.Background(), makeRequest(map[string]any{
+		"claim_id": "clm_done",
+	}))
+	require.NoError(t, err)
+	text := resultText(t, result)
+	assert.Contains(t, text, "clm_done")
+	assert.Contains(t, text, "completed")
+}
+
+func TestHandleClaimOffer_MissingID(t *testing.T) {
+	h, cleanup := newTestSetup(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("should not reach server")
+	}))
+	defer cleanup()
+
+	result, err := h.HandleClaimOffer(context.Background(), makeRequest(map[string]any{}))
+	require.NoError(t, err)
+	text := resultText(t, result)
+	assert.Contains(t, text, "offer_id is required")
+}
