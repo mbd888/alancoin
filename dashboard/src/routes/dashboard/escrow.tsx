@@ -9,6 +9,8 @@ import { formatCurrency, relativeTime } from "@/lib/utils";
 import { useRealtimeStore } from "@/stores/realtime-store";
 import type { Escrow } from "@/lib/types";
 import { Lock, AlertTriangle, DollarSign, Clock } from "lucide-react";
+import { SkeletonCard } from "@/components/ui/skeleton";
+import { PageHeader } from "@/components/layouts/page-header";
 
 const STATUS_VARIANT: Record<string, string> = {
   pending: "warning",
@@ -78,14 +80,14 @@ export function EscrowPage() {
       id: "id",
       header: "Escrow",
       cell: (row) => (
-        <span className="font-mono text-[12px]">{row.id.slice(0, 12)}...</span>
+        <span className="font-mono text-xs">{row.id.slice(0, 12)}...</span>
       ),
     },
     {
       id: "buyer",
       header: "Buyer",
       cell: (row) => (
-        <span className="font-mono text-[12px]">
+        <span className="font-mono text-xs">
           {row.buyerAddr.slice(0, 8)}...{row.buyerAddr.slice(-4)}
         </span>
       ),
@@ -94,7 +96,7 @@ export function EscrowPage() {
       id: "seller",
       header: "Seller",
       cell: (row) => (
-        <span className="font-mono text-[12px]">
+        <span className="font-mono text-xs">
           {row.sellerAddr.slice(0, 8)}...{row.sellerAddr.slice(-4)}
         </span>
       ),
@@ -118,7 +120,7 @@ export function EscrowPage() {
       id: "autoRelease",
       header: "Auto-release",
       cell: (row) => (
-        <span className="text-[12px] text-[var(--foreground-muted)]">
+        <span className="text-xs text-muted-foreground">
           {relativeTime(row.autoReleaseAt)}
         </span>
       ),
@@ -127,7 +129,7 @@ export function EscrowPage() {
       id: "created",
       header: "Created",
       cell: (row) => (
-        <span className="text-[12px] text-[var(--foreground-muted)]">
+        <span className="text-xs text-muted-foreground">
           {relativeTime(row.createdAt)}
         </span>
       ),
@@ -136,27 +138,28 @@ export function EscrowPage() {
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-[var(--border)] px-8 py-5">
-        <h1 className="text-[16px] font-semibold text-[var(--foreground)]">Escrow Monitor</h1>
-        <p className="mt-0.5 text-[13px] text-[var(--foreground-muted)]">
-          Active escrow positions and lifecycle tracking
-        </p>
-      </header>
+      <PageHeader icon={Lock} title="Escrow Monitor" description="Active escrow positions and lifecycle tracking" />
 
       {/* KPI cards */}
-      <div className="grid grid-cols-4 gap-4 border-b border-[var(--border)] px-8 py-4">
-        <KpiCard icon={Lock} label="Active Escrows" value={activeCount} />
-        <KpiCard icon={AlertTriangle} label="Disputed" value={disputedCount} />
-        <KpiCard icon={DollarSign} label="Total Escrowed" value={`$${totalEscrowed.toFixed(2)}`} />
-        <KpiCard icon={Clock} label="Total" value={allEscrows.length} />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 border-b px-4 md:px-8 py-4">
+        {escrows.isLoading ? (
+          Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} />)
+        ) : (
+          <>
+            <KpiCard icon={Lock} label="Active Escrows" value={activeCount} />
+            <KpiCard icon={AlertTriangle} label="Disputed" value={disputedCount} />
+            <KpiCard icon={DollarSign} label="Total Escrowed" value={`$${totalEscrowed.toFixed(2)}`} />
+            <KpiCard icon={Clock} label="Total" value={allEscrows.length} />
+          </>
+        )}
       </div>
 
       {/* Status tabs */}
-      <div className="border-b border-[var(--border)] px-8 py-3">
+      <div className="border-b px-4 md:px-8 py-3">
         <Tabs tabs={tabsWithCounts} active={statusFilter} onChange={setStatusFilter} />
       </div>
 
-      <div className="px-8 py-4">
+      <div className="px-4 md:px-8 py-4">
         <DataTable
           columns={columns}
           data={filteredEscrows}

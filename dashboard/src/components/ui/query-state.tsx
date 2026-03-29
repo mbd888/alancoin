@@ -23,10 +23,10 @@ export function QueryState<T>({
   if (query.isError) {
     return (
       <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-        <div className="flex size-10 items-center justify-center rounded-[var(--radius-lg)] bg-[oklch(0.18_0.03_25)]">
-          <AlertTriangle size={18} strokeWidth={1.5} className="text-[var(--color-danger)]" />
+        <div className="flex size-10 items-center justify-center rounded-lg bg-destructive/10">
+          <AlertTriangle size={18} strokeWidth={1.5} className="text-destructive" />
         </div>
-        <p className="text-[13px] text-[var(--foreground-muted)]">
+        <p className="text-sm text-muted-foreground">
           {query.error instanceof Error ? query.error.message : "Failed to load data"}
         </p>
         <Button variant="ghost" size="sm" onClick={() => query.refetch()}>

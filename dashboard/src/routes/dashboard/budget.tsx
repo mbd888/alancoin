@@ -5,6 +5,9 @@ import { useSessions } from "@/hooks/api/use-dashboard";
 import { formatCurrency } from "@/lib/utils";
 import type { GatewaySession } from "@/lib/types";
 import { Wallet, TrendingUp, AlertTriangle, Layers } from "lucide-react";
+import { SkeletonCard } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/layouts/page-header";
 
 export function BudgetPage() {
   const sessions = useSessions(100);
@@ -35,14 +38,14 @@ export function BudgetPage() {
       id: "id",
       header: "Session",
       cell: (row) => (
-        <span className="font-mono text-[12px]">{row.id.slice(0, 12)}...</span>
+        <span className="font-mono text-xs">{row.id.slice(0, 12)}...</span>
       ),
     },
     {
       id: "agent",
       header: "Agent",
       cell: (row) => (
-        <span className="font-mono text-[12px]">
+        <span className="font-mono text-xs">
           {row.agentAddr.slice(0, 8)}...{row.agentAddr.slice(-4)}
         </span>
       ),
@@ -57,7 +60,7 @@ export function BudgetPage() {
         const pct = Math.min((spent / total) * 100, 100);
         return (
           <div className="flex items-center gap-3">
-            <div className="h-1.5 w-20 overflow-hidden rounded-full bg-[var(--color-gray-3)]">
+            <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
               <div
                 className="h-full rounded-full transition-[width] duration-300"
                 style={{
@@ -71,7 +74,7 @@ export function BudgetPage() {
                 }}
               />
             </div>
-            <span className="text-[12px]">{pct.toFixed(0)}%</span>
+            <span className="text-xs">{pct.toFixed(0)}%</span>
           </div>
         );
       },
@@ -81,7 +84,7 @@ export function BudgetPage() {
       header: "Spent",
       numeric: true,
       cell: (row) => (
-        <span className="text-[12px]">{formatCurrency(row.totalSpent)}</span>
+        <span className="text-xs">{formatCurrency(row.totalSpent)}</span>
       ),
     },
     {
@@ -89,7 +92,7 @@ export function BudgetPage() {
       header: "Budget",
       numeric: true,
       cell: (row) => (
-        <span className="text-[12px]">{formatCurrency(row.maxTotal)}</span>
+        <span className="text-xs">{formatCurrency(row.maxTotal)}</span>
       ),
     },
     {
@@ -101,7 +104,7 @@ export function BudgetPage() {
           (parseFloat(row.maxTotal) || 0) - (parseFloat(row.totalSpent) || 0);
         return (
           <span
-            className="text-[12px]"
+            className="text-xs"
             style={{
               color: remaining < 1 ? "var(--color-danger)" : "var(--foreground-muted)",
             }}
@@ -121,31 +124,42 @@ export function BudgetPage() {
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-[var(--border)] px-8 py-5">
-        <h1 className="text-[16px] font-semibold text-[var(--foreground)]">Budget Tracker</h1>
-        <p className="mt-0.5 text-[13px] text-[var(--foreground-muted)]">
-          Active session budget utilization
-        </p>
-      </header>
+      <PageHeader icon={Wallet} title="Budget Tracker" description="Active session budget utilization" />
 
       {/* KPI cards */}
-      <div className="grid grid-cols-4 gap-4 border-b border-[var(--border)] px-8 py-4">
-        <KpiCard icon={Wallet} label="Total Budget" value={`$${totalBudget.toFixed(2)}`} />
-        <KpiCard icon={TrendingUp} label="Total Spent" value={`$${totalSpent.toFixed(2)}`} />
-        <KpiCard icon={Layers} label="Utilization" value={`${utilization.toFixed(1)}%`} />
-        <KpiCard icon={AlertTriangle} label="Near Exhaustion" value={nearExhaustion} />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 border-b px-4 md:px-8 py-4">
+        {sessions.isLoading ? (
+          Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} />)
+        ) : (
+          <>
+            <KpiCard icon={Wallet} label="Total Budget" value={`$${totalBudget.toFixed(2)}`} />
+            <KpiCard icon={TrendingUp} label="Total Spent" value={`$${totalSpent.toFixed(2)}`} />
+            <KpiCard icon={Layers} label="Utilization" value={`${utilization.toFixed(1)}%`} />
+            <KpiCard icon={AlertTriangle} label="Near Exhaustion" value={nearExhaustion} />
+          </>
+        )}
       </div>
 
-      <div className="px-8 py-4">
-        <DataTable
-          columns={columns}
-          data={activeSessions}
-          isLoading={sessions.isLoading}
-          keyExtractor={(row) => row.id}
-          emptyTitle="No active sessions"
-          emptyDescription="No gateway sessions with active budgets."
-          totalLabel={`${activeSessions.length} active sessions`}
-        />
+      <div className="px-4 md:px-8 py-4">
+        {sessions.isError ? (
+          <div className="flex items-center justify-center gap-2 rounded-lg border bg-card py-8 text-sm text-destructive">
+            <AlertTriangle size={14} />
+            Failed to load sessions
+            <Button variant="ghost" size="sm" onClick={() => sessions.refetch()}>
+              Retry
+            </Button>
+          </div>
+        ) : (
+          <DataTable
+            columns={columns}
+            data={activeSessions}
+            isLoading={sessions.isLoading}
+            keyExtractor={(row) => row.id}
+            emptyTitle="No active sessions"
+            emptyDescription="No gateway sessions with active budgets."
+            totalLabel={`${activeSessions.length} active sessions`}
+          />
+        )}
       </div>
     </div>
   );

@@ -50,13 +50,13 @@ export function DataTable<T>({
       <div className="overflow-x-auto">
         <table className="w-full text-left">
           <thead>
-            <tr className="border-b border-[var(--border)]">
+            <tr className="border-b">
               {columns.map((col) => (
                 <th
                   key={col.id}
                   className={cn(
-                    "sticky top-0 z-10 bg-[var(--background)] px-4 py-2.5",
-                    "text-[11px] font-medium uppercase tracking-wide text-[var(--foreground-muted)]",
+                    "sticky top-0 z-10 bg-background px-4 py-2.5",
+                    "text-xs font-medium uppercase tracking-wide text-muted-foreground",
                     col.numeric && "text-right",
                     col.className
                   )}
@@ -86,13 +86,13 @@ export function DataTable<T>({
               data.map((row) => (
                 <tr
                   key={keyExtractor(row)}
-                  className="border-b border-[var(--border-subtle)] transition-[background-color] duration-100 hover:bg-[var(--background-elevated)]"
+                  className="border-b transition-[background-color] duration-100 hover:bg-card"
                 >
                   {columns.map((col) => (
                     <td
                       key={col.id}
                       className={cn(
-                        "px-4 py-2.5 text-[13px] text-[var(--foreground-secondary)]",
+                        "px-4 py-2.5 text-sm text-muted-foreground",
                         col.numeric && "text-right tabular-nums",
                         col.className
                       )}
@@ -108,8 +108,8 @@ export function DataTable<T>({
       </div>
 
       {showPagination && (
-        <div className="flex items-center justify-between border-t border-[var(--border)] px-4 py-2.5">
-          <span className="text-[12px] text-[var(--foreground-muted)]">
+        <div className="flex items-center justify-between border-t px-4 py-2.5">
+          <span className="text-xs text-muted-foreground">
             {totalLabel ?? `${data.length} items`}
           </span>
           <div className="flex items-center gap-1">

@@ -10,6 +10,17 @@ import {
   Moon,
   Sun,
   Copy,
+  Rss,
+  Lock,
+  Wallet,
+  GitBranch,
+  Zap,
+  Store,
+  ShieldAlert,
+  TrendingDown,
+  Shield,
+  Brain,
+  Activity,
 } from "lucide-react";
 import { useUiStore } from "@/stores/ui-store";
 import { useEffect } from "react";
@@ -17,12 +28,29 @@ import { toast } from "sonner";
 import { copyToClipboard } from "@/lib/utils";
 
 const PAGES = [
-  { to: "/overview", label: "Overview", icon: LayoutDashboard, group: "Navigate" },
-  { to: "/sessions", label: "Sessions", icon: Radio, group: "Navigate" },
-  { to: "/agents", label: "Agents", icon: Bot, group: "Navigate" },
-  { to: "/api-keys", label: "API Keys", icon: Key, group: "Navigate" },
-  { to: "/settings", label: "Settings", icon: Settings, group: "Navigate" },
+  { to: "/overview", label: "Overview", icon: LayoutDashboard },
+  { to: "/sessions", label: "Sessions", icon: Radio },
+  { to: "/agents", label: "Agents", icon: Bot },
+  { to: "/live-feed", label: "Live Feed", icon: Rss },
+  { to: "/escrow", label: "Escrow", icon: Lock },
+  { to: "/budget", label: "Budget", icon: Wallet },
+  { to: "/workflows", label: "Workflows", icon: GitBranch },
+  { to: "/streams", label: "Streams", icon: Zap },
+  { to: "/marketplace", label: "Marketplace", icon: Store },
+  { to: "/alerts", label: "Alerts", icon: ShieldAlert },
+  { to: "/chargeback", label: "Chargeback", icon: TrendingDown },
+  { to: "/certificates", label: "Certificates", icon: Shield },
+  { to: "/intelligence", label: "Intelligence", icon: Brain },
+  { to: "/health", label: "System Health", icon: Activity },
+  { to: "/api-keys", label: "API Keys", icon: Key },
+  { to: "/settings", label: "Settings", icon: Settings },
 ];
+
+const itemClass =
+  "flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors aria-selected:bg-accent aria-selected:text-accent-foreground";
+
+const groupHeadingClass =
+  "[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground";
 
 export function CommandPalette() {
   const { commandPaletteOpen, setCommandPaletteOpen, theme, toggleTheme } = useUiStore();
@@ -54,24 +82,21 @@ export function CommandPalette() {
       <div className="fixed inset-0 bg-black/60" />
 
       <Command
-        className="relative w-full max-w-lg rounded-[var(--radius-xl)] border border-[var(--border)] bg-[var(--background-elevated)] shadow-2xl"
+        className="relative w-full max-w-lg rounded-xl border bg-popover shadow-2xl"
         label="Command palette"
       >
         <Command.Input
           placeholder="Search pages, actions..."
-          className="w-full border-b border-[var(--border)] bg-transparent px-4 py-3 text-sm text-[var(--foreground)] placeholder:text-[var(--foreground-disabled)] outline-none"
+          className="w-full border-b bg-transparent px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground outline-none"
           autoFocus
         />
         <Command.List className="max-h-80 overflow-y-auto p-2">
-          <Command.Empty className="px-4 py-8 text-center text-[13px] text-[var(--foreground-muted)]">
+          <Command.Empty className="px-4 py-8 text-center text-sm text-muted-foreground">
             No results found.
           </Command.Empty>
 
           {/* Navigation */}
-          <Command.Group
-            heading="Navigate"
-            className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-[var(--foreground-muted)]"
-          >
+          <Command.Group heading="Navigate" className={groupHeadingClass}>
             {PAGES.map((page) => {
               const Icon = page.icon;
               return (
@@ -79,7 +104,7 @@ export function CommandPalette() {
                   key={page.to}
                   value={`navigate ${page.label}`}
                   onSelect={() => runAndClose(() => navigate({ to: page.to }))}
-                  className="flex cursor-pointer items-center gap-3 rounded-[var(--radius-md)] px-3 py-2 text-[13px] text-[var(--foreground-secondary)] transition-[background-color] duration-100 aria-selected:bg-[var(--background-interactive)] aria-selected:text-[var(--foreground)]"
+                  className={itemClass}
                 >
                   <Icon size={15} strokeWidth={1.8} />
                   <span>{page.label}</span>
@@ -89,14 +114,11 @@ export function CommandPalette() {
           </Command.Group>
 
           {/* Actions */}
-          <Command.Group
-            heading="Actions"
-            className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-[var(--foreground-muted)]"
-          >
+          <Command.Group heading="Actions" className={groupHeadingClass}>
             <Command.Item
               value="create api key"
               onSelect={() => runAndClose(() => navigate({ to: "/api-keys" }))}
-              className="flex cursor-pointer items-center gap-3 rounded-[var(--radius-md)] px-3 py-2 text-[13px] text-[var(--foreground-secondary)] transition-[background-color] duration-100 aria-selected:bg-[var(--background-interactive)] aria-selected:text-[var(--foreground)]"
+              className={itemClass}
             >
               <Plus size={15} strokeWidth={1.8} />
               <span>Create API Key</span>
@@ -104,7 +126,7 @@ export function CommandPalette() {
             <Command.Item
               value="register agent"
               onSelect={() => runAndClose(() => navigate({ to: "/agents" }))}
-              className="flex cursor-pointer items-center gap-3 rounded-[var(--radius-md)] px-3 py-2 text-[13px] text-[var(--foreground-secondary)] transition-[background-color] duration-100 aria-selected:bg-[var(--background-interactive)] aria-selected:text-[var(--foreground)]"
+              className={itemClass}
             >
               <Bot size={15} strokeWidth={1.8} />
               <span>Register Agent</span>
@@ -112,7 +134,7 @@ export function CommandPalette() {
             <Command.Item
               value="toggle theme dark light mode"
               onSelect={() => runAndClose(toggleTheme)}
-              className="flex cursor-pointer items-center gap-3 rounded-[var(--radius-md)] px-3 py-2 text-[13px] text-[var(--foreground-secondary)] transition-[background-color] duration-100 aria-selected:bg-[var(--background-interactive)] aria-selected:text-[var(--foreground)]"
+              className={itemClass}
             >
               {theme === "dark" ? (
                 <Sun size={15} strokeWidth={1.8} />
@@ -129,7 +151,7 @@ export function CommandPalette() {
                   toast.success("API base URL copied");
                 })
               }
-              className="flex cursor-pointer items-center gap-3 rounded-[var(--radius-md)] px-3 py-2 text-[13px] text-[var(--foreground-secondary)] transition-[background-color] duration-100 aria-selected:bg-[var(--background-interactive)] aria-selected:text-[var(--foreground)]"
+              className={itemClass}
             >
               <Copy size={15} strokeWidth={1.8} />
               <span>Copy API base URL</span>
@@ -137,7 +159,7 @@ export function CommandPalette() {
           </Command.Group>
         </Command.List>
 
-        <div className="flex items-center gap-4 border-t border-[var(--border)] px-4 py-2 text-[11px] text-[var(--foreground-disabled)]">
+        <div className="flex items-center gap-4 border-t px-4 py-2 text-xs text-muted-foreground">
           <span>
             <kbd className="font-mono">↑↓</kbd> navigate
           </span>
