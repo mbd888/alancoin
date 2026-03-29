@@ -24,55 +24,76 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
+import { Separator } from "@/components/ui/separator";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
-const NAV_ITEMS = [
-  { to: "/overview", label: "Overview", icon: LayoutDashboard },
-  { to: "/sessions", label: "Sessions", icon: Radio },
-  { to: "/agents", label: "Agents", icon: Bot },
-  { to: "/live-feed", label: "Live Feed", icon: Rss },
-  { divider: true as const },
-  { to: "/escrow", label: "Escrow", icon: Lock },
-  { to: "/budget", label: "Budget", icon: Wallet },
-  { to: "/workflows", label: "Workflows", icon: GitBranch },
-  { to: "/streams", label: "Streams", icon: Zap },
-  { to: "/marketplace", label: "Marketplace", icon: Store },
-  { divider: true as const },
-  { to: "/alerts", label: "Alerts", icon: ShieldAlert },
-  { to: "/chargeback", label: "Chargeback", icon: TrendingDown },
-  { to: "/certificates", label: "Certificates", icon: Shield },
-  { to: "/intelligence", label: "Intelligence", icon: Brain },
-  { to: "/health", label: "System Health", icon: Activity },
-  { divider: true as const },
-  { to: "/api-keys", label: "API Keys", icon: Key },
-  { divider: true as const },
-  { to: "/settings", label: "Settings", icon: Settings },
-] as const;
+interface NavGroup {
+  label: string;
+  items: { to: string; label: string; icon: typeof LayoutDashboard }[];
+}
 
-type NavItem =
-  | { to: string; label: string; icon: typeof LayoutDashboard; divider?: never }
-  | { divider: true; to?: never; label?: never; icon?: never };
+const NAV_GROUPS: NavGroup[] = [
+  {
+    label: "Core",
+    items: [
+      { to: "/overview", label: "Overview", icon: LayoutDashboard },
+      { to: "/sessions", label: "Sessions", icon: Radio },
+      { to: "/agents", label: "Agents", icon: Bot },
+      { to: "/live-feed", label: "Live Feed", icon: Rss },
+    ],
+  },
+  {
+    label: "Payments",
+    items: [
+      { to: "/escrow", label: "Escrow", icon: Lock },
+      { to: "/budget", label: "Budget", icon: Wallet },
+      { to: "/workflows", label: "Workflows", icon: GitBranch },
+      { to: "/streams", label: "Streams", icon: Zap },
+      { to: "/marketplace", label: "Marketplace", icon: Store },
+    ],
+  },
+  {
+    label: "Risk & Compliance",
+    items: [
+      { to: "/alerts", label: "Alerts", icon: ShieldAlert },
+      { to: "/chargeback", label: "Chargeback", icon: TrendingDown },
+      { to: "/certificates", label: "Certificates", icon: Shield },
+      { to: "/intelligence", label: "Intelligence", icon: Brain },
+      { to: "/health", label: "System Health", icon: Activity },
+    ],
+  },
+  {
+    label: "Access",
+    items: [
+      { to: "/api-keys", label: "API Keys", icon: Key },
+    ],
+  },
+  {
+    label: "Config",
+    items: [
+      { to: "/settings", label: "Settings", icon: Settings },
+    ],
+  },
+];
 
-export function Sidebar() {
-  const { sidebarCollapsed, toggleSidebar, theme, toggleTheme, setCommandPaletteOpen } =
+export function SidebarContent({
+  collapsed,
+  onNavigate,
+}: {
+  collapsed: boolean;
+  onNavigate?: () => void;
+}) {
+  const { toggleSidebar, theme, toggleTheme, setCommandPaletteOpen } =
     useUiStore();
   const matchRoute = useMatchRoute();
 
   return (
-    <aside
-      className={cn(
-        "fixed inset-y-0 left-0 z-30 flex flex-col border-r",
-        "bg-[var(--sidebar-bg)] border-[var(--sidebar-border)]",
-      )}
-      style={{
-        width: sidebarCollapsed ? 56 : 240,
-        transition: "width 200ms cubic-bezier(0.16, 1, 0.3, 1)",
-      }}
-    >
+    <>
       {/* Logo */}
       <div className="flex h-14 items-center gap-2 border-b border-[var(--sidebar-border)] px-4">
-        <img src="/alancoin-icon.png" alt="Alancoin" className="size-7 rounded-[var(--radius-md)]" />
-        {!sidebarCollapsed && (
-          <span className="text-sm font-semibold text-[var(--foreground)]">
+        <img src="/alancoin-icon.png" alt="Alancoin" className="size-7 rounded-md" />
+        {!collapsed && (
+          <span className="text-sm font-semibold text-foreground">
             Alancoin
           </span>
         )}
@@ -80,64 +101,84 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 overflow-y-auto px-2 py-3">
-        <ul className="flex flex-col gap-0.5">
-          {(NAV_ITEMS as readonly NavItem[]).map((item, i) => {
-            if (item.divider) {
-              return (
-                <li key={`d-${i}`} className="my-2 border-t border-[var(--border-subtle)]" />
-              );
-            }
-            const isActive = matchRoute({ to: item.to, fuzzy: true });
-            const Icon = item.icon;
-            return (
-              <li key={item.to}>
-                <Link
-                  to={item.to}
-                  className={cn(
-                    "flex items-center gap-3 rounded-[var(--radius-md)] px-3 py-1.5",
-                    "text-[13px] font-medium",
-                    "transition-[background-color,color] duration-150",
-                    isActive
-                      ? "bg-[var(--background-interactive)] text-[var(--foreground)]"
-                      : "text-[var(--foreground-muted)] hover:bg-[var(--background-interactive)] hover:text-[var(--foreground-secondary)]"
-                  )}
-                  title={sidebarCollapsed ? item.label : undefined}
-                >
-                  <Icon size={16} strokeWidth={1.8} className="shrink-0" />
-                  <span
-                    className="overflow-hidden whitespace-nowrap"
-                    style={{
-                      width: sidebarCollapsed ? 0 : "auto",
-                      opacity: sidebarCollapsed ? 0 : 1,
-                      transition: "opacity 150ms ease",
-                    }}
-                  >
-                    {item.label}
-                  </span>
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
+        <div className="flex flex-col gap-4">
+          {NAV_GROUPS.map((group, gi) => (
+            <div key={group.label}>
+              {gi > 0 && <Separator className="mb-3" />}
+              {!collapsed && (
+                <span className="mb-1 block px-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  {group.label}
+                </span>
+              )}
+              <ul className="flex flex-col gap-0.5">
+                {group.items.map((item) => {
+                  const isActive = matchRoute({ to: item.to, fuzzy: true });
+                  const Icon = item.icon;
+
+                  const link = (
+                    <Link
+                      to={item.to}
+                      onClick={onNavigate}
+                      className={cn(
+                        "flex items-center gap-3 rounded-md px-3 py-1.5",
+                        "text-sm font-medium",
+                        "transition-colors",
+                        isActive
+                          ? "bg-accent text-accent-foreground"
+                          : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                      )}
+                    >
+                      <Icon size={16} strokeWidth={1.8} className="shrink-0" />
+                      <span
+                        className="overflow-hidden whitespace-nowrap"
+                        style={{
+                          width: collapsed ? 0 : "auto",
+                          opacity: collapsed ? 0 : 1,
+                          transition: "opacity 150ms ease",
+                        }}
+                      >
+                        {item.label}
+                      </span>
+                    </Link>
+                  );
+
+                  return (
+                    <li key={item.to}>
+                      {collapsed ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>{link}</TooltipTrigger>
+                          <TooltipContent side="right">{item.label}</TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        link
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ))}
+        </div>
       </nav>
 
       {/* Footer actions */}
       <div className="flex flex-col gap-1 border-t border-[var(--sidebar-border)] px-2 py-3">
         {/* Command palette trigger */}
         <button
+          aria-label="Search"
           onClick={() => setCommandPaletteOpen(true)}
           className={cn(
-            "flex items-center gap-3 rounded-[var(--radius-md)] px-3 py-1.5",
-            "text-[12px] text-[var(--foreground-muted)]",
-            "transition-[background-color] duration-150",
-            "hover:bg-[var(--background-interactive)]"
+            "flex items-center gap-3 rounded-md px-3 py-1.5",
+            "text-xs text-muted-foreground",
+            "transition-colors",
+            "hover:bg-accent hover:text-accent-foreground"
           )}
         >
           <Command size={14} strokeWidth={1.8} className="shrink-0" />
-          {!sidebarCollapsed && (
+          {!collapsed && (
             <span className="flex items-center gap-2">
               Search
-              <kbd className="rounded border border-[var(--border)] bg-[var(--background)] px-1 py-0.5 text-[10px] font-mono">
+              <kbd className="rounded border bg-background px-1 py-0.5 text-[10px] font-mono">
                 ⌘K
               </kbd>
             </span>
@@ -146,12 +187,13 @@ export function Sidebar() {
 
         {/* Theme toggle */}
         <button
+          aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
           onClick={toggleTheme}
           className={cn(
-            "flex items-center gap-3 rounded-[var(--radius-md)] px-3 py-1.5",
-            "text-[12px] text-[var(--foreground-muted)]",
-            "transition-[background-color] duration-150",
-            "hover:bg-[var(--background-interactive)]"
+            "flex items-center gap-3 rounded-md px-3 py-1.5",
+            "text-xs text-muted-foreground",
+            "transition-colors",
+            "hover:bg-accent hover:text-accent-foreground"
           )}
         >
           {theme === "dark" ? (
@@ -159,27 +201,51 @@ export function Sidebar() {
           ) : (
             <Moon size={14} strokeWidth={1.8} className="shrink-0" />
           )}
-          {!sidebarCollapsed && <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>}
+          {!collapsed && <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>}
         </button>
 
-        {/* Collapse toggle */}
-        <button
-          onClick={toggleSidebar}
-          className={cn(
-            "flex items-center gap-3 rounded-[var(--radius-md)] px-3 py-1.5",
-            "text-[12px] text-[var(--foreground-muted)]",
-            "transition-[background-color] duration-150",
-            "hover:bg-[var(--background-interactive)]"
-          )}
-        >
-          {sidebarCollapsed ? (
-            <ChevronsRight size={14} strokeWidth={1.8} className="shrink-0" />
-          ) : (
-            <ChevronsLeft size={14} strokeWidth={1.8} className="shrink-0" />
-          )}
-          {!sidebarCollapsed && <span>Collapse</span>}
-        </button>
+        {/* Collapse toggle — desktop only */}
+        {!onNavigate && (
+          <button
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            onClick={toggleSidebar}
+            className={cn(
+              "flex items-center gap-3 rounded-md px-3 py-1.5",
+              "text-xs text-muted-foreground",
+              "transition-colors",
+              "hover:bg-accent hover:text-accent-foreground"
+            )}
+          >
+            {collapsed ? (
+              <ChevronsRight size={14} strokeWidth={1.8} className="shrink-0" />
+            ) : (
+              <ChevronsLeft size={14} strokeWidth={1.8} className="shrink-0" />
+            )}
+            {!collapsed && <span>Collapse</span>}
+          </button>
+        )}
       </div>
-    </aside>
+    </>
+  );
+}
+
+export function Sidebar() {
+  const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
+
+  return (
+    <TooltipProvider delayDuration={0}>
+      <aside
+        className={cn(
+          "hidden md:flex fixed inset-y-0 left-0 z-30 flex-col border-r",
+          "bg-[var(--sidebar-bg)] border-[var(--sidebar-border)]",
+        )}
+        style={{
+          width: sidebarCollapsed ? 56 : 240,
+          transition: "width 200ms cubic-bezier(0.16, 1, 0.3, 1)",
+        }}
+      >
+        <SidebarContent collapsed={sidebarCollapsed} />
+      </aside>
+    </TooltipProvider>
   );
 }

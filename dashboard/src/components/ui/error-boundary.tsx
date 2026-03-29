@@ -23,14 +23,14 @@ export class ErrorBoundary extends Component<Props, State> {
       if (this.props.fallback) return this.props.fallback;
       return (
         <div className="flex min-h-[400px] flex-col items-center justify-center gap-4 text-center">
-          <div className="flex size-12 items-center justify-center rounded-[var(--radius-lg)] bg-[oklch(0.18_0.03_25)]">
-            <AlertTriangle size={22} strokeWidth={1.5} className="text-[var(--color-danger)]" />
+          <div className="flex size-12 items-center justify-center rounded-lg bg-destructive/10">
+            <AlertTriangle size={22} strokeWidth={1.5} className="text-destructive" />
           </div>
           <div>
-            <h3 className="text-[14px] font-medium text-[var(--foreground)]">
+            <h3 className="text-sm font-medium text-foreground">
               Something went wrong
             </h3>
-            <p className="mt-1 max-w-sm text-[13px] text-[var(--foreground-muted)]">
+            <p className="mt-1 max-w-sm text-sm text-muted-foreground">
               {this.state.error.message}
             </p>
           </div>

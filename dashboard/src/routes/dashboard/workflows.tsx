@@ -5,6 +5,8 @@ import { Tabs } from "@/components/ui/tabs";
 import { useWorkflows } from "@/hooks/api/use-workflows";
 import { formatCurrency, relativeTime } from "@/lib/utils";
 import type { Workflow } from "@/lib/types";
+import { GitBranch } from "lucide-react";
+import { PageHeader } from "@/components/layouts/page-header";
 
 const STATUS_VARIANT: Record<string, string> = {
   open: "accent",
@@ -49,9 +51,9 @@ export function WorkflowsPage() {
       header: "Workflow",
       cell: (row) => (
         <div>
-          <span className="font-mono text-[12px]">{row.id.slice(0, 12)}...</span>
+          <span className="font-mono text-xs">{row.id.slice(0, 12)}...</span>
           {row.name && (
-            <span className="ml-2 text-[12px] text-[var(--foreground-muted)]">{row.name}</span>
+            <span className="ml-2 text-xs text-muted-foreground">{row.name}</span>
           )}
         </div>
       ),
@@ -60,7 +62,7 @@ export function WorkflowsPage() {
       id: "buyer",
       header: "Buyer",
       cell: (row) => (
-        <span className="font-mono text-[12px]">
+        <span className="font-mono text-xs">
           {row.buyerAddr.slice(0, 8)}...{row.buyerAddr.slice(-4)}
         </span>
       ),
@@ -74,13 +76,13 @@ export function WorkflowsPage() {
           : 0;
         return (
           <div className="flex items-center gap-2">
-            <div className="h-1.5 w-16 overflow-hidden rounded-full bg-[var(--color-gray-3)]">
+            <div className="h-1.5 w-16 overflow-hidden rounded-full bg-muted">
               <div
-                className="h-full rounded-full bg-[var(--color-accent-6)] transition-[width] duration-300"
+                className="h-full rounded-full bg-accent-foreground transition-[width] duration-300"
                 style={{ width: `${pct}%` }}
               />
             </div>
-            <span className="text-[12px]">
+            <span className="text-xs">
               {row.completedSteps}/{row.totalSteps}
             </span>
           </div>
@@ -92,9 +94,9 @@ export function WorkflowsPage() {
       header: "Cost",
       numeric: true,
       cell: (row) => (
-        <span className="text-[12px]">
+        <span className="text-xs">
           {formatCurrency(row.spentAmount)}
-          <span className="text-[var(--foreground-disabled)]"> / </span>
+          <span className="text-muted-foreground/50"> / </span>
           {formatCurrency(row.totalBudget)}
         </span>
       ),
@@ -112,7 +114,7 @@ export function WorkflowsPage() {
       id: "created",
       header: "Created",
       cell: (row) => (
-        <span className="text-[12px] text-[var(--foreground-muted)]">
+        <span className="text-xs text-muted-foreground">
           {relativeTime(row.createdAt)}
         </span>
       ),
@@ -121,18 +123,13 @@ export function WorkflowsPage() {
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-[var(--border)] px-8 py-5">
-        <h1 className="text-[16px] font-semibold text-[var(--foreground)]">Workflows</h1>
-        <p className="mt-0.5 text-[13px] text-[var(--foreground-muted)]">
-          Multi-agent pipeline execution and budgets
-        </p>
-      </header>
+      <PageHeader icon={GitBranch} title="Workflows" description="Multi-agent pipeline execution and budgets" />
 
-      <div className="border-b border-[var(--border)] px-8 py-3">
+      <div className="border-b px-4 md:px-8 py-3">
         <Tabs tabs={tabsWithCounts} active={statusFilter} onChange={setStatusFilter} />
       </div>
 
-      <div className="px-8 py-4">
+      <div className="px-4 md:px-8 py-4">
         <DataTable
           columns={columns}
           data={filteredWorkflows}

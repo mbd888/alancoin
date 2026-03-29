@@ -17,29 +17,29 @@ export function KpiCard({
   icon: Icon,
 }: KpiCardProps) {
   return (
-    <div className="rounded-[var(--radius-lg)] border border-[var(--border-subtle)] bg-[var(--background-elevated)] p-5">
+    <div className="rounded-lg border bg-card p-5">
       <div className="flex items-center justify-between">
-        <span className="text-[12px] font-medium text-[var(--foreground-muted)]">
+        <span className="text-xs font-medium text-muted-foreground">
           {label}
         </span>
         {Icon && (
           <Icon
             size={15}
             strokeWidth={1.5}
-            className="text-[var(--foreground-disabled)]"
+            className="text-muted-foreground/50"
           />
         )}
       </div>
-      <div className="mt-2 text-[22px] font-semibold tabular-nums text-[var(--foreground)]">
+      <div className="mt-2 text-xl font-semibold tabular-nums text-foreground">
         {value}
       </div>
       {change && (
         <span
           className={cn(
-            "mt-1 inline-block text-[12px] font-medium tabular-nums",
-            changeType === "positive" && "text-[var(--color-success)]",
-            changeType === "negative" && "text-[var(--color-danger)]",
-            changeType === "neutral" && "text-[var(--foreground-muted)]"
+            "mt-1 inline-block text-xs font-medium tabular-nums",
+            changeType === "positive" && "text-success",
+            changeType === "negative" && "text-destructive",
+            changeType === "neutral" && "text-muted-foreground"
           )}
         >
           {change}

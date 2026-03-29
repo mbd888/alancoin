@@ -5,10 +5,12 @@ interface UiState {
   sidebarCollapsed: boolean;
   theme: "dark" | "light";
   commandPaletteOpen: boolean;
+  mobileMenuOpen: boolean;
   toggleSidebar: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleTheme: () => void;
   setCommandPaletteOpen: (open: boolean) => void;
+  setMobileMenuOpen: (open: boolean) => void;
 }
 
 export const useUiStore = create<UiState>()(
@@ -17,6 +19,7 @@ export const useUiStore = create<UiState>()(
       sidebarCollapsed: false,
       theme: "dark",
       commandPaletteOpen: false,
+      mobileMenuOpen: false,
       toggleSidebar: () =>
         set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
       setSidebarCollapsed: (collapsed) =>
@@ -29,6 +32,7 @@ export const useUiStore = create<UiState>()(
           return { theme: next };
         }),
       setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
+      setMobileMenuOpen: (open) => set({ mobileMenuOpen: open }),
     }),
     {
       name: "alancoin-ui",

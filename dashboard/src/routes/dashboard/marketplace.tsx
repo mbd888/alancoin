@@ -1,10 +1,13 @@
 import { useState } from "react";
 import { DataTable, type Column } from "@/components/ui/data-table";
+import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useOffers } from "@/hooks/api/use-offers";
 import { formatCurrency, relativeTime } from "@/lib/utils";
 import type { OfferItem } from "@/lib/types";
-import { Search } from "lucide-react";
+import { Search, Store, AlertTriangle } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/layouts/page-header";
 
 const STATUS_VARIANT: Record<string, string> = {
   active: "success",
@@ -24,14 +27,14 @@ export function MarketplacePage() {
       id: "id",
       header: "Offer",
       cell: (row) => (
-        <span className="font-mono text-[12px]">{row.id.slice(0, 12)}...</span>
+        <span className="font-mono text-xs">{row.id.slice(0, 12)}...</span>
       ),
     },
     {
       id: "seller",
       header: "Seller",
       cell: (row) => (
-        <span className="font-mono text-[12px]">
+        <span className="font-mono text-xs">
           {row.sellerAddr.slice(0, 8)}...{row.sellerAddr.slice(-4)}
         </span>
       ),
@@ -53,9 +56,9 @@ export function MarketplacePage() {
       id: "capacity",
       header: "Capacity",
       cell: (row) => (
-        <span className="text-[12px]">
+        <span className="text-xs">
           {row.remainingCap}
-          <span className="text-[var(--foreground-disabled)]"> / </span>
+          <span className="text-muted-foreground/50"> / </span>
           {row.capacity}
         </span>
       ),
@@ -73,7 +76,7 @@ export function MarketplacePage() {
       id: "expires",
       header: "Expires",
       cell: (row) => (
-        <span className="text-[12px] text-[var(--foreground-muted)]">
+        <span className="text-xs text-muted-foreground">
           {relativeTime(row.expiresAt)}
         </span>
       ),
@@ -82,7 +85,7 @@ export function MarketplacePage() {
       id: "created",
       header: "Created",
       cell: (row) => (
-        <span className="text-[12px] text-[var(--foreground-muted)]">
+        <span className="text-xs text-muted-foreground">
           {relativeTime(row.createdAt)}
         </span>
       ),
@@ -91,37 +94,42 @@ export function MarketplacePage() {
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-[var(--border)] px-8 py-5">
-        <h1 className="text-[16px] font-semibold text-[var(--foreground)]">Marketplace</h1>
-        <p className="mt-0.5 text-[13px] text-[var(--foreground-muted)]">
-          Standing offers from service providers
-        </p>
-      </header>
+      <PageHeader icon={Store} title="Marketplace" description="Standing offers from service providers" />
 
       {/* Service type filter */}
-      <div className="border-b border-[var(--border)] px-8 py-3">
+      <div className="border-b px-4 md:px-8 py-3">
         <div className="relative max-w-xs">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--foreground-disabled)]" />
-          <input
-            type="text"
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/50" />
+          <Input
+            id="service-filter"
             value={serviceFilter}
             onChange={(e) => setServiceFilter(e.target.value)}
             placeholder="Filter by service type..."
-            className="w-full rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--background)] py-1.5 pl-9 pr-3 text-[13px] text-[var(--foreground)] placeholder:text-[var(--foreground-disabled)] focus:border-[var(--color-accent-7)] focus:outline-none"
+            className="pl-9"
           />
         </div>
       </div>
 
-      <div className="px-8 py-4">
-        <DataTable
-          columns={columns}
-          data={allOffers}
-          isLoading={offers.isLoading}
-          keyExtractor={(row) => row.id}
-          emptyTitle={serviceFilter ? `No offers for "${serviceFilter}"` : "No offers"}
-          emptyDescription="No standing offers found in the marketplace."
-          totalLabel={`${allOffers.length} offers`}
-        />
+      <div className="px-4 md:px-8 py-4">
+        {offers.isError ? (
+          <div className="flex items-center justify-center gap-2 rounded-lg border bg-card py-8 text-sm text-destructive">
+            <AlertTriangle size={14} />
+            Failed to load offers
+            <Button variant="ghost" size="sm" onClick={() => offers.refetch()}>
+              Retry
+            </Button>
+          </div>
+        ) : (
+          <DataTable
+            columns={columns}
+            data={allOffers}
+            isLoading={offers.isLoading}
+            keyExtractor={(row) => row.id}
+            emptyTitle={serviceFilter ? `No offers for "${serviceFilter}"` : "No offers"}
+            emptyDescription="No standing offers found in the marketplace."
+            totalLabel={`${allOffers.length} offers`}
+          />
+        )}
       </div>
     </div>
   );

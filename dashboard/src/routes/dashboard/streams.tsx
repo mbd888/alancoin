@@ -6,7 +6,9 @@ import { KpiCard } from "@/components/ui/kpi-card";
 import { useStreams } from "@/hooks/api/use-streams";
 import { formatCurrency, relativeTime } from "@/lib/utils";
 import type { StreamItem } from "@/lib/types";
-import { Radio, DollarSign, Hash, Activity } from "lucide-react";
+import { Radio, DollarSign, Hash, Zap } from "lucide-react";
+import { SkeletonCard } from "@/components/ui/skeleton";
+import { PageHeader } from "@/components/layouts/page-header";
 
 const STATUS_VARIANT: Record<string, string> = {
   open: "accent",
@@ -57,14 +59,14 @@ export function StreamsPage() {
       id: "id",
       header: "Stream",
       cell: (row) => (
-        <span className="font-mono text-[12px]">{row.id.slice(0, 12)}...</span>
+        <span className="font-mono text-xs">{row.id.slice(0, 12)}...</span>
       ),
     },
     {
       id: "buyer",
       header: "Buyer",
       cell: (row) => (
-        <span className="font-mono text-[12px]">
+        <span className="font-mono text-xs">
           {row.buyerAddr.slice(0, 8)}...{row.buyerAddr.slice(-4)}
         </span>
       ),
@@ -73,7 +75,7 @@ export function StreamsPage() {
       id: "seller",
       header: "Seller",
       cell: (row) => (
-        <span className="font-mono text-[12px]">
+        <span className="font-mono text-xs">
           {row.sellerAddr.slice(0, 8)}...{row.sellerAddr.slice(-4)}
         </span>
       ),
@@ -83,9 +85,9 @@ export function StreamsPage() {
       header: "Spent / Held",
       numeric: true,
       cell: (row) => (
-        <span className="text-[12px]">
+        <span className="text-xs">
           {formatCurrency(row.spentAmount)}
-          <span className="text-[var(--foreground-disabled)]"> / </span>
+          <span className="text-muted-foreground/50"> / </span>
           {formatCurrency(row.holdAmount)}
         </span>
       ),
@@ -115,7 +117,7 @@ export function StreamsPage() {
       id: "created",
       header: "Created",
       cell: (row) => (
-        <span className="text-[12px] text-[var(--foreground-muted)]">
+        <span className="text-xs text-muted-foreground">
           {relativeTime(row.createdAt)}
         </span>
       ),
@@ -124,24 +126,25 @@ export function StreamsPage() {
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-[var(--border)] px-8 py-5">
-        <h1 className="text-[16px] font-semibold text-[var(--foreground)]">Streams</h1>
-        <p className="mt-0.5 text-[13px] text-[var(--foreground-muted)]">
-          Streaming micropayment channels
-        </p>
-      </header>
+      <PageHeader icon={Zap} title="Streams" description="Streaming micropayment channels" />
 
-      <div className="grid grid-cols-3 gap-4 border-b border-[var(--border)] px-8 py-4">
-        <KpiCard icon={Radio} label="Active Streams" value={activeCount} />
-        <KpiCard icon={Hash} label="Total Ticks" value={totalTicks} />
-        <KpiCard icon={DollarSign} label="Total Spent" value={`$${totalSpent.toFixed(2)}`} />
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 border-b px-4 md:px-8 py-4">
+        {streams.isLoading ? (
+          Array.from({ length: 3 }).map((_, i) => <SkeletonCard key={i} />)
+        ) : (
+          <>
+            <KpiCard icon={Radio} label="Active Streams" value={activeCount} />
+            <KpiCard icon={Hash} label="Total Ticks" value={totalTicks} />
+            <KpiCard icon={DollarSign} label="Total Spent" value={`$${totalSpent.toFixed(2)}`} />
+          </>
+        )}
       </div>
 
-      <div className="border-b border-[var(--border)] px-8 py-3">
+      <div className="border-b px-4 md:px-8 py-3">
         <Tabs tabs={tabsWithCounts} active={statusFilter} onChange={setStatusFilter} />
       </div>
 
-      <div className="px-8 py-4">
+      <div className="px-4 md:px-8 py-4">
         <DataTable
           columns={columns}
           data={filteredStreams}
