@@ -260,9 +260,12 @@ func TestIntegration_WebSocketEvents(t *testing.T) {
 
 	// Connect WebSocket with API key auth
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?token=" + agentKey
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("websocket connect: %v", err)
+	}
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
 	}
 	defer conn.Close()
 
