@@ -59,7 +59,7 @@ type Session struct {
 	MaxPerRequest        string          `json:"maxPerRequest"`      // Max per single proxy call
 	TotalSpent           string          `json:"totalSpent"`         // Accumulated spend
 	RequestCount         int             `json:"requestCount"`
-	Strategy             string          `json:"strategy"`                       // cheapest, reputation, best_value
+	Strategy             string          `json:"strategy"`                       // cheapest, reputation, best_value, budget
 	AllowedTypes         []string        `json:"allowedTypes,omitempty"`         // Empty = all types allowed
 	allowedTypesSet      map[string]bool `json:"-"`                              // lazy O(1) lookup; not serialized
 	WarnAtPercent        int             `json:"warnAtPercent,omitempty"`        // Alert when remaining drops below this % (e.g., 20)
@@ -310,14 +310,15 @@ type SingleCallResult struct {
 
 // DryRunResult is the response from a dry-run policy/budget/service check.
 type DryRunResult struct {
-	Allowed      bool            `json:"allowed"`
-	PolicyResult *PolicyDecision `json:"policyResult,omitempty"`
-	BudgetOK     bool            `json:"budgetOk"`
-	Remaining    string          `json:"remaining"`
-	ServiceFound bool            `json:"serviceFound"`
-	BestPrice    string          `json:"bestPrice,omitempty"`
-	BestService  string          `json:"bestService,omitempty"`
-	DenyReason   string          `json:"denyReason,omitempty"`
+	Allowed                 bool            `json:"allowed"`
+	PolicyResult            *PolicyDecision `json:"policyResult,omitempty"`
+	BudgetOK                bool            `json:"budgetOk"`
+	Remaining               string          `json:"remaining"`
+	ServiceFound            bool            `json:"serviceFound"`
+	BestPrice               string          `json:"bestPrice,omitempty"`
+	BestService             string          `json:"bestService,omitempty"`
+	DenyReason              string          `json:"denyReason,omitempty"`
+	EstimatedCallsRemaining int             `json:"estimatedCallsRemaining,omitempty"` // remaining / best price
 }
 
 // BillingSummaryRow holds raw aggregation values from the request logs.

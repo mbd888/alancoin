@@ -242,7 +242,9 @@ func (r *HealthAwareRouter) Graph() *ProviderGraph {
 // It returns candidates ordered by the graph's shortest path (health-aware).
 func (r *HealthAwareRouter) Route(ctx context.Context, req ProxyRequest, strategy, maxPerRequest string) ([]ServiceCandidate, error) {
 	// Get base candidates from the resolver.
-	candidates, err := r.resolver.Resolve(ctx, req, strategy, maxPerRequest)
+	// Budget utilization is not available at the router level; the budget
+	// strategy's dynamic weighting is applied during initial resolution in Proxy.
+	candidates, err := r.resolver.Resolve(ctx, req, strategy, maxPerRequest, 0)
 	if err != nil {
 		return nil, err
 	}

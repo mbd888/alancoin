@@ -38,7 +38,9 @@ func (r *Resolver) WithIntelligenceRanker(ip IntelligenceProvider) *Resolver {
 
 // Resolve finds and ranks services for a proxy request.
 // Returns up to MaxRetries candidates sorted by the given strategy.
-func (r *Resolver) Resolve(ctx context.Context, req ProxyRequest, strategy, maxPerRequest string) ([]ServiceCandidate, error) {
+// budgetUtilization (0.0–1.0) is the fraction of session budget already spent;
+// it is only used by the "budget" strategy and ignored by all others.
+func (r *Resolver) Resolve(ctx context.Context, req ProxyRequest, strategy, maxPerRequest string, budgetUtilization float64) ([]ServiceCandidate, error) {
 	// Use request-level maxPrice override or session maxPerRequest
 	maxPrice := req.MaxPrice
 	if maxPrice == "" {
@@ -84,7 +86,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ProxyRequest, strategy, maxP
 	}
 
 	// Sort by strategy
-	sortCandidates(filtered, strategy)
+	sortCandidates(filtered, strategy, budgetUtilization)
 
 	// Move preferred agent to front if specified
 	if req.PreferAgent != "" {
@@ -105,7 +107,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ProxyRequest, strategy, maxP
 	return filtered, nil
 }
 
-func sortCandidates(candidates []ServiceCandidate, strategy string) {
+func sortCandidates(candidates []ServiceCandidate, strategy string, budgetUtilization float64) {
 	switch strategy {
 	case "reputation":
 		sort.Slice(candidates, func(i, j int) bool {
@@ -119,6 +121,12 @@ func sortCandidates(candidates []ServiceCandidate, strategy string) {
 		sort.Slice(candidates, func(i, j int) bool {
 			scoreI := valueScore(candidates[i])
 			scoreJ := valueScore(candidates[j])
+			return scoreI > scoreJ
+		})
+	case "budget":
+		sort.Slice(candidates, func(i, j int) bool {
+			scoreI := budgetValueScore(candidates[i], budgetUtilization)
+			scoreJ := budgetValueScore(candidates[j], budgetUtilization)
 			return scoreI > scoreJ
 		})
 	default: // "cheapest"
@@ -168,6 +176,50 @@ func valueScore(c ServiceCandidate) float64 {
 	// Cobb-Douglas: U = rep^α × (1/price)^(1-α)
 	// α = 0.65: 65% weight on reputation, 35% on price efficiency
 	const alpha = 0.65
+	return math.Pow(rep, alpha) * math.Pow(1.0/priceDollars, 1.0-alpha)
+}
+
+// budgetValueScore computes a Cobb-Douglas utility with a dynamic quality/cost
+// tradeoff that adapts to budget utilization. When the session has plenty of
+// budget remaining, it favors higher-quality (higher-reputation) providers.
+// As the budget depletes, it progressively shifts toward cheaper providers.
+//
+// The alpha parameter slides linearly:
+//
+//	utilization 0%   → α = 0.80 (strongly prefer quality)
+//	utilization 50%  → α = 0.575 (balanced)
+//	utilization 100% → α = 0.35 (strongly prefer cheapness)
+//
+// This reuses the same Cobb-Douglas framework as valueScore but makes
+// the preference dynamic rather than fixed.
+func budgetValueScore(c ServiceCandidate, utilization float64) float64 {
+	price, _ := usdc.Parse(c.Price)
+	if price == nil || price.Sign() == 0 {
+		return 0
+	}
+
+	rep := c.ReputationScore
+	if rep <= 0 {
+		return 0
+	}
+
+	priceF, _ := new(big.Float).SetInt(price).Float64()
+	if priceF <= 0 {
+		return 0
+	}
+	priceDollars := priceF / 1e6
+
+	// Clamp utilization to [0, 1].
+	if utilization < 0 {
+		utilization = 0
+	}
+	if utilization > 1 {
+		utilization = 1
+	}
+
+	// Dynamic alpha: 0.80 at 0% utilization → 0.35 at 100% utilization.
+	alpha := 0.80 - 0.45*utilization
+
 	return math.Pow(rep, alpha) * math.Pow(1.0/priceDollars, 1.0-alpha)
 }
 
