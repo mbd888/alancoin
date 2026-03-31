@@ -715,8 +715,23 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		}
 	}
 
+	// Compute budget utilization for the "budget" strategy.
+	// Include in-flight pending reservations for consistency with how the
+	// policy evaluator projects spend (lines below).
+	var budgetUtilization float64
+	if session.Strategy == "budget" {
+		totalBig, _ := usdc.Parse(session.MaxTotal)
+		spentSoFar, _ := usdc.Parse(session.TotalSpent)
+		if totalBig != nil && totalBig.Sign() > 0 && spentSoFar != nil {
+			committed := new(big.Int).Add(spentSoFar, s.getPendingSpend(session.ID))
+			totalF, _ := new(big.Float).SetInt(totalBig).Float64()
+			committedF, _ := new(big.Float).SetInt(committed).Float64()
+			budgetUtilization = committedF / totalF
+		}
+	}
+
 	// Resolve candidates
-	candidates, err := s.resolver.Resolve(ctx, req, session.Strategy, session.MaxPerRequest)
+	candidates, err := s.resolver.Resolve(ctx, req, session.Strategy, session.MaxPerRequest, budgetUtilization)
 	if err != nil {
 		s.logRequest(ctx, session.ID, session.TenantID, req.ServiceType, "", "0", "no_service", 0, err.Error())
 		unlock()
@@ -1189,8 +1204,16 @@ func (s *Service) DryRun(ctx context.Context, sessionID string, req ProxyRequest
 	result.Remaining = usdc.Format(remaining)
 	result.BudgetOK = remaining.Sign() > 0
 
+	// Compute budget utilization for the "budget" strategy.
+	var dryRunUtilization float64
+	if session.Strategy == "budget" && holdBig != nil && holdBig.Sign() > 0 && spentBig != nil {
+		totalF, _ := new(big.Float).SetInt(holdBig).Float64()
+		spentF, _ := new(big.Float).SetInt(spentBig).Float64()
+		dryRunUtilization = spentF / totalF
+	}
+
 	// Resolver check.
-	candidates, rErr := s.resolver.Resolve(ctx, req, session.Strategy, session.MaxPerRequest)
+	candidates, rErr := s.resolver.Resolve(ctx, req, session.Strategy, session.MaxPerRequest, dryRunUtilization)
 	if rErr != nil {
 		result.ServiceFound = false
 		if result.BudgetOK {
@@ -1210,6 +1233,11 @@ func (s *Service) DryRun(ctx context.Context, sessionID string, req ProxyRequest
 			result.BudgetOK = false
 			result.Allowed = false
 			result.DenyReason = "budget insufficient for cheapest service"
+		}
+		// Estimate how many more calls the remaining budget can cover at the top
+		// candidate's price. This gives agents a planning signal.
+		if ok && bestBig.Sign() > 0 {
+			result.EstimatedCallsRemaining = int(new(big.Int).Div(remaining, bestBig).Int64())
 		}
 	}
 

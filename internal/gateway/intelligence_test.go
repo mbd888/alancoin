@@ -131,7 +131,7 @@ func TestResolverWithIntelligenceBoost(t *testing.T) {
 
 	candidates, err := resolver.Resolve(context.Background(),
 		ProxyRequest{ServiceType: "inference"},
-		"reputation", "10.000000")
+		"reputation", "10.000000", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
