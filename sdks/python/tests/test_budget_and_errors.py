@@ -402,7 +402,7 @@ class TestSelectService:
     def test_single_listing_all_strategies_return_it(self):
         s = self._make_session()
         single = [make_service_listing(price="1.00", reputation_score=0.5)]
-        for strategy in ("cheapest", "reputation", "best_value"):
+        for strategy in ("cheapest", "reputation", "best_value", "budget"):
             chosen = s._select_service(single, strategy)
             assert chosen.price == "1.00"
 
