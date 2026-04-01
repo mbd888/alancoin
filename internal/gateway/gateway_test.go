@@ -3822,19 +3822,19 @@ func (m *mockWebhookEmitter) EmitSettlementFailed(agentAddr, sessionID, sellerAd
 }
 
 type mockRealtimeBroadcaster struct {
-	proxySettlements int
-	sessionsCreated  int
-	sessionsClosed   int
+	proxySettlements atomic.Int64
+	sessionsCreated  atomic.Int64
+	sessionsClosed   atomic.Int64
 }
 
 func (m *mockRealtimeBroadcaster) BroadcastProxySettlement(sessionID, buyer, seller, serviceType, amount string, latencyMs int64) {
-	m.proxySettlements++
+	m.proxySettlements.Add(1)
 }
 func (m *mockRealtimeBroadcaster) BroadcastSessionCreated(agent, sessionID, maxTotal string) {
-	m.sessionsCreated++
+	m.sessionsCreated.Add(1)
 }
 func (m *mockRealtimeBroadcaster) BroadcastSessionClosed(agent, sessionID, totalSpent, status string) {
-	m.sessionsClosed++
+	m.sessionsClosed.Add(1)
 }
 
 type mockUsageMeter struct {
@@ -5090,8 +5090,8 @@ func TestRealtimeBroadcaster_SessionLifecycle(t *testing.T) {
 	}
 	// Broadcast is async (goroutine) — give it a moment
 	time.Sleep(10 * time.Millisecond)
-	if rt.sessionsCreated != 1 {
-		t.Errorf("expected 1 session created broadcast, got %d", rt.sessionsCreated)
+	if n := rt.sessionsCreated.Load(); n != 1 {
+		t.Errorf("expected 1 session created broadcast, got %d", n)
 	}
 
 	// Close session should broadcast
@@ -5100,7 +5100,7 @@ func TestRealtimeBroadcaster_SessionLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(10 * time.Millisecond)
-	if rt.sessionsClosed != 1 {
-		t.Errorf("expected 1 session closed broadcast, got %d", rt.sessionsClosed)
+	if n := rt.sessionsClosed.Load(); n != 1 {
+		t.Errorf("expected 1 session closed broadcast, got %d", n)
 	}
 }
