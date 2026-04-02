@@ -419,7 +419,7 @@ func TestResolver_Cheapest(t *testing.T) {
 	}
 	resolver := NewResolver(reg)
 
-	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "cheapest", "2.00")
+	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "cheapest", "2.00", 0)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -437,7 +437,7 @@ func TestResolver_Reputation(t *testing.T) {
 	}
 	resolver := NewResolver(reg)
 
-	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "reputation", "2.00")
+	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "reputation", "2.00", 0)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -458,7 +458,7 @@ func TestResolver_PreferAgent(t *testing.T) {
 	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{
 		ServiceType: "test",
 		PreferAgent: "0xpreferred",
-	}, "cheapest", "2.00")
+	}, "cheapest", "2.00", 0)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestResolver_NoEndpoint(t *testing.T) {
 	}
 	resolver := NewResolver(reg)
 
-	_, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "cheapest", "2.00")
+	_, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "cheapest", "2.00", 0)
 	if err == nil {
 		t.Fatal("expected error for no services with endpoints")
 	}
@@ -2993,7 +2993,7 @@ func TestResolver_WithDiscoveryBooster(t *testing.T) {
 	booster := &testBooster{boost: 10.0}
 	resolver := NewResolver(reg).WithDiscoveryBooster(booster)
 
-	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "reputation", "5.00")
+	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "reputation", "5.00", 0)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -3023,7 +3023,7 @@ func TestResolver_WithMaxPriceOverride(t *testing.T) {
 	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{
 		ServiceType: "test",
 		MaxPrice:    "5.00",
-	}, "cheapest", "1.00")
+	}, "cheapest", "1.00", 0)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -3036,7 +3036,7 @@ func TestResolver_RegistryError(t *testing.T) {
 	reg := &mockRegistry{err: fmt.Errorf("db error")}
 	resolver := NewResolver(reg)
 
-	_, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "cheapest", "5.00")
+	_, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "cheapest", "5.00", 0)
 	if err == nil {
 		t.Fatal("expected error from registry")
 	}
@@ -3821,6 +3821,22 @@ func (m *mockWebhookEmitter) EmitSettlementFailed(agentAddr, sessionID, sellerAd
 	m.settleFailed++
 }
 
+type mockRealtimeBroadcaster struct {
+	proxySettlements atomic.Int64
+	sessionsCreated  atomic.Int64
+	sessionsClosed   atomic.Int64
+}
+
+func (m *mockRealtimeBroadcaster) BroadcastProxySettlement(sessionID, buyer, seller, serviceType, amount string, latencyMs int64) {
+	m.proxySettlements.Add(1)
+}
+func (m *mockRealtimeBroadcaster) BroadcastSessionCreated(agent, sessionID, maxTotal string) {
+	m.sessionsCreated.Add(1)
+}
+func (m *mockRealtimeBroadcaster) BroadcastSessionClosed(agent, sessionID, totalSpent, status string) {
+	m.sessionsClosed.Add(1)
+}
+
 type mockUsageMeter struct {
 	requests int
 	volumes  int
@@ -4110,6 +4126,9 @@ func TestService_WithMethods(t *testing.T) {
 	}
 	if got := svc.WithBudgetPreFlight(&mockBudgetPreFlight{}); got != svc {
 		t.Error("WithBudgetPreFlight should return same service")
+	}
+	if got := svc.WithRealtimeBroadcaster(&mockRealtimeBroadcaster{}); got != svc {
+		t.Error("WithRealtimeBroadcaster should return same service")
 	}
 	if got := svc.WithEventBus(&mockEventPublisher{}); got != svc {
 		t.Error("WithEventBus should return same service")
@@ -4525,7 +4544,7 @@ func TestResolver_BestValue(t *testing.T) {
 	}
 	resolver := NewResolver(reg)
 
-	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "best_value", "2.00")
+	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "best_value", "2.00", 0)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -4545,12 +4564,118 @@ func TestResolver_TraceRank(t *testing.T) {
 	}
 	resolver := NewResolver(reg)
 
-	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "tracerank", "2.00")
+	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "tracerank", "2.00", 0)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 	if candidates[0].AgentAddress != "0xhigh" {
 		t.Errorf("expected 0xhigh first for tracerank, got %s", candidates[0].AgentAddress)
+	}
+}
+
+func TestResolver_Budget_LowUtilization_PrefersQuality(t *testing.T) {
+	// With low budget utilization (10% spent), the budget strategy should
+	// prefer the higher-reputation provider even though it's more expensive.
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xcheap", Price: "0.10", Endpoint: "http://a", ReputationScore: 20},
+			{AgentAddress: "0xquality", Price: "1.00", Endpoint: "http://b", ReputationScore: 90},
+		},
+	}
+	resolver := NewResolver(reg)
+
+	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "budget", "2.00", 0.10)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if candidates[0].AgentAddress != "0xquality" {
+		t.Errorf("at 10%% utilization, expected quality-first, got %s (score %.2f vs %.2f)",
+			candidates[0].AgentAddress,
+			budgetValueScore(candidates[0], 0.10),
+			budgetValueScore(candidates[1], 0.10))
+	}
+}
+
+func TestResolver_Budget_HighUtilization_PrefersCheap(t *testing.T) {
+	// With high budget utilization (95% spent), the budget strategy should
+	// prefer the cheaper provider even though its reputation is lower.
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xcheap", Price: "0.10", Endpoint: "http://a", ReputationScore: 40},
+			{AgentAddress: "0xexpensive", Price: "2.00", Endpoint: "http://b", ReputationScore: 90},
+		},
+	}
+	resolver := NewResolver(reg)
+
+	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "budget", "5.00", 0.95)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if candidates[0].AgentAddress != "0xcheap" {
+		t.Errorf("at 95%% utilization, expected cheap-first, got %s (score %.2f vs %.2f)",
+			candidates[0].AgentAddress,
+			budgetValueScore(candidates[0], 0.95),
+			budgetValueScore(candidates[1], 0.95))
+	}
+}
+
+func TestResolver_Budget_MidUtilization_Balanced(t *testing.T) {
+	// At 50% utilization, the strategy is balanced — similar to best_value
+	// but with slightly different alpha (0.575 vs 0.65).
+	reg := &mockRegistry{
+		services: []ServiceCandidate{
+			{AgentAddress: "0xcheap", Price: "0.10", Endpoint: "http://a", ReputationScore: 10},
+			{AgentAddress: "0xgoodval", Price: "0.50", Endpoint: "http://b", ReputationScore: 80},
+			{AgentAddress: "0xpremium", Price: "2.00", Endpoint: "http://c", ReputationScore: 95},
+		},
+	}
+	resolver := NewResolver(reg)
+
+	candidates, err := resolver.Resolve(context.Background(), ProxyRequest{ServiceType: "test"}, "budget", "5.00", 0.50)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(candidates) != 3 {
+		t.Fatalf("expected 3 candidates, got %d", len(candidates))
+	}
+	// The "good value" candidate (decent reputation, moderate price) should rank well.
+	// Just verify the sort runs without error and produces a deterministic ordering.
+	for i := 1; i < len(candidates); i++ {
+		scoreI := budgetValueScore(candidates[i-1], 0.50)
+		scoreJ := budgetValueScore(candidates[i], 0.50)
+		if scoreI < scoreJ {
+			t.Errorf("candidate %d (score %.4f) ranked above candidate %d (score %.4f)",
+				i, scoreJ, i-1, scoreI)
+		}
+	}
+}
+
+func TestBudgetValueScore_ZeroPrice(t *testing.T) {
+	c := ServiceCandidate{Price: "0.000000", ReputationScore: 50}
+	if score := budgetValueScore(c, 0.5); score != 0 {
+		t.Errorf("expected 0 for zero price, got %f", score)
+	}
+}
+
+func TestBudgetValueScore_ZeroReputation(t *testing.T) {
+	c := ServiceCandidate{Price: "1.000000", ReputationScore: 0}
+	if score := budgetValueScore(c, 0.5); score != 0 {
+		t.Errorf("expected 0 for zero reputation, got %f", score)
+	}
+}
+
+func TestBudgetValueScore_UtilizationClamped(t *testing.T) {
+	c := ServiceCandidate{Price: "1.000000", Endpoint: "http://a", ReputationScore: 50}
+	// Utilization out of bounds should be clamped, not panic.
+	s1 := budgetValueScore(c, -0.5)
+	s2 := budgetValueScore(c, 0.0)
+	if s1 != s2 {
+		t.Errorf("negative utilization should clamp to 0: got %f vs %f", s1, s2)
+	}
+	s3 := budgetValueScore(c, 1.5)
+	s4 := budgetValueScore(c, 1.0)
+	if s3 != s4 {
+		t.Errorf("utilization >1 should clamp to 1: got %f vs %f", s3, s4)
 	}
 }
 
@@ -4943,5 +5068,39 @@ func TestService_WithHealthMonitor(t *testing.T) {
 	svc.WithHealthMonitor(hm)
 	if svc.HealthMonitor() != hm {
 		t.Error("expected health monitor set")
+	}
+}
+
+// --- RealtimeBroadcaster tests ---
+
+func TestRealtimeBroadcaster_SessionLifecycle(t *testing.T) {
+	ml := newMockLedger()
+	reg := &mockRegistry{}
+	svc := newTestService(ml, reg)
+	rt := &mockRealtimeBroadcaster{}
+	svc.WithRealtimeBroadcaster(rt)
+
+	// Create session should broadcast
+	sess, err := svc.CreateSession(context.Background(), "0xbuyer", "", CreateSessionRequest{
+		MaxTotal:      "10.000000",
+		MaxPerRequest: "5.000000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Broadcast is async (goroutine) — give it a moment
+	time.Sleep(10 * time.Millisecond)
+	if n := rt.sessionsCreated.Load(); n != 1 {
+		t.Errorf("expected 1 session created broadcast, got %d", n)
+	}
+
+	// Close session should broadcast
+	_, err = svc.CloseSession(context.Background(), sess.ID, "0xbuyer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if n := rt.sessionsClosed.Load(); n != 1 {
+		t.Errorf("expected 1 session closed broadcast, got %d", n)
 	}
 }

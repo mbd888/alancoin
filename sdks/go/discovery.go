@@ -32,7 +32,7 @@ func (c *Client) Discover(ctx context.Context, opts DiscoverOptions) ([]ServiceL
 }
 
 // DiscoverByType is a convenience method that discovers services of a specific type,
-// sorted by the given strategy (e.g., "cheapest", "reputation", "best_value").
+// sorted by the given strategy (e.g., "cheapest", "reputation", "best_value", "budget").
 func (c *Client) DiscoverByType(ctx context.Context, serviceType, sortBy string) ([]ServiceListing, error) {
 	return c.Discover(ctx, DiscoverOptions{
 		Type:   serviceType,

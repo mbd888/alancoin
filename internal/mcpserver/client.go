@@ -237,3 +237,53 @@ func (c *AlancoinClient) CallEndpoint(ctx context.Context, endpoint string, para
 
 	return json.RawMessage(respBody), nil
 }
+
+// --- Marketplace / Offers ---
+
+// ListOffers returns active standing offers, optionally filtered by service type.
+func (c *AlancoinClient) ListOffers(ctx context.Context, serviceType string, limit int) (json.RawMessage, error) {
+	q := url.Values{}
+	if serviceType != "" {
+		q.Set("type", serviceType)
+	}
+	if limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", limit))
+	}
+	return c.doRequest(ctx, http.MethodGet, "/v1/offers", q, nil)
+}
+
+// PostOffer creates a standing offer to sell a service.
+func (c *AlancoinClient) PostOffer(ctx context.Context, serviceType, price string, capacity int, description, endpoint string) (json.RawMessage, error) {
+	body := map[string]any{
+		"serviceType": serviceType,
+		"price":       price,
+		"capacity":    capacity,
+	}
+	if description != "" {
+		body["description"] = description
+	}
+	if endpoint != "" {
+		body["endpoint"] = endpoint
+	}
+	return c.Post(ctx, "/v1/offers", body)
+}
+
+// ClaimOffer claims a standing offer, locking escrow and reserving capacity.
+func (c *AlancoinClient) ClaimOffer(ctx context.Context, offerID string) (json.RawMessage, error) {
+	return c.Post(ctx, "/v1/offers/"+offerID+"/claim", nil)
+}
+
+// CancelOffer cancels the caller's standing offer.
+func (c *AlancoinClient) CancelOffer(ctx context.Context, offerID string) (json.RawMessage, error) {
+	return c.Post(ctx, "/v1/offers/"+offerID+"/cancel", nil)
+}
+
+// DeliverClaim marks a claimed offer as delivered (seller action).
+func (c *AlancoinClient) DeliverClaim(ctx context.Context, claimID string) (json.RawMessage, error) {
+	return c.Post(ctx, "/v1/claims/"+claimID+"/deliver", nil)
+}
+
+// CompleteClaim confirms delivery and releases payment to seller (buyer action).
+func (c *AlancoinClient) CompleteClaim(ctx context.Context, claimID string) (json.RawMessage, error) {
+	return c.Post(ctx, "/v1/claims/"+claimID+"/complete", nil)
+}

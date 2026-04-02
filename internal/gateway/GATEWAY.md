@@ -70,7 +70,7 @@ Hold(buyer, $5)    ConfirmHold(buyer, $0.50)    ReleaseHold(buyer, $4.00)
 {
   "maxTotal": "5.00",         // Total budget to hold
   "maxPerRequest": "1.00",    // Max per single proxy call
-  "strategy": "cheapest",     // "cheapest", "reputation", or "best_value"
+  "strategy": "cheapest",     // "cheapest", "reputation", "best_value", or "budget"
   "allowedTypes": ["translation", "inference"],  // Optional type whitelist
   "expiresInSecs": 3600       // Optional, default 1 hour
 }

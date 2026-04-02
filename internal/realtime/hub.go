@@ -49,6 +49,21 @@ const (
 	EventMilestone   EventType = "milestone"
 	EventPriceAlert  EventType = "price_alert"
 	EventCoalition   EventType = "coalition"
+
+	// Gateway session lifecycle events
+	EventSessionCreated  EventType = "session_created"
+	EventSessionClosed   EventType = "session_closed"
+	EventProxySettlement EventType = "proxy_settlement"
+
+	// Escrow lifecycle events
+	EventEscrowCreated   EventType = "escrow_created"
+	EventEscrowDelivered EventType = "escrow_delivered"
+	EventEscrowConfirmed EventType = "escrow_confirmed"
+	EventEscrowDisputed  EventType = "escrow_disputed"
+
+	// Stream lifecycle events
+	EventStreamOpened EventType = "stream_opened"
+	EventStreamClosed EventType = "stream_closed"
 )
 
 // Event represents a real-time event
@@ -288,6 +303,33 @@ func (h *Hub) BroadcastTransaction(tx map[string]interface{}) {
 func (h *Hub) BroadcastCoalition(data map[string]interface{}) {
 	h.Broadcast(&Event{
 		Type:      EventCoalition,
+		Timestamp: time.Now(),
+		Data:      data,
+	})
+}
+
+// BroadcastSessionEvent sends a gateway session lifecycle event.
+func (h *Hub) BroadcastSessionEvent(eventType EventType, data map[string]interface{}) {
+	h.Broadcast(&Event{
+		Type:      eventType,
+		Timestamp: time.Now(),
+		Data:      data,
+	})
+}
+
+// BroadcastEscrowEvent sends an escrow lifecycle event.
+func (h *Hub) BroadcastEscrowEvent(eventType EventType, data map[string]interface{}) {
+	h.Broadcast(&Event{
+		Type:      eventType,
+		Timestamp: time.Now(),
+		Data:      data,
+	})
+}
+
+// BroadcastStreamEvent sends a stream lifecycle event.
+func (h *Hub) BroadcastStreamEvent(eventType EventType, data map[string]interface{}) {
+	h.Broadcast(&Event{
+		Type:      eventType,
 		Timestamp: time.Now(),
 		Data:      data,
 	})

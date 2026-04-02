@@ -1,23 +1,27 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Dialog, DialogHeader, DialogBody, DialogFooter } from "./dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogBody, DialogFooter } from "./dialog";
 
 describe("Dialog", () => {
   it("renders nothing when closed", () => {
-    const { container } = render(
-      <Dialog open={false} onClose={() => {}}>
-        <DialogBody>Content</DialogBody>
+    render(
+      <Dialog open={false} onOpenChange={() => {}}>
+        <DialogContent>
+          <DialogBody>Content</DialogBody>
+        </DialogContent>
       </Dialog>
     );
 
-    expect(container.innerHTML).toBe("");
+    expect(screen.queryByText("Content")).not.toBeInTheDocument();
   });
 
   it("renders content when open", () => {
     render(
-      <Dialog open onClose={() => {}}>
-        <DialogBody>Hello dialog</DialogBody>
+      <Dialog open onOpenChange={() => {}}>
+        <DialogContent>
+          <DialogBody>Hello dialog</DialogBody>
+        </DialogContent>
       </Dialog>
     );
 
@@ -25,45 +29,51 @@ describe("Dialog", () => {
   });
 
   it("renders header with close button", async () => {
-    const onClose = vi.fn();
+    const onOpenChange = vi.fn();
     render(
-      <Dialog open onClose={onClose}>
-        <DialogHeader onClose={onClose}>
-          <h2>Title</h2>
-        </DialogHeader>
-        <DialogBody>Body</DialogBody>
+      <Dialog open onOpenChange={onOpenChange}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Title</DialogTitle>
+          </DialogHeader>
+          <DialogBody>Body</DialogBody>
+        </DialogContent>
       </Dialog>
     );
 
     expect(screen.getByText("Title")).toBeInTheDocument();
 
-    // Click the X button
-    const closeButtons = screen.getAllByRole("button");
-    await userEvent.click(closeButtons[0]);
-    expect(onClose).toHaveBeenCalled();
+    // Click the X close button (has sr-only "Close" text)
+    const closeButton = screen.getByRole("button", { name: "Close" });
+    await userEvent.click(closeButton);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
   it("renders footer", () => {
     render(
-      <Dialog open onClose={() => {}}>
-        <DialogFooter>
-          <button>Save</button>
-        </DialogFooter>
+      <Dialog open onOpenChange={() => {}}>
+        <DialogContent>
+          <DialogFooter>
+            <button>Save</button>
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
     );
 
     expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
   });
 
-  it("calls onClose on Escape", async () => {
-    const onClose = vi.fn();
+  it("calls onOpenChange on Escape", async () => {
+    const onOpenChange = vi.fn();
     render(
-      <Dialog open onClose={onClose}>
-        <DialogBody>Esc test</DialogBody>
+      <Dialog open onOpenChange={onOpenChange}>
+        <DialogContent>
+          <DialogBody>Esc test</DialogBody>
+        </DialogContent>
       </Dialog>
     );
 
     await userEvent.keyboard("{Escape}");
-    expect(onClose).toHaveBeenCalled();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });

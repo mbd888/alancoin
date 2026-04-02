@@ -281,8 +281,9 @@ type Service struct {
 	reputation     ReputationImpactor
 	receiptIssuer  ReceiptIssuer
 	webhookEmitter WebhookEmitter
-	trustGate      TrustGate    // KYA trust verification before escrow creation
-	bus            eventbus.Bus // event bus for settlement/dispute events (optional)
+	trustGate      TrustGate           // KYA trust verification before escrow creation
+	realtime       RealtimeBroadcaster // WebSocket event broadcasting for live dashboard
+	bus            eventbus.Bus        // event bus for settlement/dispute events (optional)
 	logger         *slog.Logger
 	locks          sync.Map // per-escrow ID locks to prevent race conditions
 }
@@ -341,6 +342,12 @@ func (s *Service) WithReceiptIssuer(r ReceiptIssuer) *Service {
 // WithWebhookEmitter adds a webhook emitter for lifecycle event notifications.
 func (s *Service) WithWebhookEmitter(e WebhookEmitter) *Service {
 	s.webhookEmitter = e
+	return s
+}
+
+// WithRealtimeBroadcaster adds WebSocket event broadcasting for live dashboard.
+func (s *Service) WithRealtimeBroadcaster(r RealtimeBroadcaster) *Service {
+	s.realtime = r
 	return s
 }
 
@@ -516,6 +523,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Escrow, error
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitEscrowCreated(escrow.BuyerAddr, escrow.ID, escrow.SellerAddr, escrow.Amount)
 	}
+	if s.realtime != nil {
+		go s.realtime.BroadcastEscrowEvent("escrow_created", escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, string(escrow.Status))
+	}
 
 	return escrow, nil
 }
@@ -560,6 +570,9 @@ func (s *Service) MarkDelivered(ctx context.Context, id, callerAddr string) (*Es
 
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitEscrowDelivered(escrow.BuyerAddr, escrow.ID, escrow.SellerAddr)
+	}
+	if s.realtime != nil {
+		go s.realtime.BroadcastEscrowEvent("escrow_delivered", escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, string(escrow.Status))
 	}
 
 	return escrow, nil
@@ -657,6 +670,9 @@ func (s *Service) Confirm(ctx context.Context, id, callerAddr string) (*Escrow, 
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitEscrowReleased(escrow.SellerAddr, escrow.ID, escrow.BuyerAddr, escrow.Amount)
 	}
+	if s.realtime != nil {
+		go s.realtime.BroadcastEscrowEvent("escrow_confirmed", escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, string(escrow.Status))
+	}
 
 	s.publishSettlementEvent(ctx, escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ServiceID)
 
@@ -734,6 +750,9 @@ func (s *Service) Dispute(ctx context.Context, id, callerAddr, reason string) (*
 
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitEscrowDisputed(escrow.SellerAddr, escrow.ID, escrow.BuyerAddr, reason)
+	}
+	if s.realtime != nil {
+		go s.realtime.BroadcastEscrowEvent("escrow_disputed", escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, string(escrow.Status))
 	}
 
 	s.publishDisputeEvent(ctx, escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, reason, escrow.ServiceID)
@@ -827,6 +846,9 @@ func (s *Service) AutoRelease(ctx context.Context, escrow *Escrow) error {
 
 	if s.webhookEmitter != nil {
 		go s.webhookEmitter.EmitEscrowReleased(escrow.SellerAddr, escrow.ID, escrow.BuyerAddr, escrow.Amount)
+	}
+	if s.realtime != nil {
+		go s.realtime.BroadcastEscrowEvent("escrow_confirmed", escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, string(escrow.Status))
 	}
 
 	s.publishSettlementEvent(ctx, escrow.ID, escrow.BuyerAddr, escrow.SellerAddr, escrow.Amount, escrow.ServiceID)

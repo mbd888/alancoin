@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Globe, Webhook, CreditCard, Shield, ExternalLink } from "lucide-react";
+import { Globe, Webhook, CreditCard, Shield, ExternalLink, Settings } from "lucide-react";
+import { PageHeader } from "@/components/layouts/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -10,15 +11,10 @@ export function SettingsPage() {
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-[var(--border)] px-8 py-5">
-        <h1 className="text-[16px] font-semibold text-[var(--foreground)]">Settings</h1>
-        <p className="mt-0.5 text-[13px] text-[var(--foreground-muted)]">
-          Manage tenant configuration
-        </p>
-      </header>
+      <PageHeader icon={Settings} title="Settings" description="Manage tenant configuration" />
 
       {/* Narrow centered column — settings layout pattern */}
-      <div className="mx-auto max-w-2xl px-8 py-8">
+      <div className="mx-auto max-w-2xl px-4 md:px-8 py-8">
         {/* General section */}
         <SettingsSection
           icon={Globe}
@@ -47,12 +43,12 @@ export function SettingsPage() {
             <Badge variant="accent">Pro</Badge>
           </SettingsRow>
           <SettingsRow label="Take Rate" description="Fee applied to settled transactions">
-            <span className="tabular-nums text-[13px] text-[var(--foreground-secondary)]">
+            <span className="tabular-nums text-sm text-muted-foreground">
               250 bps (2.5%)
             </span>
           </SettingsRow>
           <SettingsRow label="Tenant ID" description="Use this in API calls">
-            <code className="rounded-[var(--radius-sm)] bg-[var(--background-interactive)] px-2 py-1 font-mono text-[12px] text-[var(--foreground-secondary)]">
+            <code className="rounded-sm bg-accent px-2 py-1 font-mono text-xs text-muted-foreground">
               ten_default
             </code>
           </SettingsRow>
@@ -66,12 +62,12 @@ export function SettingsPage() {
           title="Webhooks"
           description="Get notified when events happen in your account."
         >
-          <div className="rounded-[var(--radius-lg)] border border-dashed border-[var(--border)] bg-[var(--background)] px-4 py-6 text-center">
-            <Webhook size={20} strokeWidth={1.5} className="mx-auto text-[var(--foreground-disabled)]" />
-            <p className="mt-2 text-[13px] text-[var(--foreground-muted)]">
+          <div className="rounded-lg border border-dashed bg-background px-4 py-6 text-center">
+            <Webhook size={20} strokeWidth={1.5} className="mx-auto text-muted-foreground/50" />
+            <p className="mt-2 text-sm text-muted-foreground">
               No webhooks configured
             </p>
-            <p className="mt-1 text-[12px] text-[var(--foreground-disabled)]">
+            <p className="mt-1 text-xs text-muted-foreground/50">
               Receive real-time notifications for session events, settlements, and policy denials.
             </p>
             <Button variant="secondary" size="sm" className="mt-4">
@@ -91,11 +87,11 @@ export function SettingsPage() {
           <SettingsRow label="Current Plan" description="Your active subscription">
             <div className="flex items-center gap-2">
               <Badge variant="accent">Pro</Badge>
-              <span className="text-[12px] text-[var(--foreground-muted)]">$49/mo</span>
+              <span className="text-xs text-muted-foreground">$49/mo</span>
             </div>
           </SettingsRow>
           <SettingsRow label="Payment Method" description="Card on file">
-            <span className="text-[13px] text-[var(--foreground-secondary)]">
+            <span className="text-sm text-muted-foreground">
               &bull;&bull;&bull;&bull; 4242
             </span>
           </SettingsRow>
@@ -119,7 +115,7 @@ export function SettingsPage() {
           description="Authentication and access control settings."
         >
           <SettingsRow label="CORS Origins" description="Allowed origins for browser API calls">
-            <code className="rounded-[var(--radius-sm)] bg-[var(--background-interactive)] px-2 py-1 font-mono text-[12px] text-[var(--foreground-secondary)]">
+            <code className="rounded-sm bg-accent px-2 py-1 font-mono text-xs text-muted-foreground">
               *
             </code>
           </SettingsRow>
@@ -127,7 +123,7 @@ export function SettingsPage() {
             label="Rate Limit"
             description="Max requests per minute per API key"
           >
-            <span className="tabular-nums text-[13px] text-[var(--foreground-secondary)]">
+            <span className="tabular-nums text-sm text-muted-foreground">
               1,000 req/min
             </span>
           </SettingsRow>
@@ -137,17 +133,17 @@ export function SettingsPage() {
 
         {/* Danger zone */}
         <section>
-          <h2 className="text-[14px] font-medium text-[var(--color-danger)]">Danger Zone</h2>
-          <p className="mt-1 text-[12px] text-[var(--foreground-muted)]">
+          <h2 className="text-sm font-medium text-destructive">Danger Zone</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
             Irreversible actions. Proceed with caution.
           </p>
-          <div className="mt-4 rounded-[var(--radius-lg)] border border-[oklch(0.30_0.06_25)] bg-[oklch(0.15_0.02_25)] p-4">
+          <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-[13px] font-medium text-[var(--foreground)]">
+                <p className="text-sm font-medium text-foreground">
                   Delete tenant
                 </p>
-                <p className="mt-0.5 text-[12px] text-[var(--foreground-muted)]">
+                <p className="mt-0.5 text-xs text-muted-foreground">
                   Permanently delete this tenant and all associated data.
                 </p>
               </div>
@@ -176,10 +172,10 @@ function SettingsSection({
   return (
     <section>
       <div className="flex items-center gap-2">
-        <Icon size={15} strokeWidth={1.8} className="text-[var(--foreground-muted)]" />
-        <h2 className="text-[14px] font-medium text-[var(--foreground)]">{title}</h2>
+        <Icon size={15} strokeWidth={1.8} className="text-muted-foreground" />
+        <h2 className="text-sm font-medium text-foreground">{title}</h2>
       </div>
-      <p className="mt-1 text-[12px] text-[var(--foreground-muted)]">{description}</p>
+      <p className="mt-1 text-xs text-muted-foreground">{description}</p>
       <div className="mt-5 flex flex-col gap-5">{children}</div>
     </section>
   );
@@ -197,8 +193,8 @@ function SettingsRow({
   return (
     <div className="flex items-start justify-between gap-8">
       <div>
-        <span className="text-[13px] font-medium text-[var(--foreground)]">{label}</span>
-        <p className="mt-0.5 text-[12px] text-[var(--foreground-muted)]">{description}</p>
+        <span className="text-sm font-medium text-foreground">{label}</span>
+        <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>
       </div>
       <div className="shrink-0">{children}</div>
     </div>
@@ -206,5 +202,5 @@ function SettingsRow({
 }
 
 function Divider() {
-  return <hr className="my-8 border-[var(--border-subtle)]" />;
+  return <hr className="my-8 border-border" />;
 }

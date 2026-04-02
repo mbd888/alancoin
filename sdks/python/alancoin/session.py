@@ -316,7 +316,7 @@ class BudgetSession:
         Args:
             service_type: Type of service ("translation", "inference", etc.).
             max_price: Max price in USDC (defaults to budget's max_per_tx).
-            prefer: Selection strategy - "cheapest", "reputation", or "best_value".
+            prefer: Selection strategy - "cheapest", "reputation", "best_value", or "budget".
             escrow: If True (default), use escrow for buyer protection.
                     If False, use direct fire-and-forget payment.
             **params: Parameters forwarded to the service endpoint.
@@ -828,12 +828,15 @@ class BudgetSession:
             cheapest: Lowest price (default).
             reputation: Highest reputation score.
             best_value: Best reputation-to-price ratio.
+            budget: Dynamic quality/cost tradeoff based on remaining budget.
+                    Server-side, this adapts as budget depletes. Client-side,
+                    falls back to best_value since utilization context is unavailable.
         """
         if not listings:
             raise AlancoinError("No services to select from", code="no_services")
         if strategy == "reputation":
             return max(listings, key=lambda s: s.reputation_score)
-        if strategy == "best_value":
+        if strategy in ("best_value", "budget"):
             def value_key(s):
                 price = Decimal(s.price) if s.price else Decimal("999")
                 if price <= 0:

@@ -13,7 +13,7 @@ export default defineConfig({
   },
   test: {
     globals: true,
-    environment: "jsdom",
+    environment: "happy-dom",
     setupFiles: ["./src/test/setup.ts"],
     css: false,
   },
@@ -39,6 +39,10 @@ export default defineConfig({
       "/v1": {
         target: "http://localhost:8080",
         changeOrigin: true,
+      },
+      "/ws": {
+        target: "ws://localhost:8080",
+        ws: true,
       },
     },
   },

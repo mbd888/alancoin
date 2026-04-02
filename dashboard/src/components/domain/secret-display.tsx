@@ -31,7 +31,7 @@ export function SecretDisplay({ value, label, className }: SecretDisplayProps) {
   return (
     <div className={cn("group flex items-center gap-2", className)}>
       {label && (
-        <span className="shrink-0 text-[12px] text-[var(--foreground-muted)]">
+        <span className="shrink-0 text-xs text-[var(--foreground-muted)]">
           {label}
         </span>
       )}
@@ -44,7 +44,7 @@ export function SecretDisplay({ value, label, className }: SecretDisplayProps) {
           "hover:border-[var(--border)]"
         )}
       >
-        <code className="select-all font-mono text-[12px] tabular-nums text-[var(--foreground-secondary)]">
+        <code className="select-all font-mono text-xs tabular-nums text-[var(--foreground-secondary)]">
           {revealed ? value : maskSecret(value)}
         </code>
         {copied ? (

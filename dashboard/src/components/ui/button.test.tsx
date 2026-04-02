@@ -30,7 +30,7 @@ describe("Button", () => {
   it("applies variant styles", () => {
     const { container } = render(<Button variant="primary">Primary</Button>);
     const btn = container.firstChild as HTMLElement;
-    expect(btn.className).toContain("text-white");
+    expect(btn.className).toContain("bg-primary");
   });
 
   it("applies size styles", () => {

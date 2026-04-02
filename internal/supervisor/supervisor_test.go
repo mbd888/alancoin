@@ -1455,10 +1455,17 @@ func TestSettleHold_Success(t *testing.T) {
 		t.Fatalf("expected %d calls, got %d: %v", len(expected), len(calls), calls)
 	}
 
-	// After settle, active holds should be back to 0
+	// After settle, hold slot is still occupied (released by ReleaseHold)
 	snap := sv.graph.GetNode("0xbuyer")
+	if snap != nil && snap.ActiveHolds != 1 {
+		t.Errorf("expected 1 active hold after settle (released by ReleaseHold), got %d", snap.ActiveHolds)
+	}
+
+	// ReleaseHold releases the slot
+	_ = sv.ReleaseHold(ctx, "0xBuyer", "0.00", "ref1")
+	snap = sv.graph.GetNode("0xbuyer")
 	if snap != nil && snap.ActiveHolds != 0 {
-		t.Errorf("expected 0 active holds after settle, got %d", snap.ActiveHolds)
+		t.Errorf("expected 0 active holds after release, got %d", snap.ActiveHolds)
 	}
 }
 

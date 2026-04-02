@@ -253,9 +253,9 @@ func (s *Supervisor) SettleHold(ctx context.Context, buyerAddr, sellerAddr, amou
 	s.recordEdge(buyerAddr, sellerAddr, amount)
 	// Persist settled amount for baseline learning (money actually moved).
 	s.persistSpend(buyerAddr, sellerAddr, amount)
-	if !s.graph.ReleaseActiveHold(buyerAddr) {
-		s.logger.Error("settle hold underflow", "agent", buyerAddr)
-	}
+	// Note: do NOT release the hold slot here. SettleHold converts held funds
+	// but the hold slot is released when ReleaseHold is called for the remaining
+	// unspent balance (gateway flow: Hold → N×SettleHold → ReleaseHold).
 	return nil
 }
 
@@ -274,9 +274,6 @@ func (s *Supervisor) SettleHoldWithFee(ctx context.Context, buyerAddr, sellerAdd
 	} else {
 		s.persistSpend(buyerAddr, sellerAddr, sellerAmount)
 	}
-	if !s.graph.ReleaseActiveHold(buyerAddr) {
-		s.logger.Error("settle hold with fee underflow", "agent", buyerAddr)
-	}
 	return nil
 }
 
@@ -286,9 +283,6 @@ func (s *Supervisor) SettleHoldWithCallback(ctx context.Context, buyerAddr, sell
 	}
 	s.recordEdge(buyerAddr, sellerAddr, amount)
 	s.persistSpend(buyerAddr, sellerAddr, amount)
-	if !s.graph.ReleaseActiveHold(buyerAddr) {
-		s.logger.Error("settle hold underflow", "agent", buyerAddr)
-	}
 	return nil
 }
 
@@ -304,9 +298,6 @@ func (s *Supervisor) SettleHoldWithFeeAndCallback(ctx context.Context, buyerAddr
 		s.persistSpend(buyerAddr, sellerAddr, usdc.Format(totalBig))
 	} else {
 		s.persistSpend(buyerAddr, sellerAddr, sellerAmount)
-	}
-	if !s.graph.ReleaseActiveHold(buyerAddr) {
-		s.logger.Error("settle hold with fee underflow", "agent", buyerAddr)
 	}
 	return nil
 }

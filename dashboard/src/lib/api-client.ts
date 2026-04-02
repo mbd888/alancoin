@@ -66,3 +66,12 @@ export const api = {
 };
 
 export { ApiError };
+
+/** Returns the active tenant ID from localStorage, env, or "default". */
+export function getTenantId(): string {
+  if (typeof window !== "undefined") {
+    const stored = localStorage.getItem("alancoin_tenant_id");
+    if (stored) return stored;
+  }
+  return import.meta.env.VITE_TENANT_ID || "default";
+}

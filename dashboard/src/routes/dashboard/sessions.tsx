@@ -1,12 +1,15 @@
-import { useState, useMemo } from "react";
-import { MoreHorizontal, Eye, XCircle, DollarSign } from "lucide-react";
+import { useState, useMemo, useEffect } from "react";
+import { MoreHorizontal, Eye, XCircle, DollarSign, Radio } from "lucide-react";
+import { PageHeader } from "@/components/layouts/page-header";
+import { useQueryClient } from "@tanstack/react-query";
 import { DataTable, type Column } from "@/components/ui/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Tabs } from "@/components/ui/tabs";
-import { DropdownMenu, DropdownItem, DropdownSeparator } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { useSessions } from "@/hooks/api/use-dashboard";
 import { formatCurrency, relativeTime } from "@/lib/utils";
 import { toast } from "sonner";
+import { useRealtimeStore } from "@/stores/realtime-store";
 import type { GatewaySession } from "@/lib/types";
 
 const STATUS_VARIANT = {
@@ -26,35 +29,36 @@ const STATUS_TABS = [
 
 function SessionActions({ session }: { session: GatewaySession }) {
   return (
-    <DropdownMenu
-      trigger={
-        <button className="rounded-[var(--radius-sm)] p-1 text-[var(--foreground-disabled)] transition-[color,background-color] duration-150 hover:bg-[var(--background-interactive)] hover:text-[var(--foreground-secondary)]">
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button aria-label="Session actions" className="rounded-sm p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground">
           <MoreHorizontal size={15} />
         </button>
-      }
-    >
-      <DropdownItem onClick={() => toast.info(`Session ${session.id.slice(0, 8)}...`)}>
-        <Eye size={13} />
-        View details
-      </DropdownItem>
-      {session.status === "active" && (
-        <>
-          <DropdownSeparator />
-          <DropdownItem danger onClick={() => toast.info("Session close coming soon")}>
-            <XCircle size={13} />
-            Close session
-          </DropdownItem>
-        </>
-      )}
-      {session.status === "exhausted" && (
-        <>
-          <DropdownSeparator />
-          <DropdownItem onClick={() => toast.info("Settlement coming soon")}>
-            <DollarSign size={13} />
-            Settle now
-          </DropdownItem>
-        </>
-      )}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onClick={() => toast.info(`Session ${session.id.slice(0, 8)}...`)}>
+          <Eye size={13} />
+          View details
+        </DropdownMenuItem>
+        {session.status === "active" && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem danger onClick={() => toast.info("Session close coming soon")}>
+              <XCircle size={13} />
+              Close session
+            </DropdownMenuItem>
+          </>
+        )}
+        {session.status === "exhausted" && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => toast.info("Settlement coming soon")}>
+              <DollarSign size={13} />
+              Settle now
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
     </DropdownMenu>
   );
 }
@@ -64,6 +68,21 @@ export function SessionsPage() {
   const [history, setHistory] = useState<string[]>([]);
   const [statusFilter, setStatusFilter] = useState("all");
   const sessions = useSessions(50, cursor);
+  const queryClient = useQueryClient();
+  const { events, connect, disconnect } = useRealtimeStore();
+
+  // Auto-refresh sessions when relevant WebSocket events arrive
+  useEffect(() => {
+    connect();
+    return () => disconnect();
+  }, [connect, disconnect]);
+
+  useEffect(() => {
+    const last = events[0];
+    if (last && (last.type === "session_created" || last.type === "session_closed" || last.type === "proxy_settlement")) {
+      queryClient.invalidateQueries({ queryKey: ["dashboard", "sessions"] });
+    }
+  }, [events, queryClient]);
 
   const filteredSessions = useMemo(() => {
     const all = sessions.data?.sessions ?? [];
@@ -91,14 +110,14 @@ export function SessionsPage() {
       id: "id",
       header: "Session",
       cell: (row) => (
-        <span className="font-mono text-[12px]">{row.id.slice(0, 12)}...</span>
+        <span className="font-mono text-xs">{row.id.slice(0, 12)}...</span>
       ),
     },
     {
       id: "agent",
       header: "Agent",
       cell: (row) => (
-        <span className="font-mono text-[12px]">
+        <span className="font-mono text-xs">
           {row.agentAddr.slice(0, 8)}...{row.agentAddr.slice(-4)}
         </span>
       ),
@@ -113,7 +132,7 @@ export function SessionsPage() {
     {
       id: "strategy",
       header: "Strategy",
-      cell: (row) => <span className="text-[12px]">{row.strategy}</span>,
+      cell: (row) => <span className="text-xs">{row.strategy}</span>,
     },
     {
       id: "budget",
@@ -125,7 +144,7 @@ export function SessionsPage() {
         const pct = Math.min((spent / total) * 100, 100);
         return (
           <div className="flex items-center gap-3">
-            <div className="h-1.5 w-16 overflow-hidden rounded-full bg-[var(--color-gray-3)]">
+            <div className="h-1.5 w-16 overflow-hidden rounded-full bg-muted">
               <div
                 className="h-full rounded-full transition-[width] duration-300"
                 style={{
@@ -139,9 +158,9 @@ export function SessionsPage() {
                 }}
               />
             </div>
-            <span className="text-[12px]">
+            <span className="text-xs">
               {formatCurrency(row.totalSpent)}
-              <span className="text-[var(--foreground-disabled)]"> / </span>
+              <span className="text-muted-foreground/50"> / </span>
               {formatCurrency(row.maxTotal)}
             </span>
           </div>
@@ -158,7 +177,7 @@ export function SessionsPage() {
       id: "created",
       header: "Created",
       cell: (row) => (
-        <span className="text-[12px] text-[var(--foreground-muted)]">
+        <span className="text-xs text-muted-foreground">
           {relativeTime(row.createdAt)}
         </span>
       ),
@@ -186,19 +205,14 @@ export function SessionsPage() {
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-[var(--border)] px-8 py-5">
-        <h1 className="text-[16px] font-semibold text-[var(--foreground)]">Sessions</h1>
-        <p className="mt-0.5 text-[13px] text-[var(--foreground-muted)]">
-          Gateway payment sessions
-        </p>
-      </header>
+      <PageHeader icon={Radio} title="Sessions" description="Gateway payment sessions" />
 
       {/* Toolbar: status filter tabs */}
-      <div className="border-b border-[var(--border)] px-8 py-3">
+      <div className="border-b px-4 md:px-8 py-3">
         <Tabs tabs={tabsWithCounts} active={statusFilter} onChange={setStatusFilter} />
       </div>
 
-      <div className="px-8 py-4">
+      <div className="px-4 md:px-8 py-4">
         <DataTable
           columns={columns}
           data={filteredSessions}

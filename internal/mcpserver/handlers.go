@@ -665,3 +665,171 @@ func getFloat(m map[string]any, keys ...string) (float64, bool) {
 	}
 	return 0, false
 }
+
+// --- Marketplace / Offers Handlers ---
+
+// HandleBrowseMarketplace lists standing offers on the marketplace.
+func (h *Handlers) HandleBrowseMarketplace(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	serviceType := req.GetString("service_type", "")
+	limit := int(req.GetFloat("limit", 20))
+
+	raw, err := h.client.ListOffers(ctx, serviceType, limit)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to browse marketplace: %v", err)), nil
+	}
+
+	var resp struct {
+		Offers []map[string]any `json:"offers"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return mcp.NewToolResultText(string(raw)), nil
+	}
+
+	if len(resp.Offers) == 0 {
+		msg := "No offers found"
+		if serviceType != "" {
+			msg += " for service type '" + serviceType + "'"
+		}
+		return mcp.NewToolResultText(msg + ". Try a different service type or check back later."), nil
+	}
+
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "Found %d marketplace offers:\n\n", len(resp.Offers))
+	for i, o := range resp.Offers {
+		id, _ := o["id"].(string)
+		seller, _ := o["sellerAddr"].(string)
+		svcType, _ := o["serviceType"].(string)
+		price, _ := o["price"].(string)
+		cap, _ := o["remainingCap"].(float64)
+		fmt.Fprintf(&buf, "%d. **%s** — %s\n", i+1, svcType, id)
+		fmt.Fprintf(&buf, "   Price: $%s USDC | Available: %.0f slots\n", price, cap)
+		if seller != "" {
+			fmt.Fprintf(&buf, "   Seller: %s\n", seller)
+		}
+		fmt.Fprintln(&buf)
+	}
+
+	return mcp.NewToolResultText(buf.String()), nil
+}
+
+// HandlePostOffer creates a standing offer to sell a service.
+func (h *Handlers) HandlePostOffer(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	serviceType := req.GetString("service_type", "")
+	if serviceType == "" {
+		return mcp.NewToolResultError("service_type is required"), nil
+	}
+	price := req.GetString("price", "")
+	if price == "" {
+		return mcp.NewToolResultError("price is required"), nil
+	}
+	capacity := int(req.GetFloat("capacity", 0))
+	if capacity <= 0 {
+		return mcp.NewToolResultError("capacity must be a positive number"), nil
+	}
+	description := req.GetString("description", "")
+	endpoint := req.GetString("endpoint", "")
+
+	raw, err := h.client.PostOffer(ctx, serviceType, price, capacity, description, endpoint)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to post offer: %v", err)), nil
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return mcp.NewToolResultText(string(raw)), nil
+	}
+
+	offer, _ := resp["offer"].(map[string]any)
+	if offer == nil {
+		offer = resp
+	}
+	id, _ := offer["id"].(string)
+
+	return mcp.NewToolResultText(fmt.Sprintf(
+		"Offer posted successfully!\n\nOffer ID: %s\nService: %s\nPrice: $%s USDC\nCapacity: %d\n\n"+
+			"Other agents can now claim this offer via claim_offer.",
+		id, serviceType, price, capacity,
+	)), nil
+}
+
+// HandleClaimOffer claims a standing offer from the marketplace.
+func (h *Handlers) HandleClaimOffer(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	offerID := req.GetString("offer_id", "")
+	if offerID == "" {
+		return mcp.NewToolResultError("offer_id is required"), nil
+	}
+
+	raw, err := h.client.ClaimOffer(ctx, offerID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to claim offer: %v", err)), nil
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return mcp.NewToolResultText(string(raw)), nil
+	}
+
+	claim, _ := resp["claim"].(map[string]any)
+	if claim == nil {
+		claim = resp
+	}
+	claimID, _ := claim["id"].(string)
+
+	return mcp.NewToolResultText(fmt.Sprintf(
+		"Offer claimed successfully!\n\nClaim ID: %s\nOffer: %s\n\n"+
+			"Your funds are held in escrow. The seller will deliver the service.\n"+
+			"After delivery, use complete_claim to release payment.",
+		claimID, offerID,
+	)), nil
+}
+
+// HandleCancelOffer cancels the caller's standing offer.
+func (h *Handlers) HandleCancelOffer(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	offerID := req.GetString("offer_id", "")
+	if offerID == "" {
+		return mcp.NewToolResultError("offer_id is required"), nil
+	}
+
+	_, err := h.client.CancelOffer(ctx, offerID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to cancel offer: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Offer %s cancelled. No new claims will be accepted.", offerID)), nil
+}
+
+// HandleDeliverClaim marks a claimed offer as delivered (seller action).
+func (h *Handlers) HandleDeliverClaim(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	claimID := req.GetString("claim_id", "")
+	if claimID == "" {
+		return mcp.NewToolResultError("claim_id is required"), nil
+	}
+
+	_, err := h.client.DeliverClaim(ctx, claimID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to mark delivery: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf(
+		"Claim %s marked as delivered. Waiting for buyer to confirm and release payment.",
+		claimID,
+	)), nil
+}
+
+// HandleCompleteClaim confirms delivery and releases payment (buyer action).
+func (h *Handlers) HandleCompleteClaim(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	claimID := req.GetString("claim_id", "")
+	if claimID == "" {
+		return mcp.NewToolResultError("claim_id is required"), nil
+	}
+
+	_, err := h.client.CompleteClaim(ctx, claimID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to complete claim: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf(
+		"Claim %s completed! Payment released from escrow to the seller.",
+		claimID,
+	)), nil
+}

@@ -110,6 +110,83 @@ export type AgentsResponse = { agents: Agent[] };
 export type DenialsResponse = { denials: DashboardDenial[]; count: number };
 export type TopServicesResponse = { services: TopService[]; count: number };
 
+export interface Escrow {
+  id: string;
+  buyerAddr: string;
+  sellerAddr: string;
+  amount: string;
+  serviceId: string;
+  status: "pending" | "delivered" | "released" | "refunded" | "expired" | "disputed" | "arbitrating";
+  autoReleaseAt: string;
+  deliveredAt?: string;
+  resolvedAt?: string;
+  disputeReason?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type EscrowsResponse = PaginatedResponse & {
+  escrows: Escrow[];
+};
+
+export interface Workflow {
+  id: string;
+  buyerAddr: string;
+  name: string;
+  totalBudget: string;
+  spentAmount: string;
+  status: "open" | "completed" | "aborted";
+  totalSteps: number;
+  completedSteps: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type WorkflowsResponse = {
+  workflows: Workflow[];
+};
+
+export interface StreamItem {
+  id: string;
+  buyerAddr: string;
+  sellerAddr: string;
+  holdAmount: string;
+  spentAmount: string;
+  pricePerTick: string;
+  tickCount: number;
+  status: "open" | "settled" | "closed";
+  createdAt: string;
+}
+
+export type StreamsResponse = {
+  streams: StreamItem[];
+  count: number;
+};
+
+export interface OfferItem {
+  id: string;
+  sellerAddr: string;
+  serviceType: string;
+  description: string;
+  price: string;
+  capacity: number;
+  remainingCap: number;
+  status: "active" | "exhausted" | "cancelled" | "expired";
+  expiresAt: string;
+  createdAt: string;
+}
+
+export type OffersResponse = {
+  offers: OfferItem[];
+  count: number;
+};
+
+export interface RealtimeEvent {
+  type: string;
+  timestamp: string;
+  data: Record<string, unknown>;
+}
+
 export interface SubsystemStatus {
   name: string;
   status: "up" | "down" | "degraded";

@@ -59,7 +59,7 @@ type Session struct {
 	MaxPerRequest        string          `json:"maxPerRequest"`      // Max per single proxy call
 	TotalSpent           string          `json:"totalSpent"`         // Accumulated spend
 	RequestCount         int             `json:"requestCount"`
-	Strategy             string          `json:"strategy"`                       // cheapest, reputation, best_value
+	Strategy             string          `json:"strategy"`                       // cheapest, reputation, best_value, budget
 	AllowedTypes         []string        `json:"allowedTypes,omitempty"`         // Empty = all types allowed
 	allowedTypesSet      map[string]bool `json:"-"`                              // lazy O(1) lookup; not serialized
 	WarnAtPercent        int             `json:"warnAtPercent,omitempty"`        // Alert when remaining drops below this % (e.g., 20)
@@ -271,6 +271,13 @@ type DiscoveryBooster interface {
 	BoostScore(ctx context.Context, tier string, baseScore float64) float64
 }
 
+// RealtimeBroadcaster pushes events to WebSocket clients for live dashboard.
+type RealtimeBroadcaster interface {
+	BroadcastProxySettlement(sessionID, buyer, seller, serviceType, amount string, latencyMs int64)
+	BroadcastSessionCreated(agent, sessionID, maxTotal string)
+	BroadcastSessionClosed(agent, sessionID, totalSpent, status string)
+}
+
 // MoneyError wraps an error with funds-state context so callers know
 // whether their money is safe and what to do next.
 type MoneyError struct {
@@ -303,14 +310,15 @@ type SingleCallResult struct {
 
 // DryRunResult is the response from a dry-run policy/budget/service check.
 type DryRunResult struct {
-	Allowed      bool            `json:"allowed"`
-	PolicyResult *PolicyDecision `json:"policyResult,omitempty"`
-	BudgetOK     bool            `json:"budgetOk"`
-	Remaining    string          `json:"remaining"`
-	ServiceFound bool            `json:"serviceFound"`
-	BestPrice    string          `json:"bestPrice,omitempty"`
-	BestService  string          `json:"bestService,omitempty"`
-	DenyReason   string          `json:"denyReason,omitempty"`
+	Allowed                 bool            `json:"allowed"`
+	PolicyResult            *PolicyDecision `json:"policyResult,omitempty"`
+	BudgetOK                bool            `json:"budgetOk"`
+	Remaining               string          `json:"remaining"`
+	ServiceFound            bool            `json:"serviceFound"`
+	BestPrice               string          `json:"bestPrice,omitempty"`
+	BestService             string          `json:"bestService,omitempty"`
+	DenyReason              string          `json:"denyReason,omitempty"`
+	EstimatedCallsRemaining int             `json:"estimatedCallsRemaining,omitempty"` // remaining / best price
 }
 
 // BillingSummaryRow holds raw aggregation values from the request logs.

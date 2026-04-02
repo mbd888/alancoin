@@ -1757,6 +1757,138 @@ class Alancoin:
         )
 
     # -------------------------------------------------------------------------
+    # Real-time event streaming
+    # -------------------------------------------------------------------------
+
+    def realtime(
+        self,
+        on_event: "Optional[Callable]" = None,
+        on_error: "Optional[Callable]" = None,
+        subscription: "Optional[Any]" = None,
+        **kwargs: "Any",
+    ) -> "Any":
+        """Create a real-time WebSocket event streaming client.
+
+        Returns a :class:`~alancoin.realtime.RealtimeClient` that must be used
+        as an async context manager::
+
+            async with client.realtime(
+                on_event=lambda e: print(e.type, e.data),
+            ) as rt:
+                await rt.wait_closed()
+
+        Requires the ``websockets`` package::
+
+            pip install alancoin[realtime]
+
+        Args:
+            on_event: Callback for each incoming event.
+            on_error: Callback on connection errors. Return True to reconnect.
+            subscription: :class:`~alancoin.realtime.RealtimeSubscription`
+                filter. Defaults to all events.
+            **kwargs: Extra arguments passed to
+                :class:`~alancoin.realtime.RealtimeClient`.
+
+        Returns:
+            RealtimeClient async context manager
+        """
+        from .realtime import RealtimeClient, RealtimeSubscription
+
+        if subscription is None:
+            subscription = RealtimeSubscription()
+
+        return RealtimeClient(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            subscription=subscription,
+            on_event=on_event,
+            on_error=on_error,
+            **kwargs,
+        )
+
+    # -------------------------------------------------------------------------
+    # Marketplace / Standing Offers
+    # -------------------------------------------------------------------------
+
+    def post_offer(
+        self,
+        service_type: str,
+        price: str,
+        capacity: int,
+        description: str = "",
+        endpoint: str = "",
+    ) -> dict:
+        """Post a standing offer to sell a service on the marketplace.
+
+        Args:
+            service_type: Type of service (e.g. "translation", "inference")
+            price: Price per claim in USDC (e.g. "1.50")
+            capacity: Total number of claims this offer accepts
+            description: Human-readable description
+            endpoint: HTTPS URL for work requests
+
+        Returns:
+            Created offer with ``id``, ``status``, and other fields.
+        """
+        body = {
+            "serviceType": service_type,
+            "price": price,
+            "capacity": capacity,
+        }
+        if description:
+            body["description"] = description
+        if endpoint:
+            body["endpoint"] = endpoint
+        return self._request("POST", "/v1/offers", json=body)
+
+    def list_offers(self, service_type: str = "", limit: int = 50) -> dict:
+        """List active offers on the marketplace, optionally filtered by service type."""
+        params = {"limit": str(limit)}
+        if service_type:
+            params["type"] = service_type
+        return self._request("GET", "/v1/offers", params=params)
+
+    def get_offer(self, offer_id: str) -> dict:
+        """Get details of a specific offer."""
+        return self._request("GET", f"/v1/offers/{offer_id}")
+
+    def list_my_offers(self, limit: int = 50) -> dict:
+        """List offers posted by the authenticated agent."""
+        return self._request("GET", f"/v1/agents/{self.address}/offers", params={"limit": str(limit)})
+
+    def cancel_offer(self, offer_id: str) -> dict:
+        """Cancel your own standing offer. Prevents new claims."""
+        return self._request("POST", f"/v1/offers/{offer_id}/cancel")
+
+    def claim_offer(self, offer_id: str) -> dict:
+        """Claim a standing offer, locking escrow and reserving capacity.
+
+        Returns:
+            Claim with ``id``, ``offerId``, ``status``, and escrow reference.
+        """
+        return self._request("POST", f"/v1/offers/{offer_id}/claim")
+
+    def get_claim(self, claim_id: str) -> dict:
+        """Get details of a specific claim."""
+        return self._request("GET", f"/v1/claims/{claim_id}")
+
+    def list_claims(self, offer_id: str, limit: int = 50) -> dict:
+        """List claims against a specific offer."""
+        return self._request("GET", f"/v1/offers/{offer_id}/claims", params={"limit": str(limit)})
+
+    def deliver_claim(self, claim_id: str) -> dict:
+        """Mark a claimed offer as delivered (seller action)."""
+        return self._request("POST", f"/v1/claims/{claim_id}/deliver")
+
+    def complete_claim(self, claim_id: str) -> dict:
+        """Confirm delivery and release payment to seller (buyer action)."""
+        return self._request("POST", f"/v1/claims/{claim_id}/complete")
+
+    def refund_claim(self, claim_id: str) -> dict:
+        """Refund a claim, returning escrowed funds to buyer."""
+        return self._request("POST", f"/v1/claims/{claim_id}/refund")
+
+    # -------------------------------------------------------------------------
     # KYA (Know Your Agent) Identity
     # -------------------------------------------------------------------------
 

@@ -415,3 +415,163 @@ func TestPostgres_ConcurrentDebits_NoOverdraft(t *testing.T) {
 	bal, _ := store.GetBalance(ctx, addr)
 	t.Logf("Final balance: available=%s, successCount=%d", bal.Available, successCount)
 }
+
+// ---------------------------------------------------------------------------
+// SettleHoldWithFee and Transfer tests (use Ledger wrapper for multi-agent ops)
+// ---------------------------------------------------------------------------
+
+func setupLedger(t *testing.T) (*Ledger, *PostgresStore, func()) {
+	t.Helper()
+	store, cleanup := setupTestDB(t)
+	l := New(store)
+	return l, store, cleanup
+}
+
+func TestPostgres_SettleHoldWithFee(t *testing.T) {
+	l, store, cleanup := setupLedger(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	buyer := "0xaaaa000000000000000000000000000000000100"
+	seller := "0xaaaa000000000000000000000000000000000101"
+	platform := "0xaaaa000000000000000000000000000000000102"
+
+	// Fund buyer
+	l.Deposit(ctx, buyer, "100.000000", "0xdeposit_shwf")
+
+	// Hold
+	if err := l.Hold(ctx, buyer, "50.000000", "hold_shwf"); err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+
+	// Settle with fee: 45 to seller, 5 to platform
+	if err := l.SettleHoldWithFee(ctx, buyer, seller, "45.000000", platform, "5.000000", "settle_shwf"); err != nil {
+		t.Fatalf("SettleHoldWithFee: %v", err)
+	}
+
+	buyerBal, _ := store.GetBalance(ctx, buyer)
+	sellerBal, _ := store.GetBalance(ctx, seller)
+	platformBal, _ := store.GetBalance(ctx, platform)
+
+	if buyerBal.Available != "50.000000" {
+		t.Errorf("buyer available: want 50.000000, got %s", buyerBal.Available)
+	}
+	if sellerBal.Available != "45.000000" {
+		t.Errorf("seller available: want 45.000000, got %s", sellerBal.Available)
+	}
+	if platformBal.Available != "5.000000" {
+		t.Errorf("platform available: want 5.000000, got %s", platformBal.Available)
+	}
+}
+
+func TestPostgres_SettleHoldWithFee_ZeroFee(t *testing.T) {
+	l, store, cleanup := setupLedger(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	buyer := "0xaaaa000000000000000000000000000000000200"
+	seller := "0xaaaa000000000000000000000000000000000201"
+	platform := "0xaaaa000000000000000000000000000000000202"
+
+	l.Deposit(ctx, buyer, "50.000000", "0xdeposit_shwf0")
+	l.Hold(ctx, buyer, "20.000000", "hold_shwf0")
+
+	if err := l.SettleHoldWithFee(ctx, buyer, seller, "20.000000", platform, "0.000000", "settle_shwf0"); err != nil {
+		t.Fatalf("SettleHoldWithFee zero fee: %v", err)
+	}
+
+	sellerBal, _ := store.GetBalance(ctx, seller)
+	if sellerBal.Available != "20.000000" {
+		t.Errorf("seller available: want 20.000000, got %s", sellerBal.Available)
+	}
+
+	// Platform should have nothing (or not exist)
+	platformBal, _ := store.GetBalance(ctx, platform)
+	if platformBal != nil && platformBal.Available != "0" && platformBal.Available != "0.000000" {
+		t.Errorf("platform should have zero balance, got %s", platformBal.Available)
+	}
+}
+
+func TestPostgres_TransferAtomicity(t *testing.T) {
+	l, store, cleanup := setupLedger(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	sender := "0xaaaa000000000000000000000000000000000300"
+	receiver := "0xaaaa000000000000000000000000000000000301"
+
+	l.Deposit(ctx, sender, "100.000000", "0xdeposit_xfer")
+
+	// Successful transfer
+	if err := l.Transfer(ctx, sender, receiver, "30.000000", "xfer_1"); err != nil {
+		t.Fatalf("Transfer: %v", err)
+	}
+
+	senderBal, _ := store.GetBalance(ctx, sender)
+	if senderBal.Available != "70.000000" {
+		t.Errorf("sender available: want 70.000000, got %s", senderBal.Available)
+	}
+
+	receiverBal, _ := store.GetBalance(ctx, receiver)
+	if receiverBal.Available != "30.000000" {
+		t.Errorf("receiver available: want 30.000000, got %s", receiverBal.Available)
+	}
+
+	// Transfer exceeding balance should fail
+	err := l.Transfer(ctx, sender, receiver, "80.000000", "xfer_fail")
+	if err == nil {
+		t.Error("Transfer exceeding balance should fail")
+	}
+
+	// Balance should be unchanged after failed transfer
+	senderBal, _ = store.GetBalance(ctx, sender)
+	if senderBal.Available != "70.000000" {
+		t.Errorf("sender available after failed transfer: want 70.000000, got %s", senderBal.Available)
+	}
+}
+
+func TestPostgres_ConcurrentSettleHold(t *testing.T) {
+	l, store, cleanup := setupLedger(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	buyer := "0xaaaa000000000000000000000000000000000400"
+	seller := "0xaaaa000000000000000000000000000000000401"
+
+	l.Deposit(ctx, buyer, "100.000000", "0xdeposit_csh")
+	l.Hold(ctx, buyer, "50.000000", "hold_csh")
+
+	// 10 goroutines each try to settle $5
+	var wg sync.WaitGroup
+	var successCount int32
+	var mu sync.Mutex
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		ref := fmt.Sprintf("settle_%d", i)
+		go func() {
+			defer wg.Done()
+			err := l.SettleHold(ctx, buyer, seller, "5.000000", ref)
+			if err == nil {
+				mu.Lock()
+				successCount++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	// All 10 should succeed (50 / 5 = 10)
+	if successCount != 10 {
+		t.Errorf("expected 10 successful settles, got %d", successCount)
+	}
+
+	sellerBal, _ := store.GetBalance(ctx, seller)
+	if sellerBal.Available != "50.000000" {
+		t.Errorf("seller available: want 50.000000, got %s", sellerBal.Available)
+	}
+
+	buyerBal, _ := store.GetBalance(ctx, buyer)
+	t.Logf("After concurrent settle: buyer pending=%s, seller available=%s, successes=%d",
+		buyerBal.Pending, sellerBal.Available, successCount)
+}
