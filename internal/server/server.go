@@ -37,6 +37,7 @@ import (
 	"github.com/mbd888/alancoin/internal/cache"
 	"github.com/mbd888/alancoin/internal/chargeback"
 	"github.com/mbd888/alancoin/internal/circuitbreaker"
+	"github.com/mbd888/alancoin/internal/compliance"
 	"github.com/mbd888/alancoin/internal/config"
 	"github.com/mbd888/alancoin/internal/contracts"
 	"github.com/mbd888/alancoin/internal/dashboard"
@@ -70,6 +71,7 @@ import (
 	"github.com/mbd888/alancoin/internal/validation"
 	"github.com/mbd888/alancoin/internal/watcher"
 	"github.com/mbd888/alancoin/internal/webhooks"
+	"github.com/mbd888/alancoin/internal/withdrawals"
 	"github.com/mbd888/alancoin/internal/workflows"
 )
 
@@ -101,6 +103,7 @@ type Server struct {
 	gatewayService         *gateway.Service
 	gatewayTimer           *gateway.Timer
 	receiptService         *receipts.Service
+	complianceService      *compliance.Service
 	reputationStore        reputation.SnapshotStore
 	reputationWorker       *reputation.Worker
 	reputationSigner       *reputation.Signer
@@ -126,6 +129,11 @@ type Server struct {
 	reconcileRunner        *reconciliation.Runner // cross-subsystem reconciliation
 	reconcileTimer         *reconciliation.Timer  // periodic reconciliation
 	depositWatcher         *watcher.Watcher       // on-chain USDC deposit watcher (optional)
+	payoutService          *usdc.PayoutService    // on-chain USDC outbound payouts (optional)
+	payoutClient           *usdc.EthClient        // tracked so server can Close() on shutdown
+	withdrawalService      *withdrawals.Service   // agent-initiated withdrawals via ledger + payouts
+	gatewayResolver        *gateway.Resolver      // stored so wireSubsystems can attach discovery boosters
+	policyEvaluator        *policy.Evaluator      // retained so compliance can attach a denial sink post-hoc
 	kyaService             *kya.Service           // KYA identity certificates
 	chargebackService      *chargeback.Service    // FinOps cost attribution
 	arbitrationService     *arbitration.Service   // Dispute resolution
@@ -326,6 +334,17 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.receiptService = receipts.NewService(receiptStore, receiptSigner)
 		s.logger.Info("receipt signing enabled (postgres)")
 
+		// Outbound USDC payouts (optional — gated by PAYOUTS_ENABLED).
+		if cfg.PayoutsEnabled {
+			payoutStore := usdc.NewPostgresPayoutStore(db)
+			if err := payoutStore.Migrate(ctx); err != nil {
+				s.logger.Warn("failed to migrate payouts table", "error", err)
+			}
+			if err := s.initPayoutService(ctx, cfg, payoutStore); err != nil {
+				s.logger.Warn("payouts disabled", "reason", err)
+			}
+		}
+
 		// Gateway with PostgreSQL store (transparent payment proxy)
 		gwStore := gateway.NewPostgresStore(db)
 		gwResolver := gateway.NewResolver(&gatewayRegistryAdapter{store: s.registry, traceRankStore: s.traceRankStore})
@@ -335,6 +354,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		}
 		gwLedger := &gatewayLedgerAdapter{s.ledgerService}
 		s.gatewayStore = gwStore
+		s.gatewayResolver = gwResolver
 		gwCB := circuitbreaker.New(s.cfg.CircuitBreakerThreshold, s.cfg.CircuitBreakerDuration)
 		if s.redisClient != nil {
 			gwCB.SetRedisBackend(s.redisClient.Client(), s.logger)
@@ -350,65 +370,6 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 
 		// Release any ledger holds orphaned by a previous crash.
 		gateway.ReconcileOrphanedHolds(ctx, db, gwLedger, s.logger)
-
-		// Wire webhook emitter into all payment subsystems.
-		s.webhookEmitter = webhooks.NewEmitter(s.webhooks, s.logger)
-		s.gatewayService.WithWebhookEmitter(s.webhookEmitter)
-		s.escrowService.WithWebhookEmitter(s.webhookEmitter)
-		s.streamService.WithWebhookEmitter(s.webhookEmitter)
-		if s.coalitionService != nil {
-			s.coalitionService.WithWebhookEmitter(s.webhookEmitter)
-			if s.realtimeHub != nil {
-				s.coalitionService.WithRealtimeBroadcaster(&coalitionRealtimeAdapter{s.realtimeHub})
-			}
-			if s.contractService != nil {
-				s.coalitionService.WithContractChecker(&coalitionContractAdapter{s.contractService})
-			}
-		}
-
-		// Wire realtime broadcasting into gateway, escrow, and streams for live dashboard events.
-		if s.realtimeHub != nil {
-			s.gatewayService.WithRealtimeBroadcaster(&gatewayRealtimeAdapter{s.realtimeHub})
-			s.escrowService.WithRealtimeBroadcaster(&escrowRealtimeAdapter{s.realtimeHub})
-			s.streamService.WithRealtimeBroadcaster(&streamRealtimeAdapter{s.realtimeHub})
-		}
-
-		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
-		if s.coalitionService != nil {
-			s.coalitionService.WithRecorder(&gatewayRecorderAdapter{s.registry})
-		}
-		if s.offerService != nil {
-			s.offerService.WithRecorder(&gatewayRecorderAdapter{s.registry})
-			s.offerService.WithRevenueAccumulator(s.revenueAccumulator)
-		}
-		s.gatewayService.WithPlatformAddress(cfg.PlatformAddress)
-
-		// Wire receipt issuer into all payment paths
-		if s.receiptService != nil {
-			rcptAdapter := &receiptIssuerAdapter{s.receiptService}
-			s.gatewayService.WithReceiptIssuer(rcptAdapter)
-			s.streamService.WithReceiptIssuer(rcptAdapter)
-			s.escrowService.WithReceiptIssuer(rcptAdapter)
-			if s.coalitionService != nil {
-				s.coalitionService.WithReceiptIssuer(rcptAdapter)
-			}
-		}
-
-		// Wire forensics into gateway for automatic anomaly detection.
-		if s.forensicsService != nil {
-			s.gatewayService.WithForensics(&forensicsGatewayAdapter{s.forensicsService})
-		}
-
-		// Wire intelligence into gateway for credit-gated escrow + dynamic fees.
-		if s.intelligenceStore != nil {
-			s.gatewayService.WithIntelligence(intelligence.NewCreditGate(s.intelligenceStore))
-		}
-
-		// Wire chargeback into gateway for automatic cost attribution + pre-flight budget check.
-		if s.chargebackService != nil {
-			s.gatewayService.WithChargeback(&chargebackGatewayAdapter{s.chargebackService})
-			s.gatewayService.WithBudgetPreFlight(&budgetPreFlightAdapter{s.chargebackService})
-		}
 
 		// Event bus: replaces fire-and-forget goroutines with durable, batched processing.
 		if s.cfg.EventBusBackend == "kafka" {
@@ -447,13 +408,6 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			s.eventBusMemory = memBus
 			s.logger.Info("event bus enabled (in-memory, 10K buffer)")
 		}
-		s.eventBus.Subscribe(eventbus.TopicSettlement, "forensics", 50, time.Second,
-			s.makeForensicsConsumer())
-		s.eventBus.Subscribe(eventbus.TopicSettlement, "chargeback", 50, time.Second,
-			s.makeChargebackConsumer())
-		s.eventBus.Subscribe(eventbus.TopicSettlement, "webhooks", 20, 500*time.Millisecond,
-			s.makeWebhookConsumer())
-		s.gatewayService.WithEventBus(&eventBusGatewayAdapter{s.eventBus})
 
 		// Subscribe to dispute/alert/kya topics with logging consumers
 		s.eventBus.Subscribe(eventbus.TopicDispute, "dispute-logger", 10, time.Second,
@@ -477,7 +431,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 				}
 				return nil
 			})
-		s.logger.Info("event bus: 6 consumers subscribed (3 settlement + 3 topic loggers)")
+		s.logger.Info("event bus: topic loggers subscribed")
 
 		// Transactional outbox: write settlement events inside the ledger transaction
 		// for exactly-once delivery. The outbox poller publishes them to the event bus.
@@ -487,68 +441,25 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 			s.logger.Info("transactional outbox enabled")
 		}
 
-		// Wire event bus into escrow and streams for settlement/dispute events
-		s.escrowService.WithBus(s.eventBus)
-		s.streamService.WithBus(s.eventBus)
-
-		// Wire revenue accumulator into all payment paths (GAP-1 fix).
-		// Records seller revenue from gateway, escrow, streams for flywheel
-		// velocity metrics and future staking/distribution.
-		s.revenueAccumulator = flywheel.NewRevenueAccumulator(s.logger)
-		s.gatewayService.WithRevenueAccumulator(s.revenueAccumulator)
-		s.escrowService.WithRevenueAccumulator(s.revenueAccumulator)
-		s.streamService.WithRevenueAccumulator(s.revenueAccumulator)
-		if s.coalitionService != nil {
-			s.coalitionService.WithRevenueAccumulator(s.revenueAccumulator)
-		}
-		s.logger.Info("revenue accumulator wired into all payment paths")
-
 		// Tenant store (PostgreSQL)
 		tenantPgStore := tenant.NewPostgresStore(db)
 		if err := tenantPgStore.Migrate(ctx); err != nil {
 			s.logger.Warn("failed to migrate tenant store", "error", err)
 		}
 		s.tenantStore = tenantPgStore
-		s.logger.Info("tenant store enabled (postgres)")
-
-		// Wire tenant settings into gateway for fee computation
-		s.gatewayService.WithTenantSettings(&gatewayTenantSettingsAdapter{s.tenantStore})
 
 		// Spend policies (PostgreSQL)
 		spendPolicyStore := policy.NewPostgresStore(db)
 		if err := spendPolicyStore.Migrate(ctx); err != nil {
 			s.logger.Warn("failed to migrate spend policy store", "error", err)
 		}
-		s.gatewayService.WithPolicyEvaluator(policy.NewEvaluator(spendPolicyStore))
 		s.policyStore = spendPolicyStore
-		s.logger.Info("spend policies enabled (postgres)")
 
-		// Reputation snapshots (PostgreSQL)
+		// Reputation, tracerank, flywheel, intelligence stores (PostgreSQL)
 		s.reputationStore = reputation.NewPostgresSnapshotStore(db)
-		s.logger.Info("reputation snapshots enabled (postgres)")
-
-		// TraceRank graph-based reputation (PostgreSQL)
 		s.traceRankStore = tracerank.NewPostgresStore(db)
-		s.logger.Info("tracerank enabled (postgres)")
-
-		// Billing provider (Stripe if configured, noop otherwise)
-		s.billingProvider = initBillingProvider(cfg, s.logger)
-		s.billingMeter = billing.NewMeter(s.billingProvider, s.logger)
-		s.gatewayService.WithUsageMeter(s.billingMeter)
-		s.gatewayTimer.WithMeter(s.billingMeter)
-		s.logger.Info("billing enabled", "provider", billingProviderName(cfg))
-
-		// Flywheel incentives (fee discounts + discovery boosts by reputation tier)
-		s.incentiveEngine = flywheel.NewIncentiveEngine()
-		s.gatewayService.WithIncentives(s.incentiveEngine)
-		gwResolver.WithDiscoveryBooster(s.incentiveEngine)
 		s.flywheelStore = flywheel.NewPostgresStore(db)
-		s.logger.Info("flywheel enabled (postgres)")
-
-		// Intelligence engine (unified agent intelligence profiles)
 		s.intelligenceStore = intelligence.NewPostgresStore(db)
-		gwResolver.WithIntelligenceRanker(intelligence.NewCreditGate(s.intelligenceStore))
-		s.logger.Info("intelligence enabled (postgres)")
 
 		// Cross-subsystem reconciliation (PostgreSQL only)
 		s.reconcileRunner = reconciliation.NewRunner(s.logger).
@@ -640,154 +551,51 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		s.receiptService = receipts.NewService(receipts.NewMemoryStore(), receiptSigner)
 		s.logger.Info("receipt signing enabled (in-memory)")
 
+		// Outbound USDC payouts (optional — gated by PAYOUTS_ENABLED).
+		if cfg.PayoutsEnabled {
+			if err := s.initPayoutService(ctx, cfg, usdc.NewMemoryPayoutStore()); err != nil {
+				s.logger.Warn("payouts disabled", "reason", err)
+			}
+		}
+
 		// Gateway with in-memory store (transparent payment proxy)
-		gwStore2 := gateway.NewMemoryStore()
-		gwResolver2 := gateway.NewResolver(&gatewayRegistryAdapter{store: s.registry, traceRankStore: s.traceRankStore})
-		gwForwarder2 := gateway.NewForwarder(0)
+		gwStore := gateway.NewMemoryStore()
+		gwResolver := gateway.NewResolver(&gatewayRegistryAdapter{store: s.registry, traceRankStore: s.traceRankStore})
+		gwForwarder := gateway.NewForwarder(0)
 		if cfg.AllowLocalEndpoints {
-			gwForwarder2 = gwForwarder2.WithAllowLocalEndpoints()
+			gwForwarder = gwForwarder.WithAllowLocalEndpoints()
 		}
-		s.gatewayStore = gwStore2
-		gwCB2 := circuitbreaker.New(s.cfg.CircuitBreakerThreshold, s.cfg.CircuitBreakerDuration)
+		s.gatewayStore = gwStore
+		s.gatewayResolver = gwResolver
+		gwCB := circuitbreaker.New(s.cfg.CircuitBreakerThreshold, s.cfg.CircuitBreakerDuration)
 		if s.redisClient != nil {
-			gwCB2.SetRedisBackend(s.redisClient.Client(), s.logger)
+			gwCB.SetRedisBackend(s.redisClient.Client(), s.logger)
 		}
-		s.gatewayService = gateway.NewService(gwStore2, gwResolver2, gwForwarder2, &gatewayLedgerAdapter{s.ledgerService}, s.logger).
-			WithCircuitBreaker(gwCB2)
+		s.gatewayService = gateway.NewService(gwStore, gwResolver, gwForwarder, &gatewayLedgerAdapter{s.ledgerService}, s.logger).
+			WithCircuitBreaker(gwCB)
 		if s.redisClient != nil {
 			s.gatewayService.WithIdempotencyStore(
 				gateway.NewRedisIdempotencyStore(s.redisClient.Client(), 10*time.Minute, s.logger))
 		}
-		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore2, s.logger)
+		s.gatewayTimer = gateway.NewTimer(s.gatewayService, gwStore, s.logger)
 		s.logger.Info("gateway enabled (in-memory)")
-
-		s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
-		if s.coalitionService != nil {
-			s.coalitionService.WithRecorder(&gatewayRecorderAdapter{s.registry})
-		}
-		if s.offerService != nil {
-			s.offerService.WithRecorder(&gatewayRecorderAdapter{s.registry})
-			s.offerService.WithRevenueAccumulator(s.revenueAccumulator)
-		}
-		s.gatewayService.WithPlatformAddress(cfg.PlatformAddress)
-
-		// Wire webhook emitter into all payment subsystems (in-memory mode).
-		s.webhookEmitter = webhooks.NewEmitter(s.webhooks, s.logger)
-		s.gatewayService.WithWebhookEmitter(s.webhookEmitter)
-		s.escrowService.WithWebhookEmitter(s.webhookEmitter)
-		s.streamService.WithWebhookEmitter(s.webhookEmitter)
-		if s.coalitionService != nil {
-			s.coalitionService.WithWebhookEmitter(s.webhookEmitter)
-			if s.realtimeHub != nil {
-				s.coalitionService.WithRealtimeBroadcaster(&coalitionRealtimeAdapter{s.realtimeHub})
-			}
-			if s.contractService != nil {
-				s.coalitionService.WithContractChecker(&coalitionContractAdapter{s.contractService})
-			}
-		}
-
-		// Wire realtime broadcasting into gateway, escrow, and streams for live dashboard events.
-		if s.realtimeHub != nil {
-			s.gatewayService.WithRealtimeBroadcaster(&gatewayRealtimeAdapter{s.realtimeHub})
-			s.escrowService.WithRealtimeBroadcaster(&escrowRealtimeAdapter{s.realtimeHub})
-			s.streamService.WithRealtimeBroadcaster(&streamRealtimeAdapter{s.realtimeHub})
-		}
-
-		// Wire receipt issuer into all payment paths
-		if s.receiptService != nil {
-			rcptAdapter := &receiptIssuerAdapter{s.receiptService}
-			s.gatewayService.WithReceiptIssuer(rcptAdapter)
-			s.streamService.WithReceiptIssuer(rcptAdapter)
-			s.escrowService.WithReceiptIssuer(rcptAdapter)
-			if s.coalitionService != nil {
-				s.coalitionService.WithReceiptIssuer(rcptAdapter)
-			}
-		}
-
-		// Wire forensics into gateway (in-memory mode).
-		if s.forensicsService != nil {
-			s.gatewayService.WithForensics(&forensicsGatewayAdapter{s.forensicsService})
-		}
-
-		// Wire intelligence into gateway (in-memory mode).
-		if s.intelligenceStore != nil {
-			s.gatewayService.WithIntelligence(intelligence.NewCreditGate(s.intelligenceStore))
-		}
-
-		// Wire chargeback into gateway (in-memory mode).
-		if s.chargebackService != nil {
-			s.gatewayService.WithChargeback(&chargebackGatewayAdapter{s.chargebackService})
-			s.gatewayService.WithBudgetPreFlight(&budgetPreFlightAdapter{s.chargebackService})
-		}
 
 		// Event bus (in-memory mode — no DB, always MemoryBus).
 		memBus := eventbus.NewMemoryBus(s.cfg.EventBusBufferSize, s.logger)
 		s.eventBus = memBus
 		s.eventBusMemory = memBus
-		s.eventBus.Subscribe(eventbus.TopicSettlement, "forensics", 50, time.Second,
-			s.makeForensicsConsumer())
-		s.eventBus.Subscribe(eventbus.TopicSettlement, "chargeback", 50, time.Second,
-			s.makeChargebackConsumer())
-		s.eventBus.Subscribe(eventbus.TopicSettlement, "webhooks", 20, 500*time.Millisecond,
-			s.makeWebhookConsumer())
-		s.gatewayService.WithEventBus(&eventBusGatewayAdapter{s.eventBus})
-		s.logger.Info("event bus enabled (in-memory, 3 consumers)")
 
-		// Wire event bus into escrow and streams (in-memory mode)
-		s.escrowService.WithBus(s.eventBus)
-		s.streamService.WithBus(s.eventBus)
-
-		// Wire revenue accumulator into all payment paths (in-memory mode).
-		s.revenueAccumulator = flywheel.NewRevenueAccumulator(s.logger)
-		s.gatewayService.WithRevenueAccumulator(s.revenueAccumulator)
-		s.escrowService.WithRevenueAccumulator(s.revenueAccumulator)
-		s.streamService.WithRevenueAccumulator(s.revenueAccumulator)
-		if s.coalitionService != nil {
-			s.coalitionService.WithRevenueAccumulator(s.revenueAccumulator)
-		}
-		s.logger.Info("revenue accumulator wired into all payment paths")
-
-		// Tenant store (in-memory)
+		// Stores (in-memory)
 		s.tenantStore = tenant.NewMemoryStore()
-		s.logger.Info("tenant store enabled (in-memory)")
-
-		// Wire tenant settings into gateway for fee computation
-		s.gatewayService.WithTenantSettings(&gatewayTenantSettingsAdapter{s.tenantStore})
-
-		// Spend policies (in-memory)
-		memPolicyStore := policy.NewMemoryStore()
-		s.gatewayService.WithPolicyEvaluator(policy.NewEvaluator(memPolicyStore))
-		s.policyStore = memPolicyStore
-		s.logger.Info("spend policies enabled (in-memory)")
-
-		// Reputation snapshots (in-memory)
+		s.policyStore = policy.NewMemoryStore()
 		s.reputationStore = reputation.NewMemorySnapshotStore()
-		s.logger.Info("reputation snapshots enabled (in-memory)")
-
-		// TraceRank graph-based reputation (in-memory)
 		s.traceRankStore = tracerank.NewMemoryStore()
-		s.logger.Info("tracerank enabled (in-memory)")
-
-		// Billing provider (Stripe if configured, noop otherwise)
-		s.billingProvider = initBillingProvider(cfg, s.logger)
-		s.billingMeter = billing.NewMeter(s.billingProvider, s.logger)
-		s.gatewayService.WithUsageMeter(s.billingMeter)
-		s.gatewayTimer.WithMeter(s.billingMeter)
-		s.logger.Info("billing enabled", "provider", billingProviderName(cfg))
-
-		// Flywheel incentives (fee discounts + discovery boosts by reputation tier)
-		s.incentiveEngine = flywheel.NewIncentiveEngine()
-		s.gatewayService.WithIncentives(s.incentiveEngine)
-		gwResolver2.WithDiscoveryBooster(s.incentiveEngine)
 		s.flywheelStore = flywheel.NewMemoryStore()
-		s.logger.Info("flywheel enabled (in-memory)")
-
-		// Intelligence engine (in-memory)
 		s.intelligenceStore = intelligence.NewMemoryStore()
-		gwResolver2.WithIntelligenceRanker(intelligence.NewCreditGate(s.intelligenceStore))
-		s.logger.Info("intelligence enabled (in-memory)")
-
 	}
+
+	// Unified cross-cutting wiring (runs once after both branches).
+	s.wireSubsystems(cfg)
 
 	// Register subsystem health checkers.
 	s.healthRegistry = health.NewRegistry()
@@ -1448,6 +1256,10 @@ func (s *Server) setupRoutes() {
 		adminOps.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAdmin())
 		adminHandler.RegisterRoutes(adminOps)
 
+		// Outbound USDC payouts (registers 503 stubs when disabled so
+		// callers can tell "disabled" from "unreachable").
+		usdc.NewPayoutHandler(s.payoutService).RegisterRoutes(adminOps)
+
 		// Event bus observability (admin-only)
 		if s.eventBus != nil {
 			adminOps.GET("/admin/eventbus/stats", func(c *gin.Context) {
@@ -1469,6 +1281,13 @@ func (s *Server) setupRoutes() {
 				})
 			}
 		}
+	}
+
+	// Agent-initiated withdrawals (authenticated agent only)
+	{
+		protectedWithdraw := v1.Group("")
+		protectedWithdraw.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		withdrawals.NewHandler(s.withdrawalService).RegisterRoutes(protectedWithdraw)
 	}
 
 	// Reputation routes (the network moat - agents build reputation over time)
@@ -1742,6 +1561,16 @@ func (s *Server) setupRoutes() {
 	if s.receiptService != nil {
 		receiptHandler := receipts.NewHandler(s.receiptService)
 		receiptHandler.RegisterRoutes(v1)
+	}
+
+	// Compliance routes (readiness, incidents, controls). Behind auth
+	// because incident details and control mutations are sensitive. The
+	// public receipt-chain endpoints above provide the tamper-evident
+	// surface for world-readable audit verification.
+	if s.complianceService != nil {
+		protectedCompliance := v1.Group("")
+		protectedCompliance.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		compliance.NewHandler(s.complianceService).RegisterRoutes(protectedCompliance)
 	}
 
 	// Timeline feed
@@ -2243,6 +2072,12 @@ drainLoop:
 	if s.depositWatcher != nil {
 		s.depositWatcher.Stop()
 		s.logger.Info("deposit watcher stopped")
+	}
+
+	// Release the payout RPC connection; safe to call when unused.
+	if s.payoutClient != nil {
+		s.payoutClient.Close()
+		s.logger.Info("payout RPC connection closed")
 	}
 
 	// Stop escrow timer
@@ -2776,6 +2611,404 @@ func (a *receiptIssuerAdapter) IssueReceipt(ctx context.Context, path, reference
 		Status:    status,
 		Metadata:  metadata,
 	})
+}
+
+// receiptsChainHeadAdapter bridges receipts.Service to compliance.ChainHeadProvider.
+// Translates the two-package boundary without forcing compliance to import receipts.
+type receiptsChainHeadAdapter struct {
+	svc *receipts.Service
+}
+
+func (a *receiptsChainHeadAdapter) GetChainHead(ctx context.Context, scope string) (*compliance.ChainHeadSnapshot, error) {
+	hash, index, ok, err := a.svc.ChainHead(ctx, scope)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	return &compliance.ChainHeadSnapshot{
+		Scope:     scope,
+		HeadHash:  hash,
+		HeadIndex: index,
+	}, nil
+}
+
+// forensicsIncidentSinkAdapter forwards every forensics alert into the
+// compliance incident store. Runs synchronously in the Ingest path, so the
+// compliance store must return quickly (in-memory and indexed-Postgres impls do).
+type forensicsIncidentSinkAdapter struct {
+	svc    *compliance.Service
+	logger *slog.Logger
+}
+
+func (a *forensicsIncidentSinkAdapter) RecordForensicsAlert(ctx context.Context, alert *forensics.Alert) {
+	if a == nil || a.svc == nil || alert == nil {
+		return
+	}
+	// Scope is empty until per-tenant context plumbing is in place;
+	// the compliance store falls back to the default scope.
+	_, err := a.svc.RecordFromAlert(ctx, compliance.IncidentInput{
+		Source:    "forensics",
+		Kind:      string(alert.Type),
+		Severity:  mapForensicsSeverity(alert.Severity),
+		AgentAddr: alert.AgentAddr,
+		Title:     alert.Message,
+		Detail: fmt.Sprintf("score=%.2f sigma=%.2f baseline=%.4f actual=%.4f",
+			alert.Score, alert.Sigma, alert.Baseline, alert.Actual),
+		OccurredAt: alert.DetectedAt,
+	})
+	if err != nil && a.logger != nil {
+		a.logger.Warn("compliance: failed to record forensics alert",
+			"alert", alert.ID, "err", err)
+	}
+}
+
+func mapForensicsSeverity(sev forensics.AlertSeverity) compliance.IncidentSeverity {
+	switch sev {
+	case forensics.SeverityCritical:
+		return compliance.SeverityCritical
+	case forensics.SeverityWarning:
+		return compliance.SeverityWarning
+	default:
+		return compliance.SeverityInfo
+	}
+}
+
+// wireSubsystems wires cross-cutting concerns into all payment subsystems.
+// Called once after both Postgres and in-memory branches have populated
+// every service and store field on the server.
+func (s *Server) wireSubsystems(cfg *config.Config) {
+	// Compliance aggregation (always in-memory incidents).
+	s.complianceService = compliance.NewService(
+		compliance.NewMemoryStore(),
+		&receiptsChainHeadAdapter{s.receiptService},
+	)
+	if s.forensicsService != nil {
+		s.forensicsService.WithIncidentSink(&forensicsIncidentSinkAdapter{
+			svc:    s.complianceService,
+			logger: s.logger,
+		})
+	}
+
+	// Webhook emitter into all payment subsystems.
+	s.webhookEmitter = webhooks.NewEmitter(s.webhooks, s.logger)
+	s.gatewayService.WithWebhookEmitter(s.webhookEmitter)
+	s.escrowService.WithWebhookEmitter(s.webhookEmitter)
+	s.streamService.WithWebhookEmitter(s.webhookEmitter)
+	if s.complianceService != nil {
+		s.complianceService.WithWebhooks(s.webhookEmitter)
+	}
+	if s.coalitionService != nil {
+		s.coalitionService.WithWebhookEmitter(s.webhookEmitter)
+		if s.realtimeHub != nil {
+			s.coalitionService.WithRealtimeBroadcaster(&coalitionRealtimeAdapter{s.realtimeHub})
+		}
+		if s.contractService != nil {
+			s.coalitionService.WithContractChecker(&coalitionContractAdapter{s.contractService})
+		}
+	}
+
+	// Realtime broadcasting into gateway, escrow, and streams.
+	if s.realtimeHub != nil {
+		s.gatewayService.WithRealtimeBroadcaster(&gatewayRealtimeAdapter{s.realtimeHub})
+		s.escrowService.WithRealtimeBroadcaster(&escrowRealtimeAdapter{s.realtimeHub})
+		s.streamService.WithRealtimeBroadcaster(&streamRealtimeAdapter{s.realtimeHub})
+	}
+
+	// Recorder + platform address.
+	s.gatewayService.WithRecorder(&gatewayRecorderAdapter{s.registry})
+	if s.coalitionService != nil {
+		s.coalitionService.WithRecorder(&gatewayRecorderAdapter{s.registry})
+	}
+	if s.offerService != nil {
+		s.offerService.WithRecorder(&gatewayRecorderAdapter{s.registry})
+	}
+	s.gatewayService.WithPlatformAddress(cfg.PlatformAddress)
+
+	// Receipt issuer into all payment paths.
+	if s.receiptService != nil {
+		rcptAdapter := &receiptIssuerAdapter{s.receiptService}
+		s.gatewayService.WithReceiptIssuer(rcptAdapter)
+		s.streamService.WithReceiptIssuer(rcptAdapter)
+		s.escrowService.WithReceiptIssuer(rcptAdapter)
+		if s.coalitionService != nil {
+			s.coalitionService.WithReceiptIssuer(rcptAdapter)
+		}
+	}
+
+	// Forensics into gateway for automatic anomaly detection.
+	if s.forensicsService != nil {
+		s.gatewayService.WithForensics(&forensicsGatewayAdapter{s.forensicsService})
+	}
+
+	// Intelligence into gateway for credit-gated escrow + dynamic fees.
+	if s.intelligenceStore != nil {
+		s.gatewayService.WithIntelligence(intelligence.NewCreditGate(s.intelligenceStore))
+	}
+
+	// Chargeback into gateway for cost attribution + pre-flight budget check.
+	if s.chargebackService != nil {
+		s.gatewayService.WithChargeback(&chargebackGatewayAdapter{s.chargebackService})
+		s.gatewayService.WithBudgetPreFlight(&budgetPreFlightAdapter{s.chargebackService})
+	}
+
+	// Event bus: settlement consumers + gateway adapter.
+	s.eventBus.Subscribe(eventbus.TopicSettlement, "forensics", 50, time.Second,
+		s.makeForensicsConsumer())
+	s.eventBus.Subscribe(eventbus.TopicSettlement, "chargeback", 50, time.Second,
+		s.makeChargebackConsumer())
+	s.eventBus.Subscribe(eventbus.TopicSettlement, "webhooks", 20, 500*time.Millisecond,
+		s.makeWebhookConsumer())
+	s.gatewayService.WithEventBus(&eventBusGatewayAdapter{s.eventBus})
+
+	// Event bus into escrow and streams.
+	s.escrowService.WithBus(s.eventBus)
+	s.streamService.WithBus(s.eventBus)
+
+	// Revenue accumulator into all payment paths.
+	s.revenueAccumulator = flywheel.NewRevenueAccumulator(s.logger)
+	s.gatewayService.WithRevenueAccumulator(s.revenueAccumulator)
+	s.escrowService.WithRevenueAccumulator(s.revenueAccumulator)
+	s.streamService.WithRevenueAccumulator(s.revenueAccumulator)
+	if s.coalitionService != nil {
+		s.coalitionService.WithRevenueAccumulator(s.revenueAccumulator)
+	}
+	if s.offerService != nil {
+		s.offerService.WithRevenueAccumulator(s.revenueAccumulator)
+	}
+
+	// Tenant settings, spend policies, billing.
+	s.gatewayService.WithTenantSettings(&gatewayTenantSettingsAdapter{s.tenantStore})
+	s.policyEvaluator = policy.NewEvaluator(s.policyStore)
+	s.gatewayService.WithPolicyEvaluator(s.policyEvaluator)
+
+	s.billingProvider = initBillingProvider(cfg, s.logger)
+	s.billingMeter = billing.NewMeter(s.billingProvider, s.logger)
+	s.gatewayService.WithUsageMeter(s.billingMeter)
+	s.gatewayTimer.WithMeter(s.billingMeter)
+
+	// Flywheel incentives (fee discounts + discovery boosts by reputation tier).
+	s.incentiveEngine = flywheel.NewIncentiveEngine()
+	s.gatewayService.WithIncentives(s.incentiveEngine)
+	if s.gatewayResolver != nil {
+		s.gatewayResolver.WithDiscoveryBooster(s.incentiveEngine)
+		if s.intelligenceStore != nil {
+			s.gatewayResolver.WithIntelligenceRanker(intelligence.NewCreditGate(s.intelligenceStore))
+		}
+	}
+
+	// Compliance denial sinks (must run after policyEvaluator is created).
+	s.wireComplianceDenialSinks()
+
+	s.logger.Info("subsystem wiring complete")
+}
+
+// wireComplianceDenialSinks attaches policy and supervisor denial sinks
+// to the compliance service. Both sinks are optional — if compliance isn't
+// initialized yet or the source subsystem doesn't exist, the call is a no-op.
+func (s *Server) wireComplianceDenialSinks() {
+	if s.complianceService == nil {
+		return
+	}
+	if s.policyEvaluator != nil {
+		s.policyEvaluator.WithDenialSink(&policyDenialSinkAdapter{
+			svc:    s.complianceService,
+			logger: s.logger,
+		})
+	}
+	if sv, ok := s.ledgerService.(*supervisor.Supervisor); ok {
+		sv.SetDenialSink(&supervisorDenialSinkAdapter{
+			svc:    s.complianceService,
+			logger: s.logger,
+		})
+	}
+}
+
+// policyDenialSinkAdapter forwards every policy denial into compliance.
+// Shadow-mode denials are kept as info-severity so operators see them in
+// the feed without paging anyone.
+type policyDenialSinkAdapter struct {
+	svc    *compliance.Service
+	logger *slog.Logger
+}
+
+func (a *policyDenialSinkAdapter) RecordPolicyDenial(ctx context.Context, tenantID, policyName, ruleType, agentAddr, reason string, shadow bool) {
+	if a == nil || a.svc == nil {
+		return
+	}
+	severity := compliance.SeverityWarning
+	if shadow {
+		severity = compliance.SeverityInfo
+	}
+	title := fmt.Sprintf("Policy %q denied request", policyName)
+	if shadow {
+		title = fmt.Sprintf("Policy %q (shadow) would deny request", policyName)
+	}
+	_, err := a.svc.RecordFromAlert(ctx, compliance.IncidentInput{
+		Scope:      tenantID,
+		Source:     "policy",
+		Kind:       ruleType,
+		Severity:   severity,
+		AgentAddr:  agentAddr,
+		Title:      title,
+		Detail:     reason,
+		OccurredAt: time.Now().UTC(),
+	})
+	if err != nil && a.logger != nil {
+		a.logger.Warn("compliance: failed to record policy denial",
+			"policy", policyName, "rule", ruleType, "err", err)
+	}
+}
+
+// supervisorDenialSinkAdapter forwards every supervisor denial into compliance
+// at warning severity (the supervisor only denies; flagged operations stay
+// on the allow path).
+type supervisorDenialSinkAdapter struct {
+	svc    *compliance.Service
+	logger *slog.Logger
+}
+
+func (a *supervisorDenialSinkAdapter) RecordSupervisorDenial(ctx context.Context, agentAddr, counterparty, amount, opType, rule, reason string) {
+	if a == nil || a.svc == nil {
+		return
+	}
+	title := fmt.Sprintf("Supervisor denied %s", opType)
+	detail := fmt.Sprintf("rule=%s counterparty=%s amount=%s reason=%s",
+		rule, counterparty, amount, reason)
+	// Supervisor is cross-tenant by design; pass empty scope and let the
+	// store resolve to the default bucket. Per-tenant attribution will
+	// arrive once tenant-aware context plumbing lands.
+	_, err := a.svc.RecordFromAlert(ctx, compliance.IncidentInput{
+		Source:     "supervisor",
+		Kind:       rule,
+		Severity:   compliance.SeverityWarning,
+		AgentAddr:  agentAddr,
+		Title:      title,
+		Detail:     detail,
+		OccurredAt: time.Now().UTC(),
+	})
+	if err != nil && a.logger != nil {
+		a.logger.Warn("compliance: failed to record supervisor denial",
+			"rule", rule, "err", err)
+	}
+}
+
+// initPayoutService dials the configured RPC and constructs a PayoutService
+// using the provided store. Returns an error — logged but not fatal — when
+// the required config is missing or the RPC is unreachable.
+func (s *Server) initPayoutService(ctx context.Context, cfg *config.Config, store usdc.PayoutStore) error {
+	if cfg.PrivateKey == "" {
+		return errors.New("PAYOUTS_ENABLED=true but PRIVATE_KEY is not set")
+	}
+	if cfg.RPCURL == "" {
+		return errors.New("PAYOUTS_ENABLED=true but RPC_URL is not set")
+	}
+	if cfg.USDCContract == "" {
+		return errors.New("PAYOUTS_ENABLED=true but USDC_CONTRACT is not set")
+	}
+
+	wallet, err := usdc.NewEthWalletFromHex(cfg.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("build wallet: %w", err)
+	}
+
+	chain := usdc.Chain{
+		ID:           cfg.ChainID,
+		Name:         fmt.Sprintf("chain-%d", cfg.ChainID),
+		RPCURL:       cfg.RPCURL,
+		USDCContract: cfg.USDCContract,
+	}
+	client, err := usdc.NewEthClient(ctx, chain)
+	if err != nil {
+		return fmt.Errorf("dial RPC: %w", err)
+	}
+
+	payoutCfg := usdc.PayoutConfig{Confirmations: cfg.PayoutConfirmations}
+	svc, err := usdc.NewPayoutService(chain, client, wallet, usdc.NewInMemoryNonceManager(), store, payoutCfg, s.logger)
+	if err != nil {
+		client.Close()
+		return fmt.Errorf("construct payout service: %w", err)
+	}
+
+	s.payoutClient = client
+	s.payoutService = svc
+	s.logger.Info("payouts enabled",
+		"chain_id", cfg.ChainID,
+		"from", wallet.Address(),
+		"usdc_contract", cfg.USDCContract,
+		"confirmations", payoutCfg.Confirmations,
+	)
+
+	// Agent-initiated withdrawals compose the ledger's Hold/Confirm/Release
+	// with this payout service. Ledger must be present — it always is in
+	// both startup paths by the time this runs.
+	if s.ledgerService != nil {
+		wsvc, err := withdrawals.NewService(
+			&ledgerWithdrawAdapter{svc: s.ledgerService},
+			&payoutsWithdrawAdapter{svc: s.payoutService},
+			s.logger,
+		)
+		if err != nil {
+			s.logger.Warn("withdrawals disabled", "reason", err)
+		} else {
+			s.withdrawalService = wsvc
+			s.logger.Info("withdrawals enabled")
+		}
+	}
+	return nil
+}
+
+// ledgerWithdrawAdapter implements withdrawals.Ledger against the ledger service.
+// ledger.Service is already an interface, so the field is a value, not a pointer.
+type ledgerWithdrawAdapter struct {
+	svc ledger.Service
+}
+
+func (a *ledgerWithdrawAdapter) Hold(ctx context.Context, agent, amount, ref string) error {
+	return a.svc.Hold(ctx, agent, amount, ref)
+}
+func (a *ledgerWithdrawAdapter) ConfirmHold(ctx context.Context, agent, amount, ref string) error {
+	return a.svc.ConfirmHold(ctx, agent, amount, ref)
+}
+func (a *ledgerWithdrawAdapter) ReleaseHold(ctx context.Context, agent, amount, ref string) error {
+	return a.svc.ReleaseHold(ctx, agent, amount, ref)
+}
+
+// payoutsWithdrawAdapter implements withdrawals.Payouts against usdc.PayoutService.
+// Translates the string-amount API into usdc's TransferRequest and projects
+// the resulting Payout into a withdrawals.Result so the withdrawals package
+// does not need to import usdc.
+type payoutsWithdrawAdapter struct {
+	svc *usdc.PayoutService
+}
+
+func (a *payoutsWithdrawAdapter) Send(ctx context.Context, to, amount, ref string) (withdrawals.Result, error) {
+	amt, ok := usdc.Parse(amount)
+	if !ok || amt == nil || amt.Sign() <= 0 {
+		return withdrawals.Result{}, fmt.Errorf("payoutsWithdrawAdapter: invalid amount %q", amount)
+	}
+	p, err := a.svc.Send(ctx, usdc.TransferRequest{
+		ChainID:   a.svc.ChainID(),
+		ToAddr:    to,
+		Amount:    amt,
+		ClientRef: ref,
+	})
+	if err != nil {
+		return withdrawals.Result{}, err
+	}
+	out := withdrawals.Result{
+		ChainID:     p.ChainID,
+		TxHash:      p.TxHash,
+		Status:      string(p.Status),
+		SubmittedAt: p.SubmittedAt,
+		FinalizedAt: p.FinalizedAt,
+		Error:       p.LastError,
+	}
+	if p.Receipt != nil {
+		out.BlockNumber = p.Receipt.BlockNumber
+	}
+	return out, nil
 }
 
 // --- Admin adapters ---
