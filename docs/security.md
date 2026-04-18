@@ -73,7 +73,7 @@ Compliance exports produce EU AI Act Article 12 technical documentation packages
 
 ## FinOps Chargeback
 
-Per-department cost attribution with real-time budget enforcement at the ledger level. Cost center monthly budgets are enforced as hard limits — spend events are rejected when the allocation is exhausted. Tenant isolation ensures each tenant can only view and manage their own cost centers. Warning thresholds trigger alerts before budget exhaustion. All budget enforcement decisions are logged for audit trail.
+Per-department cost attribution with real-time budget enforcement at the ledger level. Cost center monthly budgets are enforced as hard limits. Spend events are rejected when the allocation is exhausted. Tenant isolation ensures each tenant can only view and manage their own cost centers. Warning thresholds trigger alerts before budget exhaustion. All budget enforcement decisions are logged for audit trail.
 
 ## Dispute Arbitration
 
@@ -83,7 +83,7 @@ Two-track resolution: auto-resolve by comparing service output against behaviora
 
 Real-time anomaly detection on agent payment patterns. Six detection signals: amount anomaly (3-sigma), new counterparty from concentrated agent, service type deviation, velocity spike, burst pattern (runaway loop), and time anomaly. Uses Welford's online algorithm for statistically stable baselines without storing full history. Graduated severity: info (logged) → warning (alert) → critical (circuit breaker + escrow freeze). All alerts include sigma deviation, baseline vs actual values, and forensic context for incident response.
 
-Forensics is automatically integrated into the gateway service via the `ForensicsIngestor` interface — every successful proxy payment is analyzed for anomalies without any manual integration. Alerts are available via REST API and can be forwarded to external SIEM systems via webhook.
+Forensics is automatically integrated into the gateway service via the `ForensicsIngestor` interface. Every successful proxy payment is analyzed for anomalies without any manual integration. Alerts are available via REST API and can be forwarded to external SIEM systems via webhook.
 
 ## Production Security Hardening
 
