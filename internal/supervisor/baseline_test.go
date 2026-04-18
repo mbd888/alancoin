@@ -404,7 +404,7 @@ func TestGraphRebuildFromEvents(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 13. Minimum stddev prevents cold-start lock-in
+// 13. Minimum stddev prevents cold-start capping
 // ---------------------------------------------------------------------------
 
 func TestMinStddevFloor(t *testing.T) {

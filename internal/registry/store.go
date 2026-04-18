@@ -31,7 +31,7 @@ type Store interface {
 	RemoveService(ctx context.Context, agentAddress, serviceID string) error
 	ListServices(ctx context.Context, query AgentQuery) ([]ServiceListing, error)
 
-	// Transactions (the data moat)
+	// Transactions
 	RecordTransaction(ctx context.Context, tx *Transaction) error
 	GetTransaction(ctx context.Context, id string) (*Transaction, error)
 	ListTransactions(ctx context.Context, agentAddress string, limit int) ([]*Transaction, error)
@@ -358,7 +358,7 @@ func (m *MemoryStore) ListServices(ctx context.Context, query AgentQuery) ([]Ser
 }
 
 // -----------------------------------------------------------------------------
-// Transaction Operations (the data moat)
+// Transaction Operations
 // -----------------------------------------------------------------------------
 
 func (m *MemoryStore) RecordTransaction(ctx context.Context, tx *Transaction) error {

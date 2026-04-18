@@ -1026,7 +1026,7 @@ func (s *Server) setupRoutes() {
 		protected.GET("/auth/me", authHandler.GetCurrentAgent)
 	}
 
-	// Session key routes (bounded autonomy - the differentiator)
+	// Session key routes (bounded autonomy)
 	// Session key creation requires auth, but using a session key doesn't
 	sessionHandler := sessionkeys.NewHandler(s.sessionMgr, s.logger)
 
@@ -1290,7 +1290,7 @@ func (s *Server) setupRoutes() {
 		withdrawals.NewHandler(s.withdrawalService).RegisterRoutes(protectedWithdraw)
 	}
 
-	// Reputation routes (the network moat - agents build reputation over time)
+	// Reputation routes
 	// reputationProvider is already created above for discovery enrichment
 	//
 	// Create signer from config (nil if no secret set)
@@ -1835,7 +1835,7 @@ func (s *Server) enhancedStatsHandler(c *gin.Context) {
 		"updatedAt":         baseStats.UpdatedAt,
 	}
 
-	// Add session key stats (the differentiator!)
+	// Add session key stats
 	if s.sessionMgr != nil {
 		activeKeys, err := s.sessionMgr.CountActive(ctx)
 		if err == nil {
@@ -2788,7 +2788,7 @@ func (s *Server) wireSubsystems(cfg *config.Config) {
 	s.gatewayService.WithUsageMeter(s.billingMeter)
 	s.gatewayTimer.WithMeter(s.billingMeter)
 
-	// Flywheel incentives (fee discounts + discovery boosts by reputation tier).
+	// Incentive engine (fee discounts + discovery boosts by reputation tier).
 	s.incentiveEngine = flywheel.NewIncentiveEngine()
 	s.gatewayService.WithIncentives(s.incentiveEngine)
 	if s.gatewayResolver != nil {

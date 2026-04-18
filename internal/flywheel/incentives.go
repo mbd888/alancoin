@@ -58,7 +58,7 @@ func (e *IncentiveEngine) AdjustFeeBPS(_ context.Context, tier string, baseBPS i
 	return adjusted, nil
 }
 
-// BoostScore applies a flywheel discovery boost to a candidate's reputation
+// BoostScore applies a reputation-tier discovery boost to a candidate's
 // score. Higher-reputation agents receive an additive boost.
 // Unknown tiers get no boost (conservative default).
 func (e *IncentiveEngine) BoostScore(_ context.Context, tier string, baseScore float64) float64 {

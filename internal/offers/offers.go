@@ -466,7 +466,7 @@ func (s *Service) CompleteClaim(ctx context.Context, claimID, callerAddr string)
 		}
 	}
 
-	// Revenue accumulation for flywheel
+	// Accumulate revenue for seller
 	if s.revenue != nil {
 		if revErr := s.revenue.AccumulateRevenue(ctx, claim.SellerAddr, claim.Amount, "offer_claim:"+claim.ID); revErr != nil {
 			s.logger.Warn("failed to accumulate revenue after claim completion",

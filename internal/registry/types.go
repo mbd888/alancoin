@@ -1,5 +1,4 @@
-// Package registry implements agent registration and discovery
-// This is the network layer - the thing that creates the moat
+// Package registry implements agent registration and discovery.
 package registry
 
 import (
@@ -43,7 +42,7 @@ type Agent struct {
 	CreatedAt time.Time              `json:"createdAt"`
 	UpdatedAt time.Time              `json:"updatedAt"`
 
-	// Stats (the data moat)
+	// Stats
 	Stats AgentStats `json:"stats"`
 }
 
@@ -136,7 +135,7 @@ type ServiceListing struct {
 }
 
 // -----------------------------------------------------------------------------
-// Transaction Recording (the data moat)
+// Transaction Recording
 // -----------------------------------------------------------------------------
 
 // Transaction records a payment between agents

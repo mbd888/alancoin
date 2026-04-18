@@ -10,9 +10,8 @@
 // agents propagates zero trust regardless of volume. Only payments from
 // seeded nodes contribute meaningful reputation.
 //
-// This creates a data flywheel: every transaction through Alancoin
-// strengthens the reputation graph. Competitors cannot replicate without
-// matching transaction volume.
+// Every transaction strengthens the reputation graph, improving score
+// accuracy over time.
 package tracerank
 
 import (

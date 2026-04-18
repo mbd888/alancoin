@@ -13,7 +13,7 @@ import (
 // Resolver discovers and ranks service candidates.
 type Resolver struct {
 	registry     RegistryProvider
-	booster      DiscoveryBooster     // flywheel: reputation-based discovery boost
+	booster      DiscoveryBooster     // reputation-based discovery boost
 	intelligence IntelligenceProvider // intelligence: credit-based discovery boost
 }
 
@@ -22,15 +22,13 @@ func NewResolver(registry RegistryProvider) *Resolver {
 	return &Resolver{registry: registry}
 }
 
-// WithDiscoveryBooster adds flywheel-based discovery score boosting.
+// WithDiscoveryBooster adds reputation-based discovery score boosting.
 func (r *Resolver) WithDiscoveryBooster(b DiscoveryBooster) *Resolver {
 	r.booster = b
 	return r
 }
 
 // WithIntelligenceRanker adds intelligence-based discovery boost.
-// Agents with higher intelligence tiers get boosted in discovery results,
-// directly closing the flywheel: better score → more visibility → more transactions.
 func (r *Resolver) WithIntelligenceRanker(ip IntelligenceProvider) *Resolver {
 	r.intelligence = ip
 	return r
@@ -64,9 +62,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ProxyRequest, strategy, maxP
 		return nil, ErrNoServiceAvailable
 	}
 
-	// Apply flywheel discovery boost: higher-reputation agents get a score
-	// multiplier that improves their ranking. This closes the flywheel loop:
-	// better reputation → higher discovery placement → more transactions.
+	// Apply reputation-based discovery boost.
 	if r.booster != nil {
 		for i := range filtered {
 			tier := scoreTier(filtered[i].ReputationScore)
@@ -74,8 +70,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ProxyRequest, strategy, maxP
 		}
 	}
 
-	// Apply intelligence-based discovery boost: agents with higher credit tiers
-	// get an additional boost, creating switching costs (leave = lose ranking).
+	// Apply intelligence-based discovery boost.
 	if r.intelligence != nil {
 		for i := range filtered {
 			tier, _, err := r.intelligence.GetCreditTier(ctx, filtered[i].AgentAddress)

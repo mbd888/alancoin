@@ -228,7 +228,7 @@ type BaselineRule struct {
 func (r *BaselineRule) Name() string { return "baseline_anomaly" }
 
 // minStddevOneDollar is the absolute minimum stddev ($1) to prevent
-// cold-start lock-in when an agent spends consistently.
+// cold-start capping when an agent spends consistently.
 var minStddevOneDollar = mustParse("1") // $1
 
 func (r *BaselineRule) Evaluate(_ context.Context, graph *SpendGraph, ec *EvalContext) *Verdict {
@@ -253,7 +253,7 @@ func (r *BaselineRule) Evaluate(_ context.Context, graph *SpendGraph, ec *EvalCo
 	// Project: current + requested amount
 	projected := new(big.Int).Add(currentHourly, ec.Amount)
 
-	// Minimum stddev = max(20% of mean, $1) to prevent cold-start lock-in.
+	// Minimum stddev = max(20% of mean, $1) to prevent cold-start capping.
 	// Without this, an agent spending a consistent amount gets stddev≈0
 	// and is permanently capped at their historical rate.
 	effectiveStddev := new(big.Int).Set(baseline.HourlyStddev)

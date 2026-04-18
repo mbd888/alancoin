@@ -71,7 +71,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.PUT("/agents/:address/services/:serviceId", h.UpdateService)
 	r.DELETE("/agents/:address/services/:serviceId", h.RemoveService)
 
-	// Discovery (the key feature)
+	// Discovery
 	r.GET("/services", h.DiscoverServices)
 
 	// Transactions
@@ -549,7 +549,7 @@ func (h *Handler) RemoveService(c *gin.Context) {
 }
 
 // -----------------------------------------------------------------------------
-// Discovery Handler (the key feature)
+// Discovery Handler
 // -----------------------------------------------------------------------------
 
 // DiscoverServices handles GET /services

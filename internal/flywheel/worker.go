@@ -84,8 +84,7 @@ func (w *Worker) compute(ctx context.Context) {
 	}
 
 	// Drain buffered revenue entries to prevent unbounded memory growth.
-	// Currently logs aggregate stats; in the future this feeds the
-	// staking/shareholder distribution system.
+	// Currently logs aggregate stats; future: feeds staking distribution.
 	if w.revenueAccumulator != nil {
 		entries := w.revenueAccumulator.DrainPending()
 		if len(entries) > 0 {

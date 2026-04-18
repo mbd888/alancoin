@@ -215,7 +215,7 @@ type Service struct {
 	revenue         RevenueAccumulator
 	circuitBreaker  *circuitbreaker.Breaker
 	usageMeter      UsageMeter
-	incentives      IncentiveProvider    // flywheel: reputation-based fee discounts
+	incentives      IncentiveProvider    // reputation-based fee discounts
 	healthMonitor   *HealthMonitor       // per-provider health tracking
 	healthRouter    *HealthAwareRouter   // graph-based health-aware routing
 	racer           *RACER               // RACER calibrated expansion routing
@@ -392,15 +392,13 @@ func (s *Service) makeOutboxCallback(ctx context.Context, sessionID, tenantID, b
 	}
 }
 
-// WithIncentives adds flywheel incentive support (fee discounts by reputation).
+// WithIncentives adds reputation-based fee discount support.
 func (s *Service) WithIncentives(ip IncentiveProvider) *Service {
 	s.incentives = ip
 	return s
 }
 
 // WithIntelligence adds credit-gated escrow and dynamic fee adjustments.
-// High-credit agents get reduced escrow requirements and lower fees,
-// creating switching costs and rewarding trusted behavior.
 func (s *Service) WithIntelligence(ip IntelligenceProvider) *Service {
 	s.intelligence = ip
 	return s
@@ -941,8 +939,7 @@ func (s *Service) Proxy(ctx context.Context, sessionID string, req ProxyRequest)
 		// Update reference with authoritative request count.
 		ref = fmt.Sprintf("%s:req:%d:%s", session.ID, session.RequestCount+1, candidate.ServiceID)
 
-		// Compute platform fee with flywheel incentive discount.
-		// Higher-reputation sellers pay lower platform fees.
+		// Compute platform fee with reputation-based discount.
 		sellerTier := scoreTier(candidate.ReputationScore)
 
 		// Override with intelligence tier if available (more accurate than reputation alone).
@@ -1426,10 +1423,8 @@ func (s *Service) ListLogs(ctx context.Context, sessionID string, limit int, opt
 // Returns the fee amount as a USDC string and the seller amount (price - fee).
 // If there's no tenant, no settings provider, or bps is 0, fee is "0.000000".
 //
-// When the flywheel IncentiveProvider is configured and a seller tier is
-// supplied, the take rate is discounted based on the seller's reputation.
-// This closes the flywheel: higher reputation → lower platform fees →
-// more competitive pricing → more transactions → better reputation.
+// When an IncentiveProvider is configured and a seller tier is supplied,
+// the fee rate is discounted based on the seller's reputation.
 func (s *Service) computeFee(ctx context.Context, tenantID string, priceBig *big.Int, sellerTier ...string) (sellerAmount, feeAmount string) {
 	zero := "0.000000"
 	priceStr := usdc.Format(priceBig)
@@ -1443,15 +1438,14 @@ func (s *Service) computeFee(ctx context.Context, tenantID string, priceBig *big
 		return priceStr, zero
 	}
 
-	// Apply flywheel incentive discount if available
+	// Apply incentive discount if available
 	if s.incentives != nil && len(sellerTier) > 0 && sellerTier[0] != "" {
 		if adjusted, err := s.incentives.AdjustFeeBPS(ctx, sellerTier[0], bps); err == nil {
 			bps = adjusted
 		}
 	}
 
-	// Apply intelligence-based fee discount (credit-gated flywheel).
-	// Higher intelligence tier → lower fees → more transactions → better score.
+	// Apply intelligence-based fee discount.
 	if s.intelligence != nil && len(sellerTier) > 0 && sellerTier[0] != "" {
 		discount := s.intelligence.FeeDiscountBPS(sellerTier[0])
 		bps -= discount
