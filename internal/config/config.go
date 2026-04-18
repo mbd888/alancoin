@@ -37,6 +37,11 @@ type Config struct {
 	DepositWatcherEnabled bool   // Enable on-chain deposit watcher (requires RPC_URL)
 	DepositWatcherStart   uint64 // Start block for deposit scanning (0 = latest)
 
+	// Outbound payouts (USDC transfers signed by PRIVATE_KEY).
+	// Requires RPC_URL + CHAIN_ID + PRIVATE_KEY + USDC_CONTRACT to be valid.
+	PayoutsEnabled      bool
+	PayoutConfirmations uint64 // blocks before a tx is considered final (default 12)
+
 	// Payment settings
 	DefaultPrice string // Default price in USDC (e.g., "0.001")
 	MinPayment   string
@@ -186,6 +191,8 @@ func Load() (*Config, error) {
 		AdminSecret:           os.Getenv("ADMIN_SECRET"),
 		DepositWatcherEnabled: os.Getenv("DEPOSIT_WATCHER_ENABLED") == "true",
 		DepositWatcherStart:   getEnvUint64("DEPOSIT_WATCHER_START_BLOCK", 0),
+		PayoutsEnabled:        os.Getenv("PAYOUTS_ENABLED") == "true",
+		PayoutConfirmations:   getEnvUint64("PAYOUT_CONFIRMATIONS", 12),
 		SessionKeyMode:        getEnv("SESSION_KEY_MODE", "demo"),
 		ReceiptHMACSecret:     os.Getenv("RECEIPT_HMAC_SECRET"),
 
