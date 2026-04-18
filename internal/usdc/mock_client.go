@@ -35,15 +35,14 @@ type MockChainClient struct {
 }
 
 type mockTx struct {
-	hash          string
-	from          string
-	to            string
-	amount        *big.Int
-	nonce         uint64
-	submittedAt   time.Time
-	includedAt    *uint64 // block number when mined; nil = pending
-	succeeded     bool
-	confirmations uint64
+	hash        string
+	from        string
+	to          string
+	amount      *big.Int
+	nonce       uint64
+	submittedAt time.Time
+	includedAt  *uint64 // block number when mined; nil = pending
+	succeeded   bool
 }
 
 // NewMockChainClient returns an empty mock pinned to the given chain ID.
@@ -240,7 +239,10 @@ func digestFor(req TransferRequest) []byte {
 	h := sha256.New()
 	var buf [8]byte
 
-	binary.BigEndian.PutUint64(buf[:], uint64(req.ChainID))
+	if req.ChainID < 0 {
+		panic("negative chain ID")
+	}
+	binary.BigEndian.PutUint64(buf[:], uint64(req.ChainID)) //nolint:gosec // guarded above
 	h.Write(buf[:])
 	h.Write([]byte(strings.ToLower(req.FromAddr)))
 	h.Write([]byte(strings.ToLower(req.ToAddr)))

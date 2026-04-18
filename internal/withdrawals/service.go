@@ -155,8 +155,6 @@ func isPositiveDecimal(s string) bool {
 		case r >= '0' && r <= '9':
 			if r > '0' {
 				seenDigit = true
-			} else if seenDigit {
-				// already saw a non-zero digit; trailing zeros are fine
 			}
 		case r == '.':
 			if seenDot {
