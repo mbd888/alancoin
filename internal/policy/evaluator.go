@@ -28,6 +28,16 @@ type policyCacheEntry struct {
 	fetchedAt time.Time
 }
 
+// DenialSink receives a callback every time a policy rule denies a request.
+// Typically backed by the compliance aggregator so operators see denials
+// in the incident register.
+//
+// Implementations must return quickly; the evaluator calls this from the
+// hot path. Run any heavy work asynchronously.
+type DenialSink interface {
+	RecordPolicyDenial(ctx context.Context, tenantID, policyName, ruleType, agentAddr, reason string, shadow bool)
+}
+
 // Evaluator implements gateway.PolicyEvaluator using tenant-scoped spend policies.
 type Evaluator struct {
 	store    Store
@@ -35,6 +45,8 @@ type Evaluator struct {
 
 	mu    sync.RWMutex
 	cache map[string]*policyCacheEntry
+
+	sink DenialSink
 }
 
 // NewEvaluator creates a new policy evaluator with default cache TTL.
@@ -49,6 +61,13 @@ func NewEvaluator(store Store) *Evaluator {
 // WithCacheTTL overrides the default policy cache TTL.
 func (e *Evaluator) WithCacheTTL(ttl time.Duration) *Evaluator {
 	e.cacheTTL = ttl
+	return e
+}
+
+// WithDenialSink wires a sink that sees every denial (including shadow-mode
+// denials, flagged via the shadow bool).
+func (e *Evaluator) WithDenialSink(s DenialSink) *Evaluator {
+	e.sink = s
 	return e
 }
 
@@ -141,8 +160,15 @@ func (e *Evaluator) EvaluateProxy(ctx context.Context, session *gateway.Session,
 				// Shadow mode: if policy is in shadow mode and not expired,
 				// return the denial decision with Shadow=true and nil error
 				// so the caller logs it but doesn't block the request.
-				if pol.EnforcementMode == "shadow" && (pol.ShadowExpiresAt.IsZero() || time.Now().Before(pol.ShadowExpiresAt)) {
+				shadow := pol.EnforcementMode == "shadow" && (pol.ShadowExpiresAt.IsZero() || time.Now().Before(pol.ShadowExpiresAt))
+				if shadow {
 					decision.Shadow = true
+				}
+				if e.sink != nil {
+					e.sink.RecordPolicyDenial(ctx, session.TenantID, pol.Name, rule.Type,
+						session.AgentAddr, err.Error(), shadow)
+				}
+				if shadow {
 					return decision, nil
 				}
 				return decision, fmt.Errorf("denied by policy %q rule %s: %w", pol.Name, rule.Type, err)

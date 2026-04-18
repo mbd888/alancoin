@@ -52,6 +52,17 @@ type Supervisor struct {
 	eventWriter   *EventWriter
 	denialStore   BaselineStore
 	denialSem     chan struct{} // bounds concurrent denial-logging goroutines
+
+	// denialSink (optional) is notified synchronously on every denial.
+	// Typically backed by the compliance aggregator. Must return quickly.
+	denialSink DenialSink
+}
+
+// DenialSink is notified whenever the supervisor denies an operation.
+// The callback is invoked synchronously on the deny path, so implementations
+// must not block; offload heavy work if needed.
+type DenialSink interface {
+	RecordSupervisorDenial(ctx context.Context, agentAddr, counterparty, amount, opType, rule, reason string)
 }
 
 // Compile-time check.
@@ -73,6 +84,20 @@ func WithReputation(rp ReputationProvider) Option {
 // WithRules overrides the default rule set.
 func WithRules(rules ...EvalRule) Option {
 	return func(s *Supervisor) { s.engine = NewRuleEngine(rules...) }
+}
+
+// WithDenialSink wires a sink fired on every denial, as an Option used at
+// construction time. Prefer this when the sink is available up front.
+func WithDenialSink(sink DenialSink) Option {
+	return func(s *Supervisor) { s.denialSink = sink }
+}
+
+// SetDenialSink attaches (or replaces) the denial sink post-construction.
+// Useful when the sink target is created later in the server startup
+// sequence. Safe to call with nil to detach. Assumes callers do not
+// swap the sink concurrently with in-flight evaluate() calls.
+func (s *Supervisor) SetDenialSink(sink DenialSink) {
+	s.denialSink = sink
 }
 
 // WithBaselineStore enables learned baselines. Injects BaselineRule between
@@ -423,6 +448,10 @@ func (s *Supervisor) evaluateWithTier(ctx context.Context, agentAddr, counterpar
 			default:
 				s.logger.Warn("denial log dropped (at concurrency limit)")
 			}
+		}
+
+		if s.denialSink != nil {
+			s.denialSink.RecordSupervisorDenial(ctx, agentAddr, counterparty, amount, opType, verdict.Rule, verdict.Reason)
 		}
 
 		return fmt.Errorf("%w: %s", ErrDenied, verdict.Reason)
