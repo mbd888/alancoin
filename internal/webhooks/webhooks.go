@@ -83,6 +83,9 @@ const (
 	// Intelligence events
 	EventIntelligenceTierTransition EventType = "intelligence.tier.transition"
 	EventIntelligenceScoreAlert     EventType = "intelligence.score.alert"
+
+	// Compliance events
+	EventComplianceIncidentCritical EventType = "compliance.incident.critical"
 )
 
 // Event represents a webhook event

@@ -259,6 +259,26 @@ func (e *Emitter) EmitForensicsCriticalAlert(agentAddr, alertID, alertType strin
 	})
 }
 
+// --- Compliance events ---
+
+// EmitComplianceIncidentCritical fires on every compliance incident whose
+// severity is Critical, regardless of origin (forensics/policy/supervisor/
+// manual POST). Subscribers typically page on this event so downstream
+// systems (Slack, PagerDuty, SIEM) observe governance failures in real time.
+//
+// agentAddr is the optional subject of the incident. If empty, the event
+// goes to tenant-scoped subscribers via the dispatcher's fan-out logic.
+func (e *Emitter) EmitComplianceIncidentCritical(agentAddr, incidentID, source, kind, title, scope string) {
+	e.emit(agentAddr, EventComplianceIncidentCritical, map[string]interface{}{
+		"incidentId": incidentID,
+		"scope":      scope,
+		"source":     source,
+		"kind":       kind,
+		"title":      title,
+		"agentAddr":  agentAddr,
+	})
+}
+
 // --- Intelligence events ---
 
 // EmitTierTransition emits an intelligence.tier.transition event when an agent
