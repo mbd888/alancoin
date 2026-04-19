@@ -150,4 +150,7 @@ func (c *CDC) pollOnce(ctx context.Context) {
 
 		c.lastID = entry.EntryID
 	}
+	if err := rows.Err(); err != nil {
+		c.logger.Error("cdc: row iteration failed", "error", err)
+	}
 }
