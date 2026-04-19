@@ -1,20 +1,14 @@
-// Package flywheel implements the self-reinforcing data loop that creates
-// Alancoin's network moat.
-//
-// The flywheel:
+// Package flywheel implements the self-reinforcing data loop:
 //
 //	Agents transact → payment graph grows → reputation improves →
 //	discovery gets better → more transactions → graph grows further
 //
-// This package measures, monitors, and amplifies the flywheel. It provides:
-//   - Real-time flywheel health scoring (is the wheel spinning?)
+// This package measures, monitors, and amplifies the loop. It provides:
+//   - Real-time health scoring
 //   - Network growth and density metrics
-//   - Reputation effectiveness measurement (does rep drive traffic?)
+//   - Reputation effectiveness measurement
 //   - Agent retention and churn tracking
 //   - Incentive calculation (fee discounts + discovery boosts by tier)
-//
-// The health score is the single metric an operator or investor watches
-// to know whether the network is achieving escape velocity.
 package flywheel
 
 import (
@@ -55,7 +49,7 @@ type State struct {
 	TopTierTrafficShare   float64        `json:"topTierTrafficShare"`   // % of recent txns involving trusted/elite
 	ReputationCorrelation float64        `json:"reputationCorrelation"` // rank correlation: rep score vs tx count
 
-	// Retention: are agents sticky?
+	// Retention
 	RetentionRate7d float64 `json:"retentionRate7d"` // of agents active 8-14d ago, % still active in last 7d
 	ChurnRate7d     float64 `json:"churnRate7d"`     // 1 - retention
 
@@ -75,11 +69,11 @@ type State struct {
 
 // HealthTier thresholds.
 const (
-	TierCold         = "cold"         // 0-20: no flywheel effects
+	TierCold         = "cold"         // 0-20: no reinforcing effects
 	TierWarming      = "warming"      // 20-40: early signs
 	TierSpinning     = "spinning"     // 40-60: reputation drives discovery
 	TierAccelerating = "accelerating" // 60-80: strong growth, dense graph
-	TierFlywheel     = "flywheel"     // 80-100: self-sustaining network effects
+	TierFlywheel     = "flywheel"     // 80-100: self-sustaining growth loop
 )
 
 func healthTier(score float64) string {

@@ -388,4 +388,4 @@ This is the "one API call to orchestrate an entire agent workflow" story.
 | 7 | Rate limiting | Abuse prevention | Small |
 | 8 | Observability | Operations | Small |
 | 9 | Webhook events | Integrations | Small |
-| 10 | Pipeline proxy | Competitive edge | Large |
+| 10 | Pipeline proxy | Multi-step orchestration | Large |

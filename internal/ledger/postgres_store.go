@@ -167,7 +167,9 @@ func (p *PostgresStore) Debit(ctx context.Context, agentAddr, amount, reference,
 	if rows == 0 {
 		// Check if agent exists to distinguish not-found from insufficient balance
 		var exists bool
-		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists)
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists); err != nil {
+			return fmt.Errorf("check agent existence: %w", err)
+		}
 		if !exists {
 			return ErrAgentNotFound
 		}
@@ -272,7 +274,9 @@ func (p *PostgresStore) Withdraw(ctx context.Context, agentAddr, amount, txHash 
 	}
 	if rows == 0 {
 		var exists bool
-		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists)
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists); err != nil {
+			return fmt.Errorf("check agent existence: %w", err)
+		}
 		if !exists {
 			return ErrAgentNotFound
 		}
@@ -321,7 +325,9 @@ func (p *PostgresStore) Transfer(ctx context.Context, fromAddr, toAddr, amount, 
 	}
 	if rows == 0 {
 		var exists bool
-		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, fromAddr).Scan(&exists)
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, fromAddr).Scan(&exists); err != nil {
+			return fmt.Errorf("check agent existence: %w", err)
+		}
 		if !exists {
 			return ErrAgentNotFound
 		}
@@ -472,7 +478,9 @@ func (p *PostgresStore) ConfirmHold(ctx context.Context, agentAddr, amount, refe
 	}
 	if rows == 0 {
 		var exists bool
-		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists)
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists); err != nil {
+			return fmt.Errorf("check agent existence: %w", err)
+		}
 		if !exists {
 			return ErrAgentNotFound
 		}
@@ -508,10 +516,12 @@ func (p *PostgresStore) ReleaseHold(ctx context.Context, agentAddr, amount, refe
 
 	// Look up any credit draw associated with this hold
 	var creditDrawAmount sql.NullString
-	_ = tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, `
 		SELECT amount FROM ledger_entries
 		WHERE agent_address = $1 AND type = 'credit_draw_hold' AND reference = $2
-	`, agentAddr, reference).Scan(&creditDrawAmount)
+	`, agentAddr, reference).Scan(&creditDrawAmount); err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("lookup credit draw: %w", err)
+	}
 
 	creditDraw := "0"
 	if creditDrawAmount.Valid && creditDrawAmount.String != "" {
@@ -538,7 +548,9 @@ func (p *PostgresStore) ReleaseHold(ctx context.Context, agentAddr, amount, refe
 	}
 	if rows == 0 {
 		var exists bool
-		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists)
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists); err != nil {
+			return fmt.Errorf("check agent existence: %w", err)
+		}
 		if !exists {
 			return ErrAgentNotFound
 		}
@@ -590,7 +602,9 @@ func (p *PostgresStore) SettleHoldWithCallback(ctx context.Context, buyerAddr, s
 	}
 	if rows == 0 {
 		var exists bool
-		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, buyerAddr).Scan(&exists)
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, buyerAddr).Scan(&exists); err != nil {
+			return fmt.Errorf("check agent existence: %w", err)
+		}
 		if !exists {
 			return ErrAgentNotFound
 		}
@@ -673,7 +687,9 @@ func (p *PostgresStore) SettleHoldWithFeeAndCallback(ctx context.Context, buyerA
 	}
 	if rows == 0 {
 		var exists bool
-		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, buyerAddr).Scan(&exists)
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, buyerAddr).Scan(&exists); err != nil {
+			return fmt.Errorf("check agent existence: %w", err)
+		}
 		if !exists {
 			return ErrAgentNotFound
 		}
@@ -771,7 +787,9 @@ func (p *PostgresStore) EscrowLock(ctx context.Context, agentAddr, amount, refer
 	}
 	if rows == 0 {
 		var exists bool
-		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists)
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists); err != nil {
+			return fmt.Errorf("check agent existence: %w", err)
+		}
 		if !exists {
 			return ErrAgentNotFound
 		}
@@ -815,7 +833,9 @@ func (p *PostgresStore) ReleaseEscrow(ctx context.Context, buyerAddr, sellerAddr
 	}
 	if rows == 0 {
 		var exists bool
-		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, buyerAddr).Scan(&exists)
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, buyerAddr).Scan(&exists); err != nil {
+			return fmt.Errorf("check agent existence: %w", err)
+		}
 		if !exists {
 			return ErrAgentNotFound
 		}
@@ -881,7 +901,9 @@ func (p *PostgresStore) RefundEscrow(ctx context.Context, agentAddr, amount, ref
 	}
 	if rows == 0 {
 		var exists bool
-		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists)
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, agentAddr).Scan(&exists); err != nil {
+			return fmt.Errorf("check agent existence: %w", err)
+		}
 		if !exists {
 			return ErrAgentNotFound
 		}
@@ -933,7 +955,9 @@ func (p *PostgresStore) PartialEscrowSettle(ctx context.Context, buyerAddr, sell
 	}
 	if rows == 0 {
 		var exists bool
-		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, buyerAddr).Scan(&exists)
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_balances WHERE agent_address = $1)`, buyerAddr).Scan(&exists); err != nil {
+			return fmt.Errorf("check agent existence: %w", err)
+		}
 		if !exists {
 			return ErrAgentNotFound
 		}

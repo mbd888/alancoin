@@ -34,10 +34,13 @@ func (s *Signer) Sign(payload interface{}) (signature, issuedAt, expiresAt strin
 	}
 	mac := hmac.New(sha256.New, s.secret)
 	mac.Write(data)
+	// RFC3339Nano preserves sub-second precision so time-range queries on
+	// receipts issued within the same second don't collide at second-level
+	// truncation. The format still parses with time.RFC3339.
 	now := time.Now().UTC()
 	return hex.EncodeToString(mac.Sum(nil)),
-		now.Format(time.RFC3339),
-		now.Add(signatureValidity).Format(time.RFC3339),
+		now.Format(time.RFC3339Nano),
+		now.Add(signatureValidity).Format(time.RFC3339Nano),
 		nil
 }
 

@@ -6,8 +6,7 @@
 // - Time on network (age)
 // - Unique counterparties (network breadth)
 //
-// This creates the network moat: agents build reputation over time,
-// making Alancoin sticky. Skyfire doesn't have this.
+// Agents build reputation over time through consistent, verified behavior.
 package reputation
 
 import (

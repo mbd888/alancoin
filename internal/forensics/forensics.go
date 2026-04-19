@@ -93,6 +93,7 @@ type Baseline struct {
 	KnownServices       map[string]int `json:"knownServices"`       // service type -> tx count
 	ActiveHours         [24]int        `json:"activeHours"`         // hourly distribution
 	LastUpdated         time.Time      `json:"lastUpdated"`
+	m2Amount            float64        // Welford's running sum of squared deviations
 	// Rolling window for velocity calculation
 	recentAmounts    []float64
 	recentTimestamps []time.Time
@@ -138,6 +139,13 @@ type WebhookNotifier interface {
 	EmitForensicsCriticalAlert(agentAddr, alertID, alertType string, score float64)
 }
 
+// IncidentSink receives every alert the service emits, regardless of severity.
+// Typically backed by the compliance aggregator. Must not block the Ingest
+// path for longer than a few ms; heavy processing should be async.
+type IncidentSink interface {
+	RecordForensicsAlert(ctx context.Context, a *Alert)
+}
+
 // Service manages anomaly detection and forensic analysis.
 type Service struct {
 	store    Store
@@ -145,6 +153,7 @@ type Service struct {
 	logger   *slog.Logger
 	pauser   AgentPauser     // auto-pause on critical alerts
 	webhooks WebhookNotifier // notify on critical alerts
+	sink     IncidentSink    // receives every surfaced alert
 	// Per-agent locks instead of a single global mutex.
 	locks sync.Map // map[string]*sync.Mutex
 	// Alert rate limiting: track last alert time per agent to prevent spam.
@@ -166,6 +175,13 @@ func (s *Service) WithAgentPauser(p AgentPauser) *Service {
 // WithWebhooks adds webhook notifications for critical alerts.
 func (s *Service) WithWebhooks(w WebhookNotifier) *Service {
 	s.webhooks = w
+	return s
+}
+
+// WithIncidentSink wires a sink that receives every alert the service emits.
+// Safe to call with nil to disable the sink.
+func (s *Service) WithIncidentSink(sink IncidentSink) *Service {
+	s.sink = sink
 	return s
 }
 
@@ -241,6 +257,10 @@ func (s *Service) Ingest(ctx context.Context, event SpendEvent) ([]*Alert, error
 			"score", alert.Score,
 			"sigma", alert.Sigma,
 		)
+
+		if s.sink != nil {
+			s.sink.RecordForensicsAlert(ctx, alert)
+		}
 
 		// Critical alerts: auto-pause agent + notify via webhook
 		if alert.Severity == SeverityCritical {
@@ -410,10 +430,9 @@ func (s *Service) updateBaseline(b *Baseline, event SpendEvent) {
 	delta := event.Amount - b.MeanAmount
 	b.MeanAmount += delta / float64(b.TxCount)
 	delta2 := event.Amount - b.MeanAmount
+	b.m2Amount += delta * delta2
 	if b.TxCount > 1 {
-		variance := (delta * delta2) / float64(b.TxCount-1)
-		// Incremental stddev: running approximation
-		b.StdDevAmount = math.Sqrt((b.StdDevAmount*b.StdDevAmount*float64(b.TxCount-2) + variance*float64(b.TxCount-1)) / float64(b.TxCount-1))
+		b.StdDevAmount = math.Sqrt(b.m2Amount / float64(b.TxCount-1))
 	}
 
 	// Update counterparty and service maps

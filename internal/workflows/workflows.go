@@ -165,7 +165,7 @@ func (w *Workflow) CostReport() *CostReport {
 	return report
 }
 
-// CostReport is a structured cost attribution report for CFO/CDAO dashboards.
+// CostReport is a structured cost attribution report for a workflow execution.
 type CostReport struct {
 	WorkflowID   string          `json:"workflowId"`
 	WorkflowName string          `json:"workflowName"`

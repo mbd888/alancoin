@@ -1,13 +1,9 @@
-// Package chargeback implements per-department agent FinOps cost attribution.
+// Package chargeback implements per-department agent cost attribution.
 //
 // Every payment flowing through Alancoin (gateway, escrow, workflow, stream)
 // can be tagged with a cost center, department, and project. The chargeback
-// engine aggregates this data into reports that CFOs can use for internal
-// billing, budget enforcement, and ROI analysis.
-//
-// This solves the $400M Fortune 500 agent spend leak identified by Gartner
-// in March 2026: 73% of enterprise agent projects go over budget because
-// there is no cost attribution infrastructure.
+// engine aggregates this data into reports for internal billing, budget
+// enforcement, and spend analysis.
 //
 // Features:
 //   - Real-time budget envelopes per cost center

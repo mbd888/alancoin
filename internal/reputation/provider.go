@@ -73,7 +73,7 @@ func (p *RegistryProvider) GetAgentMetrics(ctx context.Context, address string) 
 // GetAllAgentMetrics fetches metrics for all agents.
 // When TraceRank is configured, graph scores are batch-loaded and injected
 // into each agent's metrics. This ensures snapshots (which feed discovery)
-// include blended reputation scores — the flywheel's critical gear.
+// include blended reputation scores.
 func (p *RegistryProvider) GetAllAgentMetrics(ctx context.Context) (map[string]*Metrics, error) {
 	// Get all agents
 	agents, err := p.store.ListAgents(ctx, registry.AgentQuery{Limit: 1000})
@@ -93,8 +93,7 @@ func (p *RegistryProvider) GetAllAgentMetrics(ctx context.Context) (map[string]*
 	}
 
 	// Batch-enrich with TraceRank graph scores if available.
-	// This is the flywheel integration: graph-based reputation feeds into
-	// every snapshot, which feeds discovery, which drives more transactions.
+	// Enrich snapshots with graph-based reputation scores.
 	if p.traceRankScores != nil && len(addresses) > 0 {
 		graphScores, err := p.traceRankScores.GetScores(ctx, addresses)
 		if err == nil {

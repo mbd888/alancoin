@@ -8,9 +8,8 @@ import (
 )
 
 // RevenueAccumulator tracks seller revenue from all payment paths
-// (gateway, escrow, streams, session keys). This data feeds the flywheel
-// velocity metrics and will serve as the foundation for a future
-// staking/shareholder distribution system.
+// (gateway, escrow, streams, session keys). This data feeds velocity
+// metrics and will serve as the foundation for a future staking system.
 //
 // The accumulator is fire-and-forget — errors are logged but never block
 // the payment path that triggered accumulation.

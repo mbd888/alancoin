@@ -76,9 +76,8 @@ func (w *Worker) snapshot(ctx context.Context) {
 	var withGraph int
 	for address, metrics := range allMetrics {
 		// Dynamically select calculator: use TraceRank-aware weights when
-		// graph data is available. This ensures snapshots (which feed the
-		// discovery materialized view) carry blended reputation scores —
-		// closing the flywheel loop.
+		// graph data is available, so discovery snapshots carry blended
+		// reputation scores.
 		calc := calcDefault
 		if metrics.TraceRankInput > 0 {
 			calc = calcTraceRank

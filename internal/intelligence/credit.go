@@ -4,8 +4,7 @@ import "context"
 
 // CreditGate implements gateway.IntelligenceProvider using the intelligence store.
 // It provides credit-gated escrow thresholds and dynamic fee discounts based on
-// the agent's intelligence tier. This is the key monetization flywheel:
-// higher intelligence score → lower fees + reduced escrow → more transactions → better score.
+// the agent's intelligence tier.
 type CreditGate struct {
 	store Store
 }

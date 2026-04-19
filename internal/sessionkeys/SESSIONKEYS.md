@@ -356,14 +356,14 @@ internal/sessionkeys/
 
 ### P0 — Policy Engine (Replace Hardcoded Constraints)
 
-Session key permissions are a fixed set of fields (`MaxPerTransaction`, `MaxPerDay`, `AllowedRecipients`, etc.). This works for simple cases but enterprises need **arbitrary, composable spending rules**. The current model should evolve into a policy engine:
+Session key permissions are a fixed set of fields (`MaxPerTransaction`, `MaxPerDay`, `AllowedRecipients`, etc.). This works for simple cases but multi-tenant deployments need **arbitrary, composable spending rules**. The current model should evolve into a policy engine:
 
 - **Rule-based policies** — Instead of flat fields, define policies as a list of rules: `[{condition: "amount > 100", action: "deny"}, {condition: "time.hour < 6 || time.hour > 22", action: "require_approval"}, {condition: "recipient.reputation < 30", action: "deny"}]`.
 - **Policy templates** — Pre-built policy sets: "Conservative" (low limits, known recipients only), "Aggressive" (high limits, any recipient), "Compliance" (travel rule enforcement above $3k).
 - **Dynamic policy evaluation** — Policies can reference external data: recipient reputation score, current gas prices, historical spending patterns.
 - **Policy versioning** — When a policy is updated, existing session keys can either inherit the new policy or be pinned to the old one.
 
-This is the enterprise killer feature. Companies don't buy "you can set a $10 daily limit." They buy "you can write any rule you want about how your agents spend money."
+This is the key capability gap. Simple flat limits don't scale to real deployments where organizations need arbitrary spending rules.
 
 **Interface sketch:**
 ```go
@@ -437,12 +437,12 @@ Current keys are all-or-nothing for spending. But agents may need keys with diff
 
 ### P2 — Hardware Security Module (HSM) Integration
 
-Session key private keys are held in software. For enterprise deployments handling large budgets:
+Session key private keys are held in software. For production deployments handling large budgets:
 
 - HSM-backed key generation and signing (AWS CloudHSM, Azure Key Vault, YubiKey)
 - Key material never leaves the HSM
 - Signature requests go through the HSM API
-- This is table stakes for any financial platform handling >$1M in agent transactions
+- Required for any deployment handling >$1M in agent transactions
 
 ### P2 — Cross-Platform Session Keys
 

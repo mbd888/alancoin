@@ -239,7 +239,6 @@ type BudgetPreFlight interface {
 }
 
 // IncentiveProvider applies reputation-based fee adjustments.
-// Part of the flywheel: higher reputation → lower fees → more transactions.
 type IncentiveProvider interface {
 	// AdjustFeeBPS applies a reputation-based discount to the base take rate.
 	// Returns the effective take rate after discount (never below 0).
@@ -248,8 +247,7 @@ type IncentiveProvider interface {
 
 // IntelligenceProvider supplies agent intelligence scores for credit-gated
 // escrow thresholds and dynamic fee adjustments. When configured, high-credit
-// agents (platinum/diamond) get reduced escrow requirements and lower fees,
-// creating a tangible incentive to build intelligence score on the platform.
+// agents (platinum/diamond) get reduced escrow requirements and lower fees.
 type IntelligenceProvider interface {
 	// GetCreditTier returns the intelligence tier for an agent (e.g. "diamond", "platinum").
 	// Returns empty string if no intelligence profile exists.
@@ -265,9 +263,8 @@ type IntelligenceProvider interface {
 }
 
 // DiscoveryBooster applies reputation-based score boosts to discovery ranking.
-// Part of the flywheel: higher reputation → better discovery placement → more traffic.
 type DiscoveryBooster interface {
-	// BoostScore applies a flywheel boost to a candidate's reputation score.
+	// BoostScore applies a reputation-tier boost to a candidate's score.
 	BoostScore(ctx context.Context, tier string, baseScore float64) float64
 }
 

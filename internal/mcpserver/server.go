@@ -33,5 +33,13 @@ func NewMCPServer(cfg Config) *server.MCPServer {
 	s.AddTool(ToolFileDispute, h.HandleFileDispute)
 	s.AddTool(ToolGetAlerts, h.HandleGetAlerts)
 
+	// Compliance + audit-trail tools
+	s.AddTool(ToolGetComplianceStatus, h.HandleGetComplianceStatus)
+	s.AddTool(ToolListIncidents, h.HandleListIncidents)
+	s.AddTool(ToolAcknowledgeIncident, h.HandleAcknowledgeIncident)
+	s.AddTool(ToolGetChainHead, h.HandleGetChainHead)
+	s.AddTool(ToolVerifyChain, h.HandleVerifyChain)
+	s.AddTool(ToolExportAuditBundle, h.HandleExportAuditBundle)
+
 	return s
 }

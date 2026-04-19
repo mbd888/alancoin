@@ -414,6 +414,9 @@ func (p *PostgresStore) discoverFromMatview(ctx context.Context, filter ServiceF
 		}
 		results = append(results, &listing)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate service listings: %w", err)
+	}
 	return results, nil
 }
 
@@ -465,6 +468,9 @@ func (p *PostgresStore) discoverFromTables(ctx context.Context, filter ServiceFi
 			continue
 		}
 		results = append(results, &listing)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate service listings: %w", err)
 	}
 	return results, nil
 }
@@ -553,6 +559,9 @@ func (p *PostgresStore) ListTransactions(ctx context.Context, agentAddress strin
 		tx.ServiceID = serviceID.String
 		transactions = append(transactions, &tx)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate transactions: %w", err)
+	}
 
 	return transactions, nil
 }
@@ -583,6 +592,9 @@ func (p *PostgresStore) GetRecentTransactions(ctx context.Context, limit int) ([
 		}
 		tx.ServiceID = serviceID.String
 		transactions = append(transactions, &tx)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate recent transactions: %w", err)
 	}
 
 	return transactions, nil
@@ -655,6 +667,9 @@ func (p *PostgresStore) getAgentServices(ctx context.Context, address string) ([
 			logging.L(ctx).Warn("failed to unmarshal service metadata", "service", svc.ID, "error", err)
 		}
 		services = append(services, svc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate services: %w", err)
 	}
 	return services, nil
 }

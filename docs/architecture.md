@@ -106,10 +106,10 @@ Measures and amplifies network effects through 5 health sub-scores: velocity, gr
 Multi-agent escrow with oracle-judged quality tiers and Shapley-based payment splitting. A buyer locks a budget, defines coalition members and quality tiers, and an oracle evaluates each member's contribution. Settlement distributes funds proportionally based on the configured split strategy (equal, weighted, or Shapley value).
 
 ### Behavioral Contracts
-Runtime enforcement of agent behavior during escrow execution, based on the Agent Behavioral Contracts (ABC) framework (arxiv:2602.22302). Contracts define preconditions (must be true before execution), invariants (must remain true during execution), and recovery actions (abort, degrade, or alert on violation). Contracts gate escrow settlement — payment releases only when the behavioral SLA is satisfied.
+Runtime enforcement of agent behavior during escrow execution, based on the Agent Behavioral Contracts (ABC) framework (arxiv:2602.22302). Contracts define preconditions (must be true before execution), invariants (must remain true during execution), and recovery actions (abort, degrade, or alert on violation). Contracts gate escrow settlement: payment releases only when the behavioral SLA is satisfied.
 
 ### Standing Offers (Marketplace)
-Two-sided order book for agent services. Sellers post offers with service type, price, capacity, and conditions (minimum reputation, allowed buyers, minimum balance). Buyers claim offers atomically — funds lock in escrow, capacity decrements. Supports deliver/complete/refund lifecycle with auto-expiry.
+Two-sided order book for agent services. Sellers post offers with service type, price, capacity, and conditions (minimum reputation, allowed buyers, minimum balance). Buyers claim offers atomically. Funds lock in escrow, capacity decrements. Supports deliver/complete/refund lifecycle with auto-expiry.
 
 ### Multi-Tenancy
 Isolated agent namespaces with per-tenant rate limits, configurable take rates, and plan-based access (free/starter/growth/enterprise). Per-tenant dashboard with billing, usage timeseries, and denial logs.
@@ -118,7 +118,7 @@ Isolated agent namespaces with per-tenant rate limits, configurable take rates, 
 Signed identity certificates for AI agents combining organizational binding, permission scope, and TraceRank reputation into a W3C DID-compatible credential. Certificates are HMAC-signed, auto-revoked when session keys expire, and exportable as EU AI Act Article 12 technical documentation. Trust tiers (AAA through D) are computed from transaction history, dispute rate, and account age.
 
 ### FinOps Chargeback Engine
-Per-department agent cost attribution with real-time budget enforcement. Every payment event can be tagged with a cost center, department, and project code. Monthly budget envelopes are enforced at the ledger level — spend events are rejected when a cost center exhausts its allocation. Generates CFO-ready chargeback reports with per-department breakdowns, top-service analysis, and budget utilization percentages.
+Per-department agent cost attribution with real-time budget enforcement. Every payment event can be tagged with a cost center, department, and project code. Monthly budget envelopes are enforced at the ledger level. Spend events are rejected when a cost center exhausts its allocation. Generates CFO-ready chargeback reports with per-department breakdowns, top-service analysis, and budget utilization percentages.
 
 ### Dispute Arbitration
 Programmatic dispute resolution for agent escrows. Two resolution paths: (1) auto-resolve by comparing service output against behavioral contract specifications, and (2) human/agent arbiter assignment with evidence submission. Outcomes trigger financial execution via existing escrow primitives (refund, release, or percentage-based split). Fee: 2% of disputed amount. Loser receives reputation penalty via TraceRank.
