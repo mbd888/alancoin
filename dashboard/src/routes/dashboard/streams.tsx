@@ -3,11 +3,15 @@ import { DataTable, type Column } from "@/components/ui/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Tabs } from "@/components/ui/tabs";
 import { KpiCard } from "@/components/ui/kpi-card";
+import { SkeletonCard } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { useStreams } from "@/hooks/api/use-streams";
 import { formatCurrency, relativeTime } from "@/lib/utils";
+import { Address } from "@/components/ui/address";
 import type { StreamItem } from "@/lib/types";
-import { Radio, DollarSign, Hash, Zap } from "lucide-react";
-import { SkeletonCard } from "@/components/ui/skeleton";
+import { Radio, DollarSign, Hash, Zap, AlertTriangle, MoreHorizontal, Eye } from "lucide-react";
 import { PageHeader } from "@/components/layouts/page-header";
 
 const STATUS_VARIANT: Record<string, string> = {
@@ -25,6 +29,7 @@ const STATUS_TABS = [
 
 export function StreamsPage() {
   const [statusFilter, setStatusFilter] = useState("all");
+  const [viewStream, setViewStream] = useState<StreamItem | null>(null);
   const streams = useStreams();
 
   const allStreams = streams.data?.streams ?? [];
@@ -65,25 +70,19 @@ export function StreamsPage() {
     {
       id: "buyer",
       header: "Buyer",
-      cell: (row) => (
-        <span className="font-mono text-xs">
-          {row.buyerAddr.slice(0, 8)}...{row.buyerAddr.slice(-4)}
-        </span>
-      ),
+      cell: (row) => <Address value={row.buyerAddr} />,
     },
     {
       id: "seller",
       header: "Seller",
-      cell: (row) => (
-        <span className="font-mono text-xs">
-          {row.sellerAddr.slice(0, 8)}...{row.sellerAddr.slice(-4)}
-        </span>
-      ),
+      cell: (row) => <Address value={row.sellerAddr} />,
     },
     {
       id: "spent",
       header: "Spent / Held",
       numeric: true,
+      sortable: true,
+      sortValue: (row) => parseFloat(row.spentAmount) || 0,
       cell: (row) => (
         <span className="text-xs">
           {formatCurrency(row.spentAmount)}
@@ -96,12 +95,16 @@ export function StreamsPage() {
       id: "ticks",
       header: "Ticks",
       numeric: true,
+      sortable: true,
+      sortValue: (row) => row.tickCount,
       cell: (row) => row.tickCount,
     },
     {
       id: "price",
       header: "$/Tick",
       numeric: true,
+      sortable: true,
+      sortValue: (row) => parseFloat(row.pricePerTick) || 0,
       cell: (row) => formatCurrency(row.pricePerTick),
     },
     {
@@ -116,10 +119,34 @@ export function StreamsPage() {
     {
       id: "created",
       header: "Created",
+      sortable: true,
+      sortValue: (row) => new Date(row.createdAt).getTime(),
       cell: (row) => (
         <span className="text-xs text-muted-foreground">
           {relativeTime(row.createdAt)}
         </span>
+      ),
+    },
+    {
+      id: "actions",
+      header: "",
+      className: "w-10",
+      cell: (row) => (
+        <div onClick={(e) => e.stopPropagation()}>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button aria-label="Stream actions" className="rounded-sm p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground">
+                <MoreHorizontal size={15} />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => setViewStream(row)}>
+                <Eye size={13} />
+                View details
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       ),
     },
   ];
@@ -145,16 +172,88 @@ export function StreamsPage() {
       </div>
 
       <div className="px-4 md:px-8 py-4">
-        <DataTable
-          columns={columns}
-          data={filteredStreams}
-          isLoading={streams.isLoading}
-          keyExtractor={(row) => row.id}
-          emptyTitle={statusFilter === "all" ? "No streams" : `No ${statusFilter} streams`}
-          emptyDescription="No streaming micropayment channels found."
-          totalLabel={`${filteredStreams.length} streams`}
-        />
+        {streams.isError ? (
+          <div className="flex items-center justify-center gap-2 rounded-lg border bg-card py-8 text-sm text-destructive">
+            <AlertTriangle size={14} />
+            Failed to load streams
+            <Button variant="ghost" size="sm" onClick={() => streams.refetch()}>
+              Retry
+            </Button>
+          </div>
+        ) : (
+          <DataTable
+            columns={columns}
+            data={filteredStreams}
+            isLoading={streams.isLoading}
+            keyExtractor={(row) => row.id}
+            onRowClick={(row) => setViewStream(row)}
+            dataUpdatedAt={streams.dataUpdatedAt}
+            emptyTitle={statusFilter === "all" ? "No streams" : `No ${statusFilter} streams`}
+            emptyDescription="No streaming micropayment channels found."
+            totalLabel={`${filteredStreams.length} streams`}
+          />
+        )}
       </div>
+
+      <Dialog open={!!viewStream} onOpenChange={() => setViewStream(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Stream Details</DialogTitle>
+            <DialogDescription>Streaming micropayment channel information.</DialogDescription>
+          </DialogHeader>
+          {viewStream && (
+            <DialogBody>
+              <div className="flex flex-col gap-3 text-sm">
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Stream ID</span>
+                  <code className="text-right font-mono text-xs">{viewStream.id}</code>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Buyer</span>
+                  <Address value={viewStream.buyerAddr} truncate={false} />
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Seller</span>
+                  <Address value={viewStream.sellerAddr} truncate={false} />
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Status</span>
+                  <Badge variant={(STATUS_VARIANT[viewStream.status] ?? "default") as "accent" | "success" | "default"}>
+                    {viewStream.status}
+                  </Badge>
+                </div>
+                <hr className="border-border" />
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Hold Amount</span>
+                  <span className="tabular-nums">{formatCurrency(viewStream.holdAmount)}</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Spent</span>
+                  <span className="tabular-nums">{formatCurrency(viewStream.spentAmount)}</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Price / Tick</span>
+                  <span className="tabular-nums">{formatCurrency(viewStream.pricePerTick)}</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Tick Count</span>
+                  <span className="tabular-nums">{viewStream.tickCount}</span>
+                </div>
+                <hr className="border-border" />
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Created</span>
+                  <span>{relativeTime(viewStream.createdAt)}</span>
+                </div>
+              </div>
+            </DialogBody>
+          )}
+          <DialogFooter>
+            <Button variant="ghost" size="sm" onClick={() => setViewStream(null)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

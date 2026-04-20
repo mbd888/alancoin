@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { Bot, Plus, MoreHorizontal, Eye, Trash2, Zap, Loader2 } from "lucide-react";
+import { Bot, Plus, MoreHorizontal, Eye, Trash2, Zap, Loader2, AlertTriangle } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { PageHeader } from "@/components/layouts/page-header";
 import { DataTable, type Column } from "@/components/ui/data-table";
@@ -12,6 +12,7 @@ import { useAgents } from "@/hooks/api/use-agents";
 import { api } from "@/lib/api-client";
 import { formatCurrency, relativeTime } from "@/lib/utils";
 import { toast } from "sonner";
+import { Address } from "@/components/ui/address";
 import type { Agent } from "@/lib/types";
 
 function AgentActions({
@@ -83,11 +84,7 @@ const columns = (
   {
     id: "address",
     header: "Address",
-    cell: (row) => (
-      <span className="font-mono text-xs">
-        {row.address.slice(0, 8)}...{row.address.slice(-4)}
-      </span>
-    ),
+    cell: (row) => <Address value={row.address} />,
   },
   {
     id: "services",
@@ -112,18 +109,24 @@ const columns = (
     id: "received",
     header: "Received",
     numeric: true,
+    sortable: true,
+    sortValue: (row) => parseFloat(row.stats.totalReceived) || 0,
     cell: (row) => formatCurrency(row.stats.totalReceived),
   },
   {
     id: "txns",
     header: "Txns",
     numeric: true,
+    sortable: true,
+    sortValue: (row) => row.stats.transactionCount,
     cell: (row) => row.stats.transactionCount,
   },
   {
     id: "success",
     header: "Success",
     numeric: true,
+    sortable: true,
+    sortValue: (row) => row.stats.successRate,
     cell: (row) => {
       const rate = row.stats.successRate;
       return (
@@ -155,11 +158,13 @@ const columns = (
     header: "",
     className: "w-10",
     cell: (row) => (
-      <AgentActions
-        onDelete={() => onDelete(row)}
-        onAddService={() => onAddService(row)}
-        onViewDetails={() => onViewDetails(row)}
-      />
+      <div onClick={(e) => e.stopPropagation()}>
+        <AgentActions
+          onDelete={() => onDelete(row)}
+          onAddService={() => onAddService(row)}
+          onViewDetails={() => onViewDetails(row)}
+        />
+      </div>
     ),
   },
 ];
@@ -260,14 +265,27 @@ export function AgentsPage() {
       />
 
       <div className="px-4 md:px-8 py-4">
-        <DataTable
-          columns={agentColumns}
-          data={agents.data?.agents ?? []}
-          isLoading={agents.isLoading}
-          keyExtractor={(row) => row.address}
-          emptyTitle="No agents registered"
-          emptyDescription="Register your first agent to start using the network."
-        />
+        {agents.isError ? (
+          <div className="flex items-center justify-center gap-2 rounded-lg border bg-card py-8 text-sm text-destructive">
+            <AlertTriangle size={14} />
+            Failed to load agents
+            <Button variant="ghost" size="sm" onClick={() => agents.refetch()}>
+              Retry
+            </Button>
+          </div>
+        ) : (
+          <DataTable
+            columns={agentColumns}
+            data={agents.data?.agents ?? []}
+            isLoading={agents.isLoading}
+            keyExtractor={(row) => row.address}
+            onRowClick={(row) => setViewAgent(row)}
+            dataUpdatedAt={agents.dataUpdatedAt}
+            emptyTitle="No agents registered"
+            emptyDescription="Register your first agent to start using the network."
+            totalLabel={`${agents.data?.agents?.length ?? 0} agents`}
+          />
+        )}
       </div>
 
       {/* Delete Confirmation */}

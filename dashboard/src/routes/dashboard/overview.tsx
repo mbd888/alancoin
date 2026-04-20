@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { PageHeader } from "@/components/layouts/page-header";
 import { useQuery } from "@tanstack/react-query";
+import { Button } from "@/components/ui/button";
 import { KpiCard } from "@/components/ui/kpi-card";
 import { SkeletonCard, Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
@@ -37,6 +38,7 @@ import {
   Cell,
 } from "recharts";
 import { Link } from "@tanstack/react-router";
+import { Address } from "@/components/ui/address";
 
 const INTERVAL_TABS = [
   { id: "hour", label: "Hourly" },
@@ -95,6 +97,9 @@ export function OverviewPage() {
               <CardContent className="flex items-center justify-center gap-2 py-8 text-sm text-destructive">
                 <AlertTriangle size={14} />
                 Failed to load overview
+                <Button variant="ghost" size="sm" onClick={() => overview.refetch()}>
+                  Retry
+                </Button>
               </CardContent>
             </Card>
           ) : (
@@ -162,9 +167,12 @@ export function OverviewPage() {
                   <Skeleton className="mx-12 h-3" />
                 </div>
               ) : usage.isError ? (
-                <div className="flex h-full items-center justify-center text-sm text-destructive">
-                  <AlertTriangle size={14} className="mr-2" />
+                <div className="flex h-full items-center justify-center gap-2 text-sm text-destructive">
+                  <AlertTriangle size={14} />
                   Failed to load usage data
+                  <Button variant="ghost" size="sm" onClick={() => usage.refetch()}>
+                    Retry
+                  </Button>
                 </div>
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
@@ -386,12 +394,18 @@ function LiveActivityWidget() {
         <div className="flex items-center gap-2">
           <Rss size={14} className="text-muted-foreground" />
           <h3 className="text-sm font-semibold text-foreground">Live Activity</h3>
+          <span
+            className="inline-block size-2 rounded-full"
+            style={{ backgroundColor: connected ? "var(--color-success)" : "var(--color-danger)" }}
+            title={connected ? "Connected" : "Disconnected"}
+          />
         </div>
-        <span
-          className="inline-block size-2 rounded-full"
-          style={{ backgroundColor: connected ? "var(--color-success)" : "var(--color-danger)" }}
-          title={connected ? "Connected" : "Disconnected"}
-        />
+        <Link
+          to="/live-feed"
+          className="text-xs text-accent-7 hover:underline"
+        >
+          View all
+        </Link>
       </div>
       <div className="divide-y">
         {recent.length === 0 ? (
@@ -420,11 +434,7 @@ function LiveActivityWidget() {
                   >
                     {event.type.replace(/_/g, " ")}
                   </Badge>
-                  {from && (
-                    <span className="font-mono text-xs text-muted-foreground">
-                      {from.slice(0, 8)}...
-                    </span>
-                  )}
+                  {from && <Address value={from} className="text-muted-foreground" />}
                   {amount && (
                     <span className="text-xs font-medium">${amount}</span>
                   )}

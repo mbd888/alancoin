@@ -51,6 +51,7 @@ interface Report {
 export function ChargebackPage() {
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
+  const [viewCenter, setViewCenter] = useState<{ cc: CostCenter; summary?: PeriodSummary } | null>(null);
   const [name, setName] = useState("");
   const [department, setDepartment] = useState("");
   const [monthlyBudget, setMonthlyBudget] = useState("");
@@ -220,7 +221,8 @@ export function ChargebackPage() {
                 return (
                   <div
                     key={cc.id}
-                    className="flex items-center justify-between rounded-lg border bg-card px-5 py-4"
+                    className="flex cursor-pointer items-center justify-between rounded-lg border bg-card px-5 py-4 transition-colors hover:bg-accent/30"
+                    onClick={() => setViewCenter({ cc, summary })}
                   >
                     <div>
                       <div className="flex items-center gap-2">
@@ -335,6 +337,94 @@ export function ChargebackPage() {
               ) : (
                 "Create"
               )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Cost Center Detail Dialog */}
+      <Dialog open={!!viewCenter} onOpenChange={() => setViewCenter(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cost Center Details</DialogTitle>
+            <DialogDescription>Budget allocation and spend breakdown.</DialogDescription>
+          </DialogHeader>
+          {viewCenter && (() => {
+            const { cc, summary } = viewCenter;
+            const usedPct = summary?.budgetUsedPct ?? 0;
+            return (
+              <DialogBody>
+                <div className="flex flex-col gap-3 text-sm">
+                  <div className="flex items-start justify-between gap-4">
+                    <span className="text-xs text-muted-foreground">Name</span>
+                    <span className="font-medium">{cc.name}</span>
+                  </div>
+                  <div className="flex items-start justify-between gap-4">
+                    <span className="text-xs text-muted-foreground">Department</span>
+                    <Badge variant="default">{cc.department}</Badge>
+                  </div>
+                  <div className="flex items-start justify-between gap-4">
+                    <span className="text-xs text-muted-foreground">Status</span>
+                    <Badge variant={cc.active ? "success" : "danger"}>
+                      {cc.active ? "active" : "inactive"}
+                    </Badge>
+                  </div>
+
+                  <hr className="border-border" />
+                  <div className="flex items-start justify-between gap-4">
+                    <span className="text-xs text-muted-foreground">Monthly Budget</span>
+                    <span className="tabular-nums">{formatCurrency(cc.monthlyBudget)}</span>
+                  </div>
+                  <div className="flex items-start justify-between gap-4">
+                    <span className="text-xs text-muted-foreground">Alert Threshold</span>
+                    <span className="tabular-nums">{cc.warnAtPercent}%</span>
+                  </div>
+
+                  {summary && (
+                    <>
+                      <hr className="border-border" />
+                      <p className="text-xs font-medium text-muted-foreground">Current Period</p>
+                      <div className="flex items-start justify-between gap-4">
+                        <span className="text-xs text-muted-foreground">Total Spend</span>
+                        <span className="tabular-nums">{formatCurrency(summary.totalSpend)}</span>
+                      </div>
+                      <div className="flex items-start justify-between gap-4">
+                        <span className="text-xs text-muted-foreground">Budget Used</span>
+                        <div className="flex items-center gap-2">
+                          <div className="h-1.5 w-24 overflow-hidden rounded-full bg-muted">
+                            <div
+                              className="h-full rounded-full"
+                              style={{
+                                width: `${Math.min(usedPct, 100)}%`,
+                                backgroundColor:
+                                  usedPct >= 100
+                                    ? "var(--color-danger)"
+                                    : usedPct >= cc.warnAtPercent
+                                      ? "var(--color-warning)"
+                                      : "var(--color-accent-6)",
+                              }}
+                            />
+                          </div>
+                          <span className="tabular-nums">{usedPct.toFixed(1)}%</span>
+                        </div>
+                      </div>
+                      <div className="flex items-start justify-between gap-4">
+                        <span className="text-xs text-muted-foreground">Transactions</span>
+                        <span className="tabular-nums">{summary.txCount.toLocaleString()}</span>
+                      </div>
+                      <div className="flex items-start justify-between gap-4">
+                        <span className="text-xs text-muted-foreground">Top Service</span>
+                        <span>{summary.topService || "—"}</span>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </DialogBody>
+            );
+          })()}
+          <DialogFooter>
+            <Button variant="ghost" size="sm" onClick={() => setViewCenter(null)}>
+              Close
             </Button>
           </DialogFooter>
         </DialogContent>

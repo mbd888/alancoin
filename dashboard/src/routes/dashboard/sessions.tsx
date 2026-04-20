@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { MoreHorizontal, Eye, XCircle, DollarSign, Radio, Loader2 } from "lucide-react";
+import { MoreHorizontal, Eye, XCircle, DollarSign, Radio, Loader2, AlertTriangle } from "lucide-react";
 import { PageHeader } from "@/components/layouts/page-header";
 import { useQueryClient, useMutation } from "@tanstack/react-query";
 import { DataTable, type Column } from "@/components/ui/data-table";
@@ -13,6 +13,7 @@ import { api } from "@/lib/api-client";
 import { formatCurrency, relativeTime } from "@/lib/utils";
 import { toast } from "sonner";
 import { useRealtimeStore } from "@/stores/realtime-store";
+import { Address } from "@/components/ui/address";
 import type { GatewaySession } from "@/lib/types";
 
 const STATUS_VARIANT = {
@@ -139,11 +140,7 @@ export function SessionsPage() {
     {
       id: "agent",
       header: "Agent",
-      cell: (row) => (
-        <span className="font-mono text-xs">
-          {row.agentAddr.slice(0, 8)}...{row.agentAddr.slice(-4)}
-        </span>
-      ),
+      cell: (row) => <Address value={row.agentAddr} />,
     },
     {
       id: "status",
@@ -161,6 +158,8 @@ export function SessionsPage() {
       id: "budget",
       header: "Budget Usage",
       numeric: true,
+      sortable: true,
+      sortValue: (row) => parseFloat(row.totalSpent) || 0,
       cell: (row) => {
         const spent = parseFloat(row.totalSpent) || 0;
         const total = parseFloat(row.maxTotal) || 1;
@@ -194,11 +193,15 @@ export function SessionsPage() {
       id: "requests",
       header: "Reqs",
       numeric: true,
+      sortable: true,
+      sortValue: (row) => row.requestCount,
       cell: (row) => row.requestCount,
     },
     {
       id: "created",
       header: "Created",
+      sortable: true,
+      sortValue: (row) => new Date(row.createdAt).getTime(),
       cell: (row) => (
         <span className="text-xs text-muted-foreground">
           {relativeTime(row.createdAt)}
@@ -209,7 +212,11 @@ export function SessionsPage() {
       id: "actions",
       header: "",
       className: "w-10",
-      cell: (row) => <SessionActions session={row} onClose={() => setConfirmClose(row)} onViewDetails={() => setViewSession(row)} />,
+      cell: (row) => (
+        <div onClick={(e) => e.stopPropagation()}>
+          <SessionActions session={row} onClose={() => setConfirmClose(row)} onViewDetails={() => setViewSession(row)} />
+        </div>
+      ),
     },
   ];
 
@@ -236,24 +243,36 @@ export function SessionsPage() {
       </div>
 
       <div className="px-4 md:px-8 py-4">
-        <DataTable
-          columns={columns}
-          data={filteredSessions}
-          isLoading={sessions.isLoading}
-          keyExtractor={(row) => row.id}
-          emptyTitle={statusFilter === "all" ? "No sessions" : `No ${statusFilter} sessions`}
-          emptyDescription={
-            statusFilter === "all"
-              ? "No gateway sessions have been created yet."
-              : `No sessions with status "${statusFilter}" found.`
-          }
-          hasNextPage={sessions.data?.has_more}
-          hasPrevPage={history.length > 0}
-          onNextPage={handleNext}
-          onPrevPage={handlePrev}
-          totalLabel={`${filteredSessions.length} sessions`}
-          page={history.length + 1}
-        />
+        {sessions.isError ? (
+          <div className="flex items-center justify-center gap-2 rounded-lg border bg-card py-8 text-sm text-destructive">
+            <AlertTriangle size={14} />
+            Failed to load sessions
+            <Button variant="ghost" size="sm" onClick={() => sessions.refetch()}>
+              Retry
+            </Button>
+          </div>
+        ) : (
+          <DataTable
+            columns={columns}
+            data={filteredSessions}
+            isLoading={sessions.isLoading}
+            keyExtractor={(row) => row.id}
+            onRowClick={(row) => setViewSession(row)}
+            dataUpdatedAt={sessions.dataUpdatedAt}
+            emptyTitle={statusFilter === "all" ? "No sessions" : `No ${statusFilter} sessions`}
+            emptyDescription={
+              statusFilter === "all"
+                ? "No gateway sessions have been created yet."
+                : `No sessions with status "${statusFilter}" found.`
+            }
+            hasNextPage={sessions.data?.has_more}
+            hasPrevPage={history.length > 0}
+            onNextPage={handleNext}
+            onPrevPage={handlePrev}
+            totalLabel={`${filteredSessions.length} sessions`}
+            page={history.length + 1}
+          />
+        )}
       </div>
 
       {/* Session Details Dialog */}

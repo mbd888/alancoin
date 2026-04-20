@@ -135,10 +135,10 @@ export function ApiKeysPage() {
             ))}
           </div>
         ) : keys.isError ? (
-          <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-center">
-            <AlertTriangle size={20} className="mx-auto mb-2 text-destructive" />
-            <p className="text-sm text-destructive">Failed to load API keys</p>
-            <Button variant="ghost" size="sm" className="mt-2" onClick={() => keys.refetch()}>
+          <div className="flex items-center justify-center gap-2 rounded-lg border bg-card py-8 text-sm text-destructive">
+            <AlertTriangle size={14} />
+            Failed to load API keys
+            <Button variant="ghost" size="sm" onClick={() => keys.refetch()}>
               Retry
             </Button>
           </div>
