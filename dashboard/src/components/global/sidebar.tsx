@@ -10,6 +10,7 @@ import {
   Moon,
   Sun,
   Command,
+  LogOut,
   ShieldAlert,
   TrendingDown,
   Shield,
@@ -24,6 +25,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
+import { useAuthStore } from "@/stores/auth-store";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
@@ -161,6 +163,9 @@ export function SidebarContent({
         </div>
       </nav>
 
+      {/* User info */}
+      <UserSection collapsed={collapsed} />
+
       {/* Footer actions */}
       <div className="flex flex-col gap-1 border-t border-[var(--sidebar-border)] px-2 py-3">
         {/* Command palette trigger */}
@@ -226,6 +231,40 @@ export function SidebarContent({
         )}
       </div>
     </>
+  );
+}
+
+function UserSection({ collapsed }: { collapsed: boolean }) {
+  const { agentAddress, keyName, logout } = useAuthStore();
+
+  if (!agentAddress) return null;
+
+  return (
+    <div className="border-t border-[var(--sidebar-border)] px-2 py-3">
+      {!collapsed && (
+        <div className="mb-2 px-3">
+          <p className="truncate text-xs font-medium text-foreground">
+            {keyName ?? "API Key"}
+          </p>
+          <p className="truncate font-mono text-[10px] text-muted-foreground">
+            {agentAddress.slice(0, 10)}...{agentAddress.slice(-4)}
+          </p>
+        </div>
+      )}
+      <button
+        aria-label="Sign out"
+        onClick={logout}
+        className={cn(
+          "flex w-full items-center gap-3 rounded-md px-3 py-1.5",
+          "text-xs text-muted-foreground",
+          "transition-colors",
+          "hover:bg-destructive/10 hover:text-destructive"
+        )}
+      >
+        <LogOut size={14} strokeWidth={1.8} className="shrink-0" />
+        {!collapsed && <span>Sign out</span>}
+      </button>
+    </div>
   );
 }
 

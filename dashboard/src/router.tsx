@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import {
   createRouter,
   createRootRoute,
@@ -6,6 +7,8 @@ import {
   redirect,
 } from "@tanstack/react-router";
 import { AppShell } from "@/components/layouts/app-shell";
+import { AuthGate } from "@/components/auth/auth-gate";
+import { useAuthStore } from "@/stores/auth-store";
 import { OverviewPage } from "@/routes/dashboard/overview";
 import { SessionsPage } from "@/routes/dashboard/sessions";
 import { AgentsPage } from "@/routes/dashboard/agents";
@@ -23,12 +26,34 @@ import { MarketplacePage } from "@/routes/dashboard/marketplace";
 import { ApiKeysPage } from "@/routes/settings/api-keys";
 import { SettingsPage } from "@/routes/settings/general";
 
-const rootRoute = createRootRoute({
-  component: () => (
+function RootComponent() {
+  const { isAuthenticated, isValidating, restore } = useAuthStore();
+
+  useEffect(() => {
+    restore();
+  }, [restore]);
+
+  if (isValidating) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[var(--background)]">
+        <div className="size-6 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <AuthGate />;
+  }
+
+  return (
     <AppShell>
       <Outlet />
     </AppShell>
-  ),
+  );
+}
+
+const rootRoute = createRootRoute({
+  component: RootComponent,
 });
 
 const indexRoute = createRoute({

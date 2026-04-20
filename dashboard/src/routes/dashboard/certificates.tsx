@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { Shield, Plus, CheckCircle, XCircle, FileText, ExternalLink } from "lucide-react";
+import { Shield, Plus, CheckCircle, XCircle, FileText, ExternalLink, Loader2 } from "lucide-react";
 import { PageHeader } from "@/components/layouts/page-header";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogBody, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { relativeTime } from "@/lib/utils";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -54,6 +54,7 @@ export function CertificatesPage() {
   const [issueOrg, setIssueOrg] = useState("");
   const [issueDept, setIssueDept] = useState("");
   const [complianceId, setComplianceId] = useState<string | null>(null);
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
   const certs = useQuery({
@@ -192,7 +193,7 @@ export function CertificatesPage() {
                       <Button
                         variant="danger"
                         size="sm"
-                        onClick={() => revokeMutation.mutate(cert.id)}
+                        onClick={() => setConfirmRevoke(cert.id)}
                       >
                         Revoke
                       </Button>
@@ -244,7 +245,7 @@ export function CertificatesPage() {
             <Button
               variant="primary"
               size="sm"
-              disabled={!issueAddr || !issueOrg}
+              disabled={!issueAddr || !issueOrg || issueMutation.isPending}
               onClick={() =>
                 issueMutation.mutate({
                   agentAddr: issueAddr,
@@ -253,7 +254,52 @@ export function CertificatesPage() {
                 })
               }
             >
-              Issue Certificate
+              {issueMutation.isPending ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  Issuing...
+                </>
+              ) : (
+                "Issue Certificate"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Revoke Confirmation Dialog */}
+      <Dialog open={!!confirmRevoke} onOpenChange={() => setConfirmRevoke(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Revoke Certificate</DialogTitle>
+            <DialogDescription>
+              This certificate will be permanently revoked. The agent will lose trust-gated escrow access.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" size="sm" onClick={() => setConfirmRevoke(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              disabled={revokeMutation.isPending}
+              onClick={() => {
+                if (confirmRevoke) {
+                  revokeMutation.mutate(confirmRevoke, {
+                    onSuccess: () => setConfirmRevoke(null),
+                  });
+                }
+              }}
+            >
+              {revokeMutation.isPending ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  Revoking...
+                </>
+              ) : (
+                "Revoke Certificate"
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

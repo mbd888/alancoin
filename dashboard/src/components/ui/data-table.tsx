@@ -27,6 +27,7 @@ interface DataTableProps<T> {
   onNextPage?: () => void;
   onPrevPage?: () => void;
   totalLabel?: string;
+  page?: number;
 }
 
 export function DataTable<T>({
@@ -42,6 +43,7 @@ export function DataTable<T>({
   onNextPage,
   onPrevPage,
   totalLabel,
+  page,
 }: DataTableProps<T>) {
   const showPagination = hasNextPage || hasPrevPage;
 
@@ -111,6 +113,11 @@ export function DataTable<T>({
         <div className="flex items-center justify-between border-t px-4 py-2.5">
           <span className="text-xs text-muted-foreground">
             {totalLabel ?? `${data.length} items`}
+            {page != null && (
+              <span className="ml-2 text-muted-foreground/60">
+                &middot; Page {page}
+              </span>
+            )}
           </span>
           <div className="flex items-center gap-1">
             <Button

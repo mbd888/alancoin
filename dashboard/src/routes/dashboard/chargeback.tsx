@@ -1,13 +1,17 @@
-import { AlertTriangle, DollarSign, Plus, TrendingDown } from "lucide-react";
+import { useState } from "react";
+import { AlertTriangle, DollarSign, Loader2, Plus, TrendingDown } from "lucide-react";
 import { PageHeader } from "@/components/layouts/page-header";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { CHART_COLORS } from "@/lib/chart-theme";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { KpiCard } from "@/components/ui/kpi-card";
 import { SkeletonCard, Skeleton } from "@/components/ui/skeleton";
 import { formatCurrency } from "@/lib/utils";
+import { toast } from "sonner";
 import {
   BarChart,
   Bar,
@@ -45,6 +49,14 @@ interface Report {
 
 
 export function ChargebackPage() {
+  const queryClient = useQueryClient();
+  const [createOpen, setCreateOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [department, setDepartment] = useState("");
+  const [monthlyBudget, setMonthlyBudget] = useState("");
+  const [projectCode, setProjectCode] = useState("");
+  const [warnAtPercent, setWarnAtPercent] = useState("80");
+
   const centers = useQuery({
     queryKey: ["chargeback", "cost-centers"],
     queryFn: () =>
@@ -59,6 +71,39 @@ export function ChargebackPage() {
       api.get<{ report: Report }>("/chargeback/reports"),
   });
 
+  const createMutation = useMutation({
+    mutationFn: (body: Record<string, unknown>) =>
+      api.post("/chargeback/cost-centers", body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["chargeback", "cost-centers"] });
+      queryClient.invalidateQueries({ queryKey: ["chargeback", "report"] });
+      resetForm();
+      toast.success("Cost center created");
+    },
+    onError: () => toast.error("Failed to create cost center"),
+  });
+
+  const resetForm = () => {
+    setCreateOpen(false);
+    setName("");
+    setDepartment("");
+    setMonthlyBudget("");
+    setProjectCode("");
+    setWarnAtPercent("80");
+  };
+
+  const handleCreate = () => {
+    createMutation.mutate({
+      name,
+      department,
+      monthlyBudget,
+      ...(projectCode && { projectCode }),
+      warnAtPercent: parseInt(warnAtPercent) || 80,
+    });
+  };
+
+  const canSubmit = name && department && monthlyBudget;
+
   const summaries = report.data?.report?.summaries ?? [];
   const totalSpend = report.data?.report?.totalSpend ?? "0";
 
@@ -69,7 +114,7 @@ export function ChargebackPage() {
         title="FinOps Chargeback"
         description="Per-department agent cost attribution"
         actions={
-          <Button variant="primary" size="sm">
+          <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>
             <Plus size={14} />
             Create Cost Center
           </Button>
@@ -195,7 +240,6 @@ export function ChargebackPage() {
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
-                      {/* Budget usage bar */}
                       <div className="w-24">
                         <div className="flex items-center justify-between text-[10px] tabular-nums text-muted-foreground">
                           <span>{usedPct.toFixed(0)}%</span>
@@ -223,6 +267,78 @@ export function ChargebackPage() {
           </div>
         </div>
       </div>
+
+      {/* Create Cost Center Dialog */}
+      <Dialog open={createOpen} onOpenChange={() => resetForm()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create Cost Center</DialogTitle>
+            <DialogDescription>
+              Define a budget envelope for tracking agent spend by department.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody>
+            <div className="flex flex-col gap-4">
+              <Input
+                id="cc-name"
+                label="Name"
+                placeholder="e.g. Engineering AI Tools"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                autoFocus
+              />
+              <Input
+                id="cc-dept"
+                label="Department"
+                placeholder="e.g. Engineering"
+                value={department}
+                onChange={(e) => setDepartment(e.target.value)}
+              />
+              <Input
+                id="cc-budget"
+                label="Monthly budget (USDC)"
+                placeholder="e.g. 5000"
+                value={monthlyBudget}
+                onChange={(e) => setMonthlyBudget(e.target.value)}
+              />
+              <Input
+                id="cc-project"
+                label="Project code (optional)"
+                placeholder="e.g. PROJ-2026"
+                value={projectCode}
+                onChange={(e) => setProjectCode(e.target.value)}
+              />
+              <Input
+                id="cc-warn"
+                label="Alert threshold (%)"
+                placeholder="80"
+                value={warnAtPercent}
+                onChange={(e) => setWarnAtPercent(e.target.value)}
+              />
+            </div>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="ghost" size="sm" onClick={resetForm}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={!canSubmit || createMutation.isPending}
+              onClick={handleCreate}
+            >
+              {createMutation.isPending ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  Creating...
+                </>
+              ) : (
+                "Create"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

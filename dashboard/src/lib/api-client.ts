@@ -3,6 +3,8 @@
  * All requests go through the Vite proxy (/v1 -> localhost:8080).
  */
 
+import { useAuthStore } from "@/stores/auth-store";
+
 const API_BASE = "/v1";
 
 class ApiError extends Error {
@@ -48,6 +50,10 @@ async function request<T>(
 
   if (!res.ok) {
     const body = await res.json().catch(() => null);
+    if (res.status === 401) {
+      localStorage.removeItem("alancoin_api_key");
+      useAuthStore.getState().logout();
+    }
     throw new ApiError(res.status, res.statusText, body);
   }
 
@@ -62,6 +68,8 @@ export const api = {
     request<T>("POST", path, { body }),
   put: <T>(path: string, body?: unknown) =>
     request<T>("PUT", path, { body }),
+  patch: <T>(path: string, body?: unknown) =>
+    request<T>("PATCH", path, { body }),
   delete: <T>(path: string) => request<T>("DELETE", path),
 };
 

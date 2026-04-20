@@ -181,6 +181,31 @@ export type OffersResponse = {
   count: number;
 };
 
+export interface AuthApiKey {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastUsed: string | null;
+  revoked: boolean;
+}
+
+export type AuthKeysResponse = {
+  keys: AuthApiKey[];
+  count: number;
+};
+
+export interface Webhook {
+  id: string;
+  url: string;
+  events: string[];
+  active: boolean;
+  createdAt: string;
+}
+
+export type WebhooksResponse = {
+  webhooks: Webhook[];
+};
+
 export interface RealtimeEvent {
   type: string;
   timestamp: string;
