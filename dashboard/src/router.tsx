@@ -161,6 +161,24 @@ const apiKeysRoute = createRoute({
   component: lazyRouteComponent(() => import("@/routes/settings/api-keys"), "ApiKeysPage"),
 });
 
+const ledgerRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/ledger",
+  component: lazyRouteComponent(() => import("@/routes/dashboard/ledger"), "LedgerPage"),
+});
+
+const webhooksRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/webhooks",
+  component: lazyRouteComponent(() => import("@/routes/dashboard/webhooks"), "WebhooksPage"),
+});
+
+const receiptsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/receipts",
+  component: lazyRouteComponent(() => import("@/routes/dashboard/receipts"), "ReceiptsPage"),
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
@@ -178,6 +196,9 @@ const routeTree = rootRoute.addChildren([
   workflowsRoute,
   streamsRoute,
   marketplaceRoute,
+  ledgerRoute,
+  receiptsRoute,
+  webhooksRoute,
   alertsRoute,
   chargebackRoute,
   certificatesRoute,

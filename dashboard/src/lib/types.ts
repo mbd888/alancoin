@@ -206,6 +206,79 @@ export type WebhooksResponse = {
   webhooks: Webhook[];
 };
 
+export interface Balance {
+  agentAddr: string;
+  available: string;
+  pending: string;
+  escrowed: string;
+  creditLimit: string;
+  creditUsed: string;
+  totalIn: string;
+  totalOut: string;
+  updatedAt: string;
+}
+
+export type BalanceResponse = { balance: Balance };
+
+export interface LedgerEntry {
+  id: string;
+  agentAddr: string;
+  type: string;
+  amount: string;
+  txHash?: string;
+  reference?: string;
+  description?: string;
+  reversedAt?: string;
+  reversedBy?: string;
+  reversalOf?: string;
+  createdAt: string;
+}
+
+export type LedgerHistoryResponse = {
+  entries: LedgerEntry[];
+  nextCursor?: string;
+  hasMore?: boolean;
+};
+
+export interface CreditInfo {
+  address: string;
+  limit: string;
+  used: string;
+  available: string;
+}
+
+export interface Receipt {
+  id: string;
+  paymentPath: string;
+  reference: string;
+  from: string;
+  to: string;
+  amount: string;
+  serviceId?: string;
+  status: string;
+  scope: string;
+  chainIndex: number;
+  prevHash: string;
+  payloadHash: string;
+  signature: string;
+  issuedAt: string;
+  expiresAt: string;
+  metadata?: string;
+  createdAt: string;
+}
+
+export type ReceiptsResponse = {
+  receipts: Receipt[];
+  count: number;
+};
+
+export interface ReceiptVerification {
+  valid: boolean;
+  receiptId: string;
+  expired?: boolean;
+  error?: string;
+}
+
 export interface RealtimeEvent {
   type: string;
   timestamp: string;

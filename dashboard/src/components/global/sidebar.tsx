@@ -22,6 +22,8 @@ import {
   GitBranch,
   Zap,
   Store,
+  FileCheck,
+  Bell,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
@@ -47,11 +49,13 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: "Payments",
     items: [
+      { to: "/ledger", label: "Ledger", icon: Wallet },
       { to: "/escrow", label: "Escrow", icon: Lock },
       { to: "/budget", label: "Budget", icon: Wallet },
       { to: "/workflows", label: "Workflows", icon: GitBranch },
       { to: "/streams", label: "Streams", icon: Zap },
       { to: "/marketplace", label: "Marketplace", icon: Store },
+      { to: "/receipts", label: "Receipts", icon: FileCheck },
     ],
   },
   {
@@ -68,6 +72,7 @@ const NAV_GROUPS: NavGroup[] = [
     label: "Access",
     items: [
       { to: "/api-keys", label: "API Keys", icon: Key },
+      { to: "/webhooks", label: "Webhooks", icon: Bell },
     ],
   },
   {
