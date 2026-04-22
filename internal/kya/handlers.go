@@ -94,11 +94,11 @@ func (h *Handler) RevokeCertificate(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req)
 
 	if err := h.service.Revoke(c.Request.Context(), c.Param("id"), req.Reason); err != nil {
-		status := http.StatusInternalServerError
 		if errors.Is(err, ErrCertNotFound) {
-			status = http.StatusNotFound
+			c.JSON(http.StatusNotFound, gin.H{"error": "Certificate not found"})
+			return
 		}
-		c.JSON(status, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to revoke certificate"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "revoked"})
@@ -108,11 +108,11 @@ func (h *Handler) RevokeCertificate(c *gin.Context) {
 func (h *Handler) ComplianceExport(c *gin.Context) {
 	report, err := h.service.ComplianceExport(c.Request.Context(), c.Param("id"))
 	if err != nil {
-		status := http.StatusInternalServerError
 		if errors.Is(err, ErrCertNotFound) {
-			status = http.StatusNotFound
+			c.JSON(http.StatusNotFound, gin.H{"error": "Certificate not found"})
+			return
 		}
-		c.JSON(status, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to export compliance report"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"report": report})

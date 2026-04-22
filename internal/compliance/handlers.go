@@ -35,7 +35,7 @@ func (h *Handler) GetReadiness(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to compute readiness",
 		})
 		return
 	}
@@ -83,7 +83,7 @@ func (h *Handler) ListIncidents(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to list incidents",
 		})
 		return
 	}
@@ -133,7 +133,7 @@ func (h *Handler) RecordIncident(c *gin.Context) {
 		OccurredAt: occurred,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to record incident"})
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"incident": inc})
@@ -155,15 +155,15 @@ func (h *Handler) AcknowledgeIncident(c *gin.Context) {
 	id := c.Param("id")
 	if err := h.service.AcknowledgeIncident(c.Request.Context(), id, req.Actor, req.Note); err != nil {
 		if errors.Is(err, ErrIncidentNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": err.Error()})
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Incident not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to acknowledge incident"})
 		return
 	}
 	inc, err := h.service.GetIncident(c.Request.Context(), id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to retrieve incident"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"incident": inc})
@@ -173,7 +173,7 @@ func (h *Handler) AcknowledgeIncident(c *gin.Context) {
 func (h *Handler) ListControls(c *gin.Context) {
 	controls, err := h.service.ListControls(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to list controls"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -205,7 +205,7 @@ func (h *Handler) UpsertControl(c *gin.Context) {
 		Evidence: req.Evidence,
 	}
 	if err := h.service.RegisterControl(c.Request.Context(), ctrl); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to register control"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"control": ctrl})

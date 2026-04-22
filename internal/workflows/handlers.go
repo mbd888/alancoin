@@ -9,6 +9,13 @@ import (
 	"github.com/mbd888/alancoin/internal/validation"
 )
 
+func safeMessage(status int, err error, fallback string) string {
+	if status < 500 {
+		return err.Error()
+	}
+	return fallback
+}
+
 // Handler provides HTTP endpoints for workflow operations.
 type Handler struct {
 	service *Service
@@ -73,7 +80,7 @@ func (h *Handler) CreateWorkflow(c *gin.Context) {
 		if errors.Is(err, ErrInvalidAmount) {
 			status = http.StatusBadRequest
 		}
-		c.JSON(status, gin.H{"error": "workflow_failed", "message": err.Error()})
+		c.JSON(status, gin.H{"error": "workflow_failed", "message": safeMessage(status, err, "Failed to create workflow")})
 		return
 	}
 
@@ -156,7 +163,8 @@ func (h *Handler) StartStep(c *gin.Context) {
 
 	wf, err := h.service.StartStep(c.Request.Context(), wfID, stepName, callerAddr)
 	if err != nil {
-		c.JSON(h.errStatus(err), gin.H{"error": h.errCode(err), "message": err.Error()})
+		st := h.errStatus(err)
+		c.JSON(st, gin.H{"error": h.errCode(err), "message": safeMessage(st, err, "Failed to start step")})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"workflow": wf})
@@ -179,7 +187,8 @@ func (h *Handler) CompleteStep(c *gin.Context) {
 
 	wf, err := h.service.CompleteStep(c.Request.Context(), wfID, stepName, callerAddr, req.ActualCost)
 	if err != nil {
-		c.JSON(h.errStatus(err), gin.H{"error": h.errCode(err), "message": err.Error()})
+		st := h.errStatus(err)
+		c.JSON(st, gin.H{"error": h.errCode(err), "message": safeMessage(st, err, "Failed to complete step")})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"workflow": wf})
@@ -201,7 +210,8 @@ func (h *Handler) FailStep(c *gin.Context) {
 
 	wf, err := h.service.FailStep(c.Request.Context(), wfID, stepName, callerAddr, req.Reason)
 	if err != nil {
-		c.JSON(h.errStatus(err), gin.H{"error": h.errCode(err), "message": err.Error()})
+		st := h.errStatus(err)
+		c.JSON(st, gin.H{"error": h.errCode(err), "message": safeMessage(st, err, "Failed to fail step")})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"workflow": wf})
@@ -214,7 +224,8 @@ func (h *Handler) AbortWorkflow(c *gin.Context) {
 
 	wf, err := h.service.Abort(c.Request.Context(), wfID, callerAddr)
 	if err != nil {
-		c.JSON(h.errStatus(err), gin.H{"error": h.errCode(err), "message": err.Error()})
+		st := h.errStatus(err)
+		c.JSON(st, gin.H{"error": h.errCode(err), "message": safeMessage(st, err, "Failed to abort workflow")})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"workflow": wf})

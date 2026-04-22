@@ -95,7 +95,7 @@ func (h *PayoutHandler) Send(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "payout_failed",
-			"message": err.Error(),
+			"message": "Payout failed",
 			"payout":  payout,
 		})
 		return
@@ -110,7 +110,7 @@ func (h *PayoutHandler) Get(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to retrieve payout",
 		})
 		return
 	}

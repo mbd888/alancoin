@@ -179,6 +179,12 @@ const receiptsRoute = createRoute({
   component: lazyRouteComponent(() => import("@/routes/dashboard/receipts"), "ReceiptsPage"),
 });
 
+const arbitrationRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/arbitration",
+  component: lazyRouteComponent(() => import("@/routes/dashboard/arbitration"), "ArbitrationPage"),
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
@@ -204,6 +210,7 @@ const routeTree = rootRoute.addChildren([
   certificatesRoute,
   intelligenceRoute,
   healthRoute,
+  arbitrationRoute,
   apiKeysRoute,
   settingsRoute,
 ]);

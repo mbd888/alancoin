@@ -102,7 +102,7 @@ func (h *CoalitionHandler) CreateCoalition(c *gin.Context) {
 			status = http.StatusBadRequest
 			code = "validation_error"
 		}
-		resp := gin.H{"error": code, "message": err.Error()}
+		resp := gin.H{"error": code, "message": safeMessage(status, err, "Failed to create coalition")}
 		if extra := moneyFields(err); extra != nil {
 			for k, v := range extra {
 				resp[k] = v
@@ -130,7 +130,7 @@ func (h *CoalitionHandler) GetCoalition(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to retrieve coalition",
 		})
 		return
 	}
@@ -155,7 +155,7 @@ func (h *CoalitionHandler) ListCoalitions(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to list coalitions",
 		})
 		return
 	}
@@ -186,7 +186,7 @@ func (h *CoalitionHandler) ReportCompletion(c *gin.Context) {
 			status = http.StatusConflict
 			code = "invalid_state"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to report completion")})
 		return
 	}
 
@@ -228,7 +228,7 @@ func (h *CoalitionHandler) OracleReport(c *gin.Context) {
 			status = http.StatusConflict
 			code = "invalid_state"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to process oracle report")})
 		return
 	}
 
@@ -255,7 +255,7 @@ func (h *CoalitionHandler) AbortCoalition(c *gin.Context) {
 			status = http.StatusConflict
 			code = "already_settled"
 		}
-		resp := gin.H{"error": code, "message": err.Error()}
+		resp := gin.H{"error": code, "message": safeMessage(status, err, "Failed to abort coalition")}
 		if extra := moneyFields(err); extra != nil {
 			for k, v := range extra {
 				resp[k] = v

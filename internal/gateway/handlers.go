@@ -30,6 +30,21 @@ func moneyFields(err error) gin.H {
 	return nil
 }
 
+// safeMessage returns a client-safe error message. For 4xx domain errors the
+// sentinel message is safe to surface. For 5xx errors, internal details (DB
+// errors, stack traces) must not leak — use the MoneyError recovery text if
+// available, otherwise a generic message.
+func safeMessage(status int, err error, fallback string) string {
+	if status < 500 {
+		return err.Error()
+	}
+	var me *MoneyError
+	if errors.As(err, &me) {
+		return me.Recovery
+	}
+	return fallback
+}
+
 // Handler provides HTTP endpoints for the gateway.
 type Handler struct {
 	service *Service
@@ -255,7 +270,7 @@ func (h *Handler) CloseSession(c *gin.Context) {
 			status = http.StatusForbidden
 			code = "forbidden"
 		}
-		resp := gin.H{"error": code, "message": err.Error()}
+		resp := gin.H{"error": code, "message": safeMessage(status, err, "Failed to close session")}
 		if extra := moneyFields(err); extra != nil {
 			for k, v := range extra {
 				resp[k] = v
@@ -316,7 +331,7 @@ func (h *Handler) Proxy(c *gin.Context) {
 			status = http.StatusBadGateway
 			code = "proxy_failed"
 		}
-		resp := gin.H{"error": code, "message": err.Error()}
+		resp := gin.H{"error": code, "message": safeMessage(status, err, "Proxy request failed")}
 		if extra := moneyFields(err); extra != nil {
 			for k, v := range extra {
 				resp[k] = v
@@ -373,7 +388,7 @@ func (h *Handler) SingleCall(c *gin.Context) {
 			status = http.StatusPaymentRequired
 			code = "budget_exceeded"
 		}
-		resp := gin.H{"error": code, "message": err.Error()}
+		resp := gin.H{"error": code, "message": safeMessage(status, err, "Service call failed")}
 		if extra := moneyFields(err); extra != nil {
 			for k, v := range extra {
 				resp[k] = v
@@ -428,7 +443,7 @@ func (h *Handler) DryRun(c *gin.Context) {
 			status = http.StatusNotFound
 			code = "no_service"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Dry run failed")})
 		return
 	}
 
@@ -524,7 +539,7 @@ func (h *Handler) Pipeline(c *gin.Context) {
 		}
 		resp := gin.H{
 			"error":   code,
-			"message": err.Error(),
+			"message": safeMessage(status, err, "Pipeline execution failed"),
 		}
 		// Include partial results if any steps completed
 		if result != nil && len(result.Steps) > 0 {

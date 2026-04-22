@@ -11,6 +11,13 @@ import (
 	"github.com/mbd888/alancoin/internal/validation"
 )
 
+func safeMessage(status int, err error, fallback string) string {
+	if status < 500 {
+		return err.Error()
+	}
+	return fallback
+}
+
 // ScopeChecker verifies that a session key possesses a required scope.
 type ScopeChecker interface {
 	ValidateScope(ctx context.Context, keyID, scope string) error
@@ -127,7 +134,7 @@ func (h *Handler) GetStream(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to retrieve stream",
 		})
 		return
 	}
@@ -152,7 +159,7 @@ func (h *Handler) ListStreams(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to list streams",
 		})
 		return
 	}
@@ -208,7 +215,7 @@ func (h *Handler) TickStream(c *gin.Context) {
 			status = http.StatusBadRequest
 			code = "invalid_amount"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to record tick")})
 		return
 	}
 
@@ -241,7 +248,7 @@ func (h *Handler) CloseStream(c *gin.Context) {
 			status = http.StatusConflict
 			code = "already_closed"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to close stream")})
 		return
 	}
 
@@ -265,7 +272,7 @@ func (h *Handler) ListTicks(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to list ticks",
 		})
 		return
 	}

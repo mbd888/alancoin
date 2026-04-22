@@ -7,6 +7,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func safeMessage(status int, err error, fallback string) string {
+	if status < 500 {
+		return err.Error()
+	}
+	return fallback
+}
+
 // Handler exposes agent-initiated withdrawal over HTTP.
 // Mount under a router group that has already applied authentication —
 // the handler itself performs no auth.
@@ -84,7 +91,7 @@ func (h *Handler) Withdraw(c *gin.Context) {
 		}
 		body := gin.H{
 			"error":   code,
-			"message": err.Error(),
+			"message": safeMessage(status, err, "Failed to process withdrawal"),
 		}
 		if w != nil {
 			body["withdrawal"] = w

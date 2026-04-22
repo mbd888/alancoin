@@ -108,7 +108,7 @@ func (h *MultiStepHandler) CreateMultiStepEscrow(c *gin.Context) {
 		}
 		c.JSON(status, gin.H{
 			"error":   code,
-			"message": err.Error(),
+			"message": safeMessage(status, err, "Failed to create multistep escrow"),
 		})
 		return
 	}
@@ -157,7 +157,7 @@ func (h *MultiStepHandler) ConfirmStep(c *gin.Context) {
 		if errors.Is(err, ErrMultiStepNotFound) {
 			status = http.StatusNotFound
 		}
-		c.JSON(status, gin.H{"error": "not_found", "message": err.Error()})
+		c.JSON(status, gin.H{"error": "not_found", "message": safeMessage(status, err, "Failed to retrieve multistep escrow")})
 		return
 	}
 	if !strings.EqualFold(callerAddr, mse.BuyerAddr) {
@@ -195,7 +195,7 @@ func (h *MultiStepHandler) ConfirmStep(c *gin.Context) {
 			status = http.StatusBadRequest
 			code = "invalid_amount"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to confirm step")})
 		return
 	}
 
@@ -222,7 +222,7 @@ func (h *MultiStepHandler) RefundRemaining(c *gin.Context) {
 			status = http.StatusConflict
 			code = "invalid_state"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to refund remaining")})
 		return
 	}
 
@@ -244,7 +244,7 @@ func (h *MultiStepHandler) GetMultiStepEscrow(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to retrieve multistep escrow",
 		})
 		return
 	}

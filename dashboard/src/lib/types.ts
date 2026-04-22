@@ -279,6 +279,41 @@ export interface ReceiptVerification {
   error?: string;
 }
 
+export interface ArbitrationEvidence {
+  id: string;
+  caseId: string;
+  submittedBy: string;
+  role: string;
+  type: string;
+  content: string;
+  submittedAt: string;
+}
+
+export interface ArbitrationCase {
+  id: string;
+  escrowId: string;
+  buyerAddr: string;
+  sellerAddr: string;
+  disputedAmount: string;
+  reason: string;
+  status: string;
+  arbiterAddr?: string;
+  outcome?: string;
+  splitPct?: number;
+  decision?: string;
+  fee: string;
+  contractId?: string;
+  evidence?: ArbitrationEvidence[];
+  autoResolvable: boolean;
+  filedAt: string;
+  resolvedAt?: string;
+}
+
+export type ArbitrationCasesResponse = {
+  cases: ArbitrationCase[];
+  count: number;
+};
+
 export interface RealtimeEvent {
   type: string;
   timestamp: string;
