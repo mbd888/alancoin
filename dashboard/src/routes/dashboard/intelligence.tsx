@@ -13,8 +13,6 @@ import {
   Eye,
   MoreHorizontal,
 } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/layouts/page-header";
 import { Tabs } from "@/components/ui/tabs";
@@ -25,59 +23,8 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Address } from "@/components/ui/address";
-
-interface IntelligenceProfile {
-  address: string;
-  creditScore: number;
-  riskScore: number;
-  compositeScore: number;
-  tier: string;
-  computeRunId: string;
-  computedAt: string;
-  credit: {
-    traceRankInput: number;
-    reputationInput: number;
-    disputeRate: number;
-    txSuccessRate: number;
-    totalVolume: number;
-  };
-  risk: {
-    anomalyCount30d: number;
-    criticalAlerts: number;
-    meanAmount: number;
-    stdDevAmount: number;
-    forensicScore: number;
-    behavioralVolatility: number;
-  };
-  network: {
-    inDegree: number;
-    outDegree: number;
-    clusteringCoefficient: number;
-    bridgeScore: number;
-  };
-  operational: {
-    totalTxns: number;
-    daysOnNetwork: number;
-  };
-  trends: {
-    creditDelta7d: number;
-    creditDelta30d: number;
-    riskDelta7d: number;
-    riskDelta30d: number;
-  };
-}
-
-interface Benchmarks {
-  totalAgents: number;
-  avgCreditScore: number;
-  medianCreditScore: number;
-  avgRiskScore: number;
-  p90CreditScore: number;
-  p10CreditScore: number;
-  avgCompositeScore: number;
-  computeRunId: string;
-  computedAt: string;
-}
+import { useLeaderboard, useBenchmarks } from "@/hooks/api/use-intelligence";
+import type { IntelligenceProfile } from "@/hooks/api/use-intelligence";
 
 const TIER_COLORS: Record<string, string> = {
   diamond: "text-[#b9f2ff]",
@@ -149,19 +96,8 @@ export function IntelligencePage() {
   const [view, setView] = useState("leaderboard");
   const [viewAgent, setViewAgent] = useState<IntelligenceProfile | null>(null);
 
-  const leaderboard = useQuery({
-    queryKey: ["intelligence", "leaderboard"],
-    queryFn: () =>
-      api.get<{ agents: IntelligenceProfile[]; count: number }>(
-        "/intelligence/network/leaderboard",
-        { limit: "100" }
-      ),
-  });
-
-  const benchmarks = useQuery({
-    queryKey: ["intelligence", "benchmarks"],
-    queryFn: () => api.get<Benchmarks>("/intelligence/network/benchmarks"),
-  });
+  const leaderboard = useLeaderboard();
+  const benchmarks = useBenchmarks();
 
   const agents = leaderboard.data?.agents ?? [];
   const bench = benchmarks.data;

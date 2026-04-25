@@ -1,11 +1,12 @@
 /**
  * Typed API client for the Alancoin Go backend.
- * All requests go through the Vite proxy (/v1 -> localhost:8080).
+ * In development, requests go through the Vite proxy (/v1 -> localhost:8080).
+ * In production, set VITE_API_URL to the backend origin (e.g. https://api.example.com/v1).
  */
 
 import { useAuthStore } from "@/stores/auth-store";
 
-const API_BASE = "/v1";
+const API_BASE = import.meta.env.VITE_API_URL || "/v1";
 
 class ApiError extends Error {
   status: number;
@@ -42,11 +43,20 @@ async function request<T>(
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  const res = await fetch(url.toString(), {
-    method,
-    headers,
-    body: opts?.body ? JSON.stringify(opts.body) : undefined,
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+
+  let res: Response;
+  try {
+    res = await fetch(url.toString(), {
+      method,
+      headers,
+      body: opts?.body ? JSON.stringify(opts.body) : undefined,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!res.ok) {
     const body = await res.json().catch(() => null);

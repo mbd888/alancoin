@@ -1,8 +1,6 @@
 import { useState, useMemo } from "react";
 import { ShieldAlert, CheckCircle, AlertTriangle, Info, Bell, Eye, MoreHorizontal } from "lucide-react";
 import { PageHeader } from "@/components/layouts/page-header";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs } from "@/components/ui/tabs";
@@ -14,20 +12,8 @@ import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuIte
 import { relativeTime } from "@/lib/utils";
 import { Address } from "@/components/ui/address";
 import { toast } from "sonner";
-
-interface ForensicsAlert {
-  id: string;
-  agentAddr: string;
-  type: string;
-  severity: "info" | "warning" | "critical";
-  message: string;
-  score: number;
-  baseline: number;
-  actual: number;
-  sigma: number;
-  detectedAt: string;
-  acknowledged: boolean;
-}
+import { useAlerts, acknowledgeAlert } from "@/hooks/api/use-alerts";
+import type { ForensicsAlert } from "@/hooks/api/use-alerts";
 
 const SEVERITY_TABS = [
   { id: "all", label: "All" },
@@ -46,18 +32,11 @@ export function AlertsPage() {
   const [severity, setSeverity] = useState("all");
   const [viewAlert, setViewAlert] = useState<ForensicsAlert | null>(null);
 
-  const alerts = useQuery({
-    queryKey: ["forensics", "alerts"],
-    queryFn: () =>
-      api.get<{ alerts: ForensicsAlert[]; count: number }>(
-        "/forensics/alerts",
-        { limit: "100" }
-      ),
-  });
+  const alerts = useAlerts();
 
   const handleAcknowledge = async (alertId: string) => {
     try {
-      await api.post(`/forensics/alerts/${alertId}/acknowledge`);
+      await acknowledgeAlert(alertId);
       toast.success("Alert acknowledged");
       alerts.refetch();
     } catch {

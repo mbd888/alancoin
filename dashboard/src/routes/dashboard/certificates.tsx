@@ -1,8 +1,6 @@
 import { useState } from "react";
 import { Shield, Plus, CheckCircle, XCircle, FileText, ExternalLink, Loader2, AlertTriangle, Users } from "lucide-react";
 import { PageHeader } from "@/components/layouts/page-header";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter } from "@/components/ui/dialog";
@@ -14,34 +12,8 @@ import { SkeletonCard } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Address } from "@/components/ui/address";
 import { toast } from "sonner";
-
-interface KYACertificate {
-  id: string;
-  agentAddr: string;
-  did: string;
-  org: {
-    tenantId: string;
-    orgName: string;
-    department: string;
-    authorizedBy: string;
-  };
-  permissions: {
-    maxSpendPerDay?: string;
-    allowedApis?: string[];
-  };
-  reputation: {
-    trustTier: string;
-    traceRankScore: number;
-    successRate: number;
-    disputeRate: number;
-    txCount: number;
-    accountAgeDays: number;
-  };
-  status: "active" | "revoked" | "expired";
-  issuedAt: string;
-  expiresAt: string;
-  revokedAt?: string;
-}
+import { useCertificates, useComplianceReport, useIssueCertificate, useRevokeCertificate } from "@/hooks/api/use-certificates";
+import type { KYACertificate } from "@/hooks/api/use-certificates";
 
 const TIER_VARIANT: Record<string, "success" | "accent" | "warning" | "danger" | "default"> = {
   AAA: "success",
@@ -60,59 +32,18 @@ export function CertificatesPage() {
   const [complianceId, setComplianceId] = useState<string | null>(null);
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
   const [viewCert, setViewCert] = useState<KYACertificate | null>(null);
-  const queryClient = useQueryClient();
 
-  const certs = useQuery({
-    queryKey: ["kya", "certificates"],
-    queryFn: () =>
-      api.get<{ certificates: KYACertificate[]; count: number }>(
-        "/kya/tenants/default/certificates",
-        { limit: "100" }
-      ),
+  const certs = useCertificates();
+  const compliance = useComplianceReport(complianceId);
+
+  const issueMutation = useIssueCertificate(() => {
+    setIssueOpen(false);
+    setIssueAddr("");
+    setIssueOrg("");
+    setIssueDept("");
   });
 
-  const compliance = useQuery({
-    queryKey: ["kya", "compliance", complianceId],
-    queryFn: () =>
-      api.get<{ report: Record<string, unknown> }>(
-        `/kya/certificates/${complianceId}/compliance`
-      ),
-    enabled: !!complianceId,
-  });
-
-  const issueMutation = useMutation({
-    mutationFn: (data: { agentAddr: string; orgName: string; department: string }) =>
-      api.post("/kya/certificates", {
-        agentAddr: data.agentAddr,
-        org: {
-          tenantId: "default",
-          orgName: data.orgName,
-          department: data.department,
-          authorizedBy: "dashboard",
-          authMethod: "api_key",
-        },
-        permissions: {},
-        validDays: 365,
-      }),
-    onSuccess: () => {
-      toast.success("KYA certificate issued");
-      queryClient.invalidateQueries({ queryKey: ["kya"] });
-      setIssueOpen(false);
-      setIssueAddr("");
-      setIssueOrg("");
-      setIssueDept("");
-    },
-    onError: () => toast.error("Failed to issue certificate"),
-  });
-
-  const revokeMutation = useMutation({
-    mutationFn: (certId: string) =>
-      api.post(`/kya/certificates/${certId}/revoke`, { reason: "Revoked via dashboard" }),
-    onSuccess: () => {
-      toast.success("Certificate revoked");
-      queryClient.invalidateQueries({ queryKey: ["kya"] });
-    },
-  });
+  const revokeMutation = useRevokeCertificate();
 
   return (
     <div className="min-h-screen">

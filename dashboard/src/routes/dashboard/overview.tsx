@@ -13,7 +13,6 @@ import {
   Rss,
 } from "lucide-react";
 import { PageHeader } from "@/components/layouts/page-header";
-import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { KpiCard } from "@/components/ui/kpi-card";
 import { SkeletonCard, Skeleton } from "@/components/ui/skeleton";
@@ -21,7 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs } from "@/components/ui/tabs";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { useOverview, useUsage, useTopServices, useDenials } from "@/hooks/api/use-dashboard";
-import { api } from "@/lib/api-client";
+import { useBenchmarks } from "@/hooks/api/use-intelligence";
 import { CHART_COLORS, CHART_TOOLTIP_STYLE, AREA_STROKE_COLOR } from "@/lib/chart-theme";
 import { formatCurrency, formatCompact, relativeTime } from "@/lib/utils";
 import { useRealtimeStore } from "@/stores/realtime-store";
@@ -58,18 +57,7 @@ export function OverviewPage() {
   const usage = useUsage(interval);
   const topServices = useTopServices(5);
   const denials = useDenials(5);
-  const intelligence = useQuery({
-    queryKey: ["intelligence", "benchmarks"],
-    queryFn: () => api.get<{
-      totalAgents: number;
-      avgCreditScore: number;
-      medianCreditScore: number;
-      avgRiskScore: number;
-      avgCompositeScore: number;
-      p90CreditScore: number;
-      p10CreditScore: number;
-    }>("/intelligence/network/benchmarks"),
-  });
+  const intelligence = useBenchmarks();
 
   const o = overview.data;
   const intel = intelligence.data;

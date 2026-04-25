@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
+
 	"github.com/joho/godotenv"
 )
 
@@ -266,6 +268,9 @@ func (c *Config) Validate() error {
 	if len(key) != 64 {
 		return fmt.Errorf("PRIVATE_KEY must be 64 hex characters (with or without 0x prefix)")
 	}
+	if _, err := crypto.HexToECDSA(key); err != nil {
+		return fmt.Errorf("PRIVATE_KEY is not a valid secp256k1 private key: %w", err)
+	}
 
 	if c.RPCURL == "" {
 		return fmt.Errorf("RPC_URL is required")
@@ -320,12 +325,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("KAFKA_BROKERS is required when EVENTBUS_BACKEND=kafka")
 	}
 
-	// Warn if production database connection doesn't use SSL
+	// Reject production database connections without SSL
 	if c.IsProduction() && c.DatabaseURL != "" {
 		if !strings.Contains(c.DatabaseURL, "sslmode=require") &&
 			!strings.Contains(c.DatabaseURL, "sslmode=verify-full") &&
 			!strings.Contains(c.DatabaseURL, "sslmode=verify-ca") {
-			slog.Warn("DATABASE_URL does not enforce SSL (sslmode=require recommended in production)")
+			return fmt.Errorf("DATABASE_URL must use sslmode=require, verify-ca, or verify-full in production")
 		}
 	}
 

@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { Scale, AlertTriangle, CheckCircle, Clock, UserCheck, Zap, Eye, MoreHorizontal } from "lucide-react";
+import { Scale, AlertTriangle, CheckCircle, Clock, Zap, Eye, MoreHorizontal } from "lucide-react";
 import { PageHeader } from "@/components/layouts/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

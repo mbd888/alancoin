@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+const API_BASE = import.meta.env.VITE_API_URL || "/v1";
+
 interface AuthState {
   apiKey: string | null;
   agentAddress: string | null;
@@ -25,7 +27,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     localStorage.setItem("alancoin_api_key", key);
 
     try {
-      const res = await fetch("/v1/auth/me", {
+      const res = await fetch(`${API_BASE}/auth/me`, {
         headers: { Authorization: `Bearer ${key}` },
       });
 

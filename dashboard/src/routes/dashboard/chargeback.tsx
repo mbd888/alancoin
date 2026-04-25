@@ -1,8 +1,6 @@
 import { useState } from "react";
 import { AlertTriangle, DollarSign, Loader2, Plus, TrendingDown } from "lucide-react";
 import { PageHeader } from "@/components/layouts/page-header";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
 import { CHART_COLORS } from "@/lib/chart-theme";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,7 +9,6 @@ import { Input } from "@/components/ui/input";
 import { KpiCard } from "@/components/ui/kpi-card";
 import { SkeletonCard, Skeleton } from "@/components/ui/skeleton";
 import { formatCurrency } from "@/lib/utils";
-import { toast } from "sonner";
 import {
   BarChart,
   Bar,
@@ -21,35 +18,11 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
-
-interface CostCenter {
-  id: string;
-  name: string;
-  department: string;
-  monthlyBudget: string;
-  warnAtPercent: number;
-  active: boolean;
-}
-
-interface PeriodSummary {
-  costCenterName: string;
-  department: string;
-  totalSpend: string;
-  txCount: number;
-  topService: string;
-  budgetUsedPct: number;
-}
-
-interface Report {
-  period: string;
-  totalSpend: string;
-  costCenterCount: number;
-  summaries: PeriodSummary[];
-}
+import { useCostCenters, useChargebackReport, useCreateCostCenter } from "@/hooks/api/use-chargeback";
+import type { CostCenter, PeriodSummary } from "@/hooks/api/use-chargeback";
 
 
 export function ChargebackPage() {
-  const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
   const [viewCenter, setViewCenter] = useState<{ cc: CostCenter; summary?: PeriodSummary } | null>(null);
   const [name, setName] = useState("");
@@ -57,32 +30,6 @@ export function ChargebackPage() {
   const [monthlyBudget, setMonthlyBudget] = useState("");
   const [projectCode, setProjectCode] = useState("");
   const [warnAtPercent, setWarnAtPercent] = useState("80");
-
-  const centers = useQuery({
-    queryKey: ["chargeback", "cost-centers"],
-    queryFn: () =>
-      api.get<{ costCenters: CostCenter[]; count: number }>(
-        "/chargeback/cost-centers"
-      ),
-  });
-
-  const report = useQuery({
-    queryKey: ["chargeback", "report"],
-    queryFn: () =>
-      api.get<{ report: Report }>("/chargeback/reports"),
-  });
-
-  const createMutation = useMutation({
-    mutationFn: (body: Record<string, unknown>) =>
-      api.post("/chargeback/cost-centers", body),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["chargeback", "cost-centers"] });
-      queryClient.invalidateQueries({ queryKey: ["chargeback", "report"] });
-      resetForm();
-      toast.success("Cost center created");
-    },
-    onError: () => toast.error("Failed to create cost center"),
-  });
 
   const resetForm = () => {
     setCreateOpen(false);
@@ -92,6 +39,10 @@ export function ChargebackPage() {
     setProjectCode("");
     setWarnAtPercent("80");
   };
+
+  const centers = useCostCenters();
+  const report = useChargebackReport();
+  const createMutation = useCreateCostCenter(resetForm);
 
   const handleCreate = () => {
     createMutation.mutate({

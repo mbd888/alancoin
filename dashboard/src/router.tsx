@@ -11,6 +11,7 @@ import {
 } from "@tanstack/react-router";
 import { AppShell } from "@/components/layouts/app-shell";
 import { AuthGate } from "@/components/auth/auth-gate";
+import { RouteErrorFallback } from "@/components/global/route-error-fallback";
 import { useAuthStore } from "@/stores/auth-store";
 
 function RouteProgress() {
@@ -52,6 +53,7 @@ function RootComponent() {
 
 const rootRoute = createRootRoute({
   component: RootComponent,
+  errorComponent: RouteErrorFallback,
   notFoundComponent: () => (
     <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4 px-4 text-center">
       <h1 className="text-4xl font-bold tabular-nums text-foreground">404</h1>

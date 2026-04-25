@@ -163,15 +163,23 @@ func (w *Worker) compute(ctx context.Context) {
 	}
 
 	// Record metrics
-	recordComputeMetrics(len(result.Profiles), result.Duration,
-		result.Benchmarks.AvgCreditScore, result.Benchmarks.AvgRiskScore)
+	if result.Benchmarks != nil {
+		recordComputeMetrics(len(result.Profiles), result.Duration,
+			result.Benchmarks.AvgCreditScore, result.Benchmarks.AvgRiskScore)
 
-	w.logger.Info("intelligence computation completed",
-		"runId", runID,
-		"agents", len(result.Profiles),
-		"avgCredit", fmt.Sprintf("%.1f", result.Benchmarks.AvgCreditScore),
-		"avgRisk", fmt.Sprintf("%.1f", result.Benchmarks.AvgRiskScore),
-		"duration", fmt.Sprintf("%dms", result.Duration.Milliseconds()))
+		w.logger.Info("intelligence computation completed",
+			"runId", runID,
+			"agents", len(result.Profiles),
+			"avgCredit", fmt.Sprintf("%.1f", result.Benchmarks.AvgCreditScore),
+			"avgRisk", fmt.Sprintf("%.1f", result.Benchmarks.AvgRiskScore),
+			"duration", fmt.Sprintf("%dms", result.Duration.Milliseconds()))
+	} else {
+		recordComputeMetrics(len(result.Profiles), result.Duration, 0, 0)
+		w.logger.Info("intelligence computation completed",
+			"runId", runID,
+			"agents", len(result.Profiles),
+			"duration", fmt.Sprintf("%dms", result.Duration.Milliseconds()))
+	}
 }
 
 func (w *Worker) detectTransitions(newProfiles []*AgentProfile, previousProfiles map[string]*AgentProfile) {

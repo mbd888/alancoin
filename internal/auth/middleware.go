@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/mbd888/alancoin/internal/logging"
 )
 
 const (
@@ -38,7 +39,7 @@ func Middleware(m *Manager) gin.HandlerFunc {
 					c.Set(ContextKeyTenantID, key.TenantID)
 				}
 			} else {
-				slog.Warn("auth: invalid API key presented",
+				logging.L(c.Request.Context()).Warn("auth: invalid API key presented",
 					"ip", c.ClientIP(),
 					"path", c.Request.URL.Path,
 					"error", err.Error(),
