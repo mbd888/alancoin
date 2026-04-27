@@ -25,16 +25,6 @@ func (m *mockNotifier) count() int {
 	return len(m.events)
 }
 
-func (m *mockNotifier) eventTypes() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	types := make([]string, len(m.events))
-	for i, e := range m.events {
-		types[i] = e.Type
-	}
-	return types
-}
-
 func TestAlertChecker_CheckBudget_NoNotifier(t *testing.T) {
 	ac := &AlertChecker{thresholds: DefaultBudgetThresholds}
 	key := &SessionKey{
