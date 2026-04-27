@@ -194,6 +194,36 @@ func TestWithdraw_PayoutErrorReleasesHold(t *testing.T) {
 	}
 }
 
+// Receipt-poll timeout: tx hash exists, on-chain status unknown. Releasing
+// the hold here would double-credit the agent if the tx settles after the
+// timeout. The service MUST retain the hold for out-of-band reconciliation.
+func TestWithdraw_TimeoutRetainsHold(t *testing.T) {
+	svc, ledger, payouts := newService(t)
+	payouts.result = Result{Status: "pending", TxHash: "0xpending"}
+	payouts.err = ErrPayoutPending
+
+	w, err := svc.Withdraw(context.Background(), Request{
+		AgentAddr: testAgent, ToAddr: testToAddr,
+		Amount: "1.000000", ClientRef: "ref-timeout",
+	})
+	if !errors.Is(err, ErrPayoutPending) {
+		t.Fatalf("expected ErrPayoutPending, got %v", err)
+	}
+	if w == nil || w.Status != "pending" {
+		t.Errorf("withdrawal should be returned with status=pending, got %+v", w)
+	}
+	if w == nil || w.TxHash != "0xpending" {
+		t.Errorf("withdrawal should carry tx hash, got %+v", w)
+	}
+	_, confirms, releases := ledger.counts()
+	if confirms != 0 {
+		t.Errorf("timeout must not confirm hold; confirms=%d", confirms)
+	}
+	if releases != 0 {
+		t.Fatalf("CRITICAL: release was called on receipt timeout; tx may settle and double-credit (releases=%d)", releases)
+	}
+}
+
 func TestWithdraw_LedgerHoldFailureIsEarlyReturn(t *testing.T) {
 	svc, ledger, payouts := newService(t)
 	ledger.holdErr = errors.New("insufficient balance")
@@ -366,6 +396,36 @@ func TestHandler_LedgerHoldReturns409(t *testing.T) {
 	w := postJSON(t, r, "/v1/agents/"+testAgent+"/payouts", body)
 	if w.Code != http.StatusConflict {
 		t.Errorf("status=%d want 409 body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandler_TimeoutReturns202(t *testing.T) {
+	l := &stubLedger{}
+	p := &stubPayouts{
+		result: Result{Status: "pending", TxHash: "0xpending"},
+		err:    ErrPayoutPending,
+	}
+	svc, _ := NewService(l, p, nil)
+	r := newTestRouter(t, svc)
+
+	body := map[string]string{"to": testToAddr, "amount": "1", "clientRef": "r-pending"}
+	w := postJSON(t, r, "/v1/agents/"+testAgent+"/payouts", body)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status=%d want 202 body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Error      string     `json:"error"`
+		Withdrawal Withdrawal `json:"withdrawal"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Error != "payout_pending" {
+		t.Errorf("error=%q want payout_pending", resp.Error)
+	}
+	if resp.Withdrawal.Status != "pending" || resp.Withdrawal.TxHash != "0xpending" {
+		t.Errorf("withdrawal body=%+v", resp.Withdrawal)
+	}
+	if _, _, releases := l.counts(); releases != 0 {
+		t.Fatalf("CRITICAL: handler-level timeout released hold; releases=%d", releases)
 	}
 }
 

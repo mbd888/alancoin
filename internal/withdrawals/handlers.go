@@ -73,6 +73,20 @@ func (h *Handler) Withdraw(c *gin.Context) {
 		ClientRef: req.ClientRef,
 	})
 	if err != nil {
+		// Pending: tx submitted, on-chain status unknown, hold retained.
+		// Surface as 202 Accepted so clients know it is in-flight, not failed.
+		if errors.Is(err, ErrPayoutPending) {
+			body := gin.H{
+				"error":   "payout_pending",
+				"message": "Payout submitted; on-chain status unknown. Funds remain on hold pending reconciliation.",
+			}
+			if w != nil {
+				body["withdrawal"] = w
+			}
+			c.JSON(http.StatusAccepted, body)
+			return
+		}
+
 		status := http.StatusInternalServerError
 		code := "internal_error"
 		switch {

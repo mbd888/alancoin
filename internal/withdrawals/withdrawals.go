@@ -76,6 +76,11 @@ var (
 	ErrMissingRef   = errors.New("withdrawals: clientRef is required")
 	ErrLedgerHold   = errors.New("withdrawals: ledger hold failed")
 	ErrPayoutFailed = errors.New("withdrawals: payout failed and hold was released")
+	// ErrPayoutPending signals that the on-chain status is unknown (typically
+	// a receipt-poll timeout). The hold is intentionally retained so a tx
+	// that settles after the timeout cannot double-credit the agent. A
+	// reconciler must resolve the payout out-of-band.
+	ErrPayoutPending = errors.New("withdrawals: payout pending; hold retained for resolution")
 )
 
 // holdReference returns the ledger reference string used for the
