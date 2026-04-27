@@ -57,24 +57,30 @@ func TestMemoryCheckpoint(t *testing.T) {
 	cp := NewMemoryCheckpoint()
 
 	// Initial state
-	block, err := cp.GetLastBlock(ctx)
+	block, hash, err := cp.GetLastBlock(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if block != 0 {
 		t.Fatalf("expected 0, got %d", block)
 	}
+	if hash != "" {
+		t.Fatalf("expected empty hash, got %q", hash)
+	}
 
-	// Set and get
-	if err := cp.SetLastBlock(ctx, 42); err != nil {
+	// Set and get with hash
+	if err := cp.SetLastBlock(ctx, 42, "0xabc"); err != nil {
 		t.Fatal(err)
 	}
-	block, err = cp.GetLastBlock(ctx)
+	block, hash, err = cp.GetLastBlock(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if block != 42 {
 		t.Fatalf("expected 42, got %d", block)
+	}
+	if hash != "0xabc" {
+		t.Fatalf("expected hash 0xabc, got %q", hash)
 	}
 }
 
@@ -559,11 +565,11 @@ func TestMemoryCheckpoint_OverwriteBlock(t *testing.T) {
 	ctx := context.Background()
 	cp := NewMemoryCheckpoint()
 
-	_ = cp.SetLastBlock(ctx, 10)
-	_ = cp.SetLastBlock(ctx, 20)
-	_ = cp.SetLastBlock(ctx, 15) // lower block should still work
+	_ = cp.SetLastBlock(ctx, 10, "")
+	_ = cp.SetLastBlock(ctx, 20, "")
+	_ = cp.SetLastBlock(ctx, 15, "") // lower block should still work
 
-	block, err := cp.GetLastBlock(ctx)
+	block, _, err := cp.GetLastBlock(ctx)
 	if err != nil {
 		t.Fatalf("GetLastBlock: %v", err)
 	}
@@ -617,5 +623,140 @@ func TestProcessTransfer_AlreadyProcessed_ReturnsNil(t *testing.T) {
 	defer creditor.mu.Unlock()
 	if len(creditor.credits) != 1 {
 		t.Fatalf("expected 1 credit (idempotent), got %d", len(creditor.credits))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// checkReorg: hash-based reorg detection
+// ---------------------------------------------------------------------------
+
+func newReorgWatcher(confirmations uint64) *Watcher {
+	return New(
+		Config{Confirmations: confirmations},
+		newMockCreditor(),
+		&mockAgentResolver{agents: map[string]bool{}},
+		NewMemoryCheckpoint(),
+		noopLogger(),
+	)
+}
+
+func staticHashFn(hash string) func(context.Context, uint64) (string, error) {
+	return func(context.Context, uint64) (string, error) { return hash, nil }
+}
+
+func errHashFn(err error) func(context.Context, uint64) (string, error) {
+	return func(context.Context, uint64) (string, error) { return "", err }
+}
+
+func TestCheckReorg_EmptyStoredHash_NoOp(t *testing.T) {
+	w := newReorgWatcher(6)
+	rewindTo, mismatch, err := w.checkReorg(context.Background(), 100, "", staticHashFn("0xanything"))
+	if err != nil || mismatch || rewindTo != 0 {
+		t.Fatalf("expected no-op on empty stored hash, got rewindTo=%d mismatch=%v err=%v",
+			rewindTo, mismatch, err)
+	}
+}
+
+func TestCheckReorg_ZeroBlock_NoOp(t *testing.T) {
+	w := newReorgWatcher(6)
+	rewindTo, mismatch, err := w.checkReorg(context.Background(), 0, "0xabc", staticHashFn("0xdef"))
+	if err != nil || mismatch || rewindTo != 0 {
+		t.Fatalf("expected no-op on zero block, got rewindTo=%d mismatch=%v err=%v",
+			rewindTo, mismatch, err)
+	}
+}
+
+func TestCheckReorg_MatchingHash_NoRewind(t *testing.T) {
+	w := newReorgWatcher(6)
+	rewindTo, mismatch, err := w.checkReorg(context.Background(), 100, "0xabc", staticHashFn("0xabc"))
+	if err != nil || mismatch || rewindTo != 0 {
+		t.Fatalf("expected no rewind on matching hash, got rewindTo=%d mismatch=%v err=%v",
+			rewindTo, mismatch, err)
+	}
+}
+
+func TestCheckReorg_Mismatch_RewindsByConfirmations(t *testing.T) {
+	w := newReorgWatcher(6)
+	rewindTo, mismatch, err := w.checkReorg(context.Background(), 100, "0xstoredA", staticHashFn("0xcanonicalB"))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !mismatch {
+		t.Fatal("expected mismatch=true")
+	}
+	if rewindTo != 94 {
+		t.Fatalf("expected rewindTo=94 (100 - 6), got %d", rewindTo)
+	}
+}
+
+func TestCheckReorg_Mismatch_BelowMoatClampsToZero(t *testing.T) {
+	w := newReorgWatcher(50)
+	rewindTo, mismatch, err := w.checkReorg(context.Background(), 30, "0xstored", staticHashFn("0xcanonical"))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !mismatch {
+		t.Fatal("expected mismatch=true")
+	}
+	if rewindTo != 0 {
+		t.Fatalf("expected rewindTo=0 (block < confirmations), got %d", rewindTo)
+	}
+}
+
+func TestCheckReorg_FetchError_PropagatesNoRewind(t *testing.T) {
+	w := newReorgWatcher(6)
+	wantErr := errors.New("rpc unreachable")
+	rewindTo, mismatch, err := w.checkReorg(context.Background(), 100, "0xabc", errHashFn(wantErr))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected wrapped %v, got %v", wantErr, err)
+	}
+	if mismatch || rewindTo != 0 {
+		t.Fatalf("expected no rewind on fetch error, got rewindTo=%d mismatch=%v",
+			rewindTo, mismatch)
+	}
+}
+
+// TestProcessTransfer_PostRewindRecreditsAreSkipped verifies the safety guarantee
+// that backs reorg recovery: when the watcher rewinds and re-scans a block range,
+// any deposits already credited (by tx hash) are not re-credited. The reorg
+// branch in poll() relies on this idempotency to make rewinds harmless.
+func TestProcessTransfer_PostRewindRecreditsAreSkipped(t *testing.T) {
+	agentAddr := "0xaaaa000000000000000000000000000000000001"
+	creditor := newMockCreditor()
+	agents := &mockAgentResolver{agents: map[string]bool{agentAddr: true}}
+	cp := NewMemoryCheckpoint()
+
+	w := New(Config{
+		PlatformAddress: common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		USDCContract:    common.HexToAddress("0x036CbD53842c5426634e7929541eC2318f3dCF7e"),
+	}, creditor, agents, cp, noopLogger())
+
+	data := make([]byte, 32)
+	data[31] = 100
+
+	vLog := types.Log{
+		Topics: []common.Hash{
+			transferEventSig,
+			common.BytesToHash(common.HexToAddress(agentAddr).Bytes()),
+			common.BytesToHash(common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678").Bytes()),
+		},
+		Data:        data,
+		TxHash:      common.HexToHash("0xreorgsafe"),
+		BlockNumber: 100,
+	}
+
+	if err := w.processTransfer(context.Background(), vLog); err != nil {
+		t.Fatalf("first process: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := w.processTransfer(context.Background(), vLog); err != nil {
+			t.Fatalf("rewind replay %d: %v", i, err)
+		}
+	}
+
+	creditor.mu.Lock()
+	defer creditor.mu.Unlock()
+	if len(creditor.credits) != 1 {
+		t.Fatalf("expected exactly 1 credit across rewind replays, got %d", len(creditor.credits))
 	}
 }

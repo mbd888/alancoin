@@ -376,6 +376,14 @@ var (
 		},
 		[]string{"component"},
 	)
+
+	// WatcherReorgsDetected counts chain reorgs detected by the deposit watcher.
+	// Incremented when a stored block hash diverges from the chain's canonical hash.
+	WatcherReorgsDetected = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "alancoin",
+		Name:      "watcher_reorgs_detected_total",
+		Help:      "Total chain reorgs detected by the deposit watcher (rewinds triggered).",
+	})
 )
 
 func init() {
@@ -430,6 +438,7 @@ func init() {
 		OutboxPollLag,
 		CDCPollLag,
 		CleanupDeletedTotal,
+		WatcherReorgsDetected,
 	)
 }
 

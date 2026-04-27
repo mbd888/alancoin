@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/mbd888/alancoin/internal/metrics"
 	"github.com/mbd888/alancoin/internal/recovery"
 	"github.com/mbd888/alancoin/internal/traces"
 	"github.com/mbd888/alancoin/internal/usdc"
@@ -37,10 +38,12 @@ type AgentResolver interface {
 	IsRegisteredAgent(ctx context.Context, addr string) (bool, error)
 }
 
-// CheckpointStore persists the last processed block number across restarts.
+// CheckpointStore persists the last processed block (number + hash) across restarts.
+// The hash lets the watcher detect chain reorgs deeper than the confirmation moat
+// by comparing the stored hash to the current canonical hash for the same block.
 type CheckpointStore interface {
-	GetLastBlock(ctx context.Context) (uint64, error)
-	SetLastBlock(ctx context.Context, blockNum uint64) error
+	GetLastBlock(ctx context.Context) (block uint64, hash string, err error)
+	SetLastBlock(ctx context.Context, block uint64, hash string) error
 }
 
 // Config holds watcher configuration.
@@ -175,6 +178,43 @@ func (w *Watcher) backoffDelay() time.Duration {
 	return w.cfg.PollInterval * time.Duration(1<<uint(shift))
 }
 
+// fetchCanonicalHash returns the canonical hash for the given block via the
+// connected ethclient. Split out so checkReorg can be unit-tested with a fake.
+func (w *Watcher) fetchCanonicalHash(ctx context.Context, block uint64) (string, error) {
+	h, err := w.client.HeaderByNumber(ctx, new(big.Int).SetUint64(block))
+	if err != nil {
+		return "", err
+	}
+	return h.Hash().Hex(), nil
+}
+
+// checkReorg compares the stored hash for lastBlock against the canonical hash
+// returned by hashFn. Returns rewindTo + true on mismatch (caller persists the
+// rewind). Returns false when there's nothing to check or hashes match. A
+// hashFn error is propagated; the caller decides whether to treat it as
+// transient. The rewind depth equals Confirmations, clamped at zero.
+func (w *Watcher) checkReorg(
+	ctx context.Context,
+	lastBlock uint64,
+	lastHash string,
+	hashFn func(context.Context, uint64) (string, error),
+) (rewindTo uint64, mismatch bool, err error) {
+	if lastHash == "" || lastBlock == 0 {
+		return 0, false, nil
+	}
+	canonical, err := hashFn(ctx, lastBlock)
+	if err != nil {
+		return 0, false, err
+	}
+	if canonical == lastHash {
+		return 0, false, nil
+	}
+	if lastBlock > w.cfg.Confirmations {
+		rewindTo = lastBlock - w.cfg.Confirmations
+	}
+	return rewindTo, true, nil
+}
+
 func (w *Watcher) poll(ctx context.Context) error {
 	ctx, span := traces.StartSpan(ctx, "watcher.Poll")
 	defer span.End()
@@ -193,13 +233,36 @@ func (w *Watcher) poll(ctx context.Context) error {
 	}
 	safeBlock := headBlock - w.cfg.Confirmations
 
-	// Get last processed block
-	lastBlock, err := w.checkpoint.GetLastBlock(ctx)
+	// Get last processed block + its stored hash
+	lastBlock, lastHash, err := w.checkpoint.GetLastBlock(ctx)
 	if err != nil {
 		return fmt.Errorf("get checkpoint: %w", err)
 	}
 	if lastBlock == 0 && w.cfg.StartBlock > 0 {
 		lastBlock = w.cfg.StartBlock - 1
+	}
+
+	// Reorg detection. processTransfer's HasDeposit guard makes re-credit
+	// idempotent, so reprocessing the rewound range is safe.
+	rewindTo, reorged, rErr := w.checkReorg(ctx, lastBlock, lastHash, w.fetchCanonicalHash)
+	if rErr != nil {
+		// Treat as transient; do not rewind on a fetch failure.
+		w.logger.Warn("watcher: reorg check failed to fetch header",
+			"block", lastBlock, "error", rErr)
+	} else if reorged {
+		w.logger.Warn("watcher: chain reorg detected, rewinding",
+			"block", lastBlock,
+			"stored_hash", lastHash,
+			"rewind_to", rewindTo)
+		metrics.WatcherReorgsDetected.Inc()
+		if err := w.checkpoint.SetLastBlock(ctx, rewindTo, ""); err != nil {
+			return fmt.Errorf("rewind checkpoint to %d: %w", rewindTo, err)
+		}
+		span.SetAttributes(
+			attribute.Int64("reorg.from", int64(lastBlock)), //nolint:gosec // block numbers won't exceed int64 max
+			attribute.Int64("reorg.to", int64(rewindTo)),    //nolint:gosec // block numbers won't exceed int64 max
+		)
+		return nil
 	}
 
 	fromBlock := lastBlock + 1
@@ -221,8 +284,22 @@ func (w *Watcher) poll(ctx context.Context) error {
 		}
 		totalProcessed += count
 
-		// Save checkpoint after each batch
-		if err := w.checkpoint.SetLastBlock(ctx, toBlock); err != nil {
+		// On the final batch only, fetch and store the block hash so the
+		// next poll can detect reorgs that invalidate this checkpoint.
+		// Intermediate batches store an empty hash; if we crash mid-loop
+		// the next start just resumes without a reorg check on that block.
+		var hash string
+		if toBlock == safeBlock {
+			h, hErr := w.client.HeaderByNumber(ctx, new(big.Int).SetUint64(toBlock))
+			if hErr != nil {
+				w.logger.Warn("watcher: failed to fetch hash for checkpoint",
+					"block", toBlock, "error", hErr)
+			} else {
+				hash = h.Hash().Hex()
+			}
+		}
+
+		if err := w.checkpoint.SetLastBlock(ctx, toBlock, hash); err != nil {
 			return fmt.Errorf("save checkpoint %d: %w", toBlock, err)
 		}
 

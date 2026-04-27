@@ -150,6 +150,7 @@ func (r *Runner) RunAll(ctx context.Context) (*Report, error) {
 			reconcileErrors.Inc()
 		} else {
 			report.InvariantViolations = violations
+			reconcileInvariantViolations.Set(float64(violations))
 			if violations > 0 {
 				r.logger.Error("CRITICAL: conservation invariant violations detected",
 					"violations", violations)

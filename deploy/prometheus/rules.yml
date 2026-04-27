@@ -1,0 +1,113 @@
+groups:
+  - name: alancoin.rules
+    interval: 30s
+    rules:
+      - alert: LedgerInvariantViolated
+        expr: alancoin_reconciliation_invariant_violations > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ledger conservation invariant violated ({{ $value }} agent(s))"
+          description: "A+P+E does not equal TotalIn-TotalOut for one or more agents. Funds may be inconsistent."
+          runbook_url: "https://github.com/mbd888/alancoin/blob/main/docs/observability.md"
+
+      - alert: LedgerMismatch
+        expr: alancoin_reconciliation_ledger_mismatches > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ledger replay mismatch detected"
+          description: "Replaying ledger events does not reproduce stored balances for {{ $value }} agent(s)."
+          runbook_url: "https://github.com/mbd888/alancoin/blob/main/docs/observability.md"
+
+      - alert: StuckEscrowsBacklog
+        expr: alancoin_reconciliation_stuck_escrows > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stuck escrow backlog ({{ $value }})"
+          description: "Auto-release path appears blocked; investigate escrow timer."
+          runbook_url: "https://github.com/mbd888/alancoin/blob/main/docs/observability.md"
+
+      - alert: OrphanedHolds
+        expr: alancoin_reconciliation_orphaned_holds > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Orphaned ledger holds ({{ $value }})"
+          description: "Holds exist with no matching session, stream, or escrow."
+          runbook_url: "https://github.com/mbd888/alancoin/blob/main/docs/observability.md"
+
+      - alert: OutboxLagging
+        expr: alancoin_outbox_poll_lag_seconds > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox poll lag {{ $value }}s"
+          description: "Eventbus outbox is not draining; downstream consumers will miss events."
+          runbook_url: "https://github.com/mbd888/alancoin/blob/main/docs/observability.md"
+
+      - alert: EventBusDeadLetters
+        expr: increase(alancoin_eventbus_dead_lettered_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Eventbus DLQ received {{ $value }} entries in last 15m"
+          description: "Events failed all retries and entered the dead-letter queue."
+          runbook_url: "https://github.com/mbd888/alancoin/blob/main/docs/observability.md"
+
+      - alert: PanicRate
+        expr: increase(alancoin_panic_recoveries_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Recovered {{ $value }} panic(s) in last 15m"
+          description: "recovery.LogPanic captured a runtime panic. Check logs for the labelled subsystem."
+          runbook_url: "https://github.com/mbd888/alancoin/blob/main/docs/observability.md"
+
+      - alert: HTTP5xxRate
+        expr: |
+          sum(rate(alancoin_http_requests_total{status=~"5.."}[5m]))
+            /
+          sum(rate(alancoin_http_requests_total[5m])) > 0.02
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "HTTP 5xx rate above 2% ({{ $value | humanizePercentage }})"
+          description: "Server-side error rate is elevated."
+          runbook_url: "https://github.com/mbd888/alancoin/blob/main/docs/observability.md"
+
+      - alert: DBPoolSaturated
+        expr: alancoin_db_in_use_connections / alancoin_db_open_connections > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database pool saturated ({{ $value | humanizePercentage }} in use)"
+          description: "Pool exhaustion imminent; raise POSTGRES_MAX_OPEN_CONNS or investigate slow queries."
+          runbook_url: "https://github.com/mbd888/alancoin/blob/main/docs/observability.md"
+
+      - alert: GatewaySettlementRetries
+        expr: increase(alancoin_gateway_settlement_retries_total[10m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway settlement retried {{ $value }} times in last 10m"
+          description: "Settlement failures are forcing retries; investigate ledger or eventbus health."
+          runbook_url: "https://github.com/mbd888/alancoin/blob/main/docs/observability.md"
+
+      - alert: WatcherReorgDetected
+        expr: increase(alancoin_watcher_reorgs_detected_total[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Deposit watcher detected {{ $value }} reorg(s) in last hour"
+          description: "A chain reorg deeper than the configured confirmation moat was observed; the watcher rewound and is reprocessing."
+          runbook_url: "https://github.com/mbd888/alancoin/blob/main/docs/observability.md"
