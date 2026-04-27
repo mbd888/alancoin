@@ -1,14 +1,6 @@
-// Package flywheel implements the self-reinforcing data loop:
-//
-//	Agents transact → payment graph grows → reputation improves →
-//	discovery gets better → more transactions → graph grows further
-//
-// This package measures, monitors, and amplifies the loop. It provides:
-//   - Real-time health scoring
-//   - Network growth and density metrics
-//   - Reputation effectiveness measurement
-//   - Agent retention and churn tracking
-//   - Incentive calculation (fee discounts + discovery boosts by tier)
+// Package flywheel computes network-health metrics over the registry: tx
+// velocity and growth, graph density, retention, and a per-tier incentive
+// schedule (fee discounts + discovery boosts).
 package flywheel
 
 import (
@@ -22,58 +14,56 @@ import (
 	"github.com/mbd888/alancoin/internal/registry"
 )
 
-// State captures the flywheel's state at a point in time.
+// State is a point-in-time snapshot of network health metrics.
 type State struct {
-	// Velocity: how fast is the wheel spinning?
+	// Velocity
 	TransactionsPerHour float64 `json:"transactionsPerHour"`
 	VolumePerHourUSD    float64 `json:"volumePerHourUsd"`
 
-	// Growth: is the wheel accelerating?
-	TxVelocity7dPrior   float64 `json:"txVelocity7dPrior"`   // txns/hr in the 7d before the current window
-	TxGrowthRatePct     float64 `json:"txGrowthRatePct"`     // % change in tx velocity vs prior 7d
-	VolumeGrowthRatePct float64 `json:"volumeGrowthRatePct"` // % change in volume velocity vs prior 7d
+	// Growth (current 7d window vs the prior 7d)
+	TxVelocity7dPrior   float64 `json:"txVelocity7dPrior"`
+	TxGrowthRatePct     float64 `json:"txGrowthRatePct"`
+	VolumeGrowthRatePct float64 `json:"volumeGrowthRatePct"`
 	NewAgents7d         int     `json:"newAgents7d"`
 	NewAgents7dPrior    int     `json:"newAgents7dPrior"`
 	AgentGrowthRatePct  float64 `json:"agentGrowthRatePct"`
 
-	// Network density: how interconnected is the graph?
+	// Graph density
 	TotalAgents    int     `json:"totalAgents"`
 	ActiveAgents7d int     `json:"activeAgents7d"`
 	TotalEdges     int     `json:"totalEdges"`   // unique (from, to) pairs
 	GraphDensity   float64 `json:"graphDensity"` // edges / (n*(n-1)/2)
-	AvgDegree      float64 `json:"avgDegree"`    // mean connections per agent
-	Reciprocity    float64 `json:"reciprocity"`  // fraction of edges that are bidirectional
+	AvgDegree      float64 `json:"avgDegree"`
+	Reciprocity    float64 `json:"reciprocity"` // fraction of edges that are bidirectional
 
-	// Reputation effectiveness: is reputation driving behavior?
-	TierDistribution      map[string]int `json:"tierDistribution"`      // tier → agent count
-	TopTierTrafficShare   float64        `json:"topTierTrafficShare"`   // % of recent txns involving trusted/elite
+	// Reputation effectiveness
+	TierDistribution      map[string]int `json:"tierDistribution"`
+	TopTierTrafficShare   float64        `json:"topTierTrafficShare"`
 	ReputationCorrelation float64        `json:"reputationCorrelation"` // rank correlation: rep score vs tx count
 
 	// Retention
-	RetentionRate7d float64 `json:"retentionRate7d"` // of agents active 8-14d ago, % still active in last 7d
-	ChurnRate7d     float64 `json:"churnRate7d"`     // 1 - retention
+	RetentionRate7d float64 `json:"retentionRate7d"` // of agents active 8-14d ago, fraction still active in last 7d
+	ChurnRate7d     float64 `json:"churnRate7d"`
 
-	// Health score (0-100): composite flywheel health
-	HealthScore float64 `json:"healthScore"`
-	HealthTier  string  `json:"healthTier"` // cold, warming, spinning, accelerating, flywheel
-
-	// Sub-scores used to compute health
-	VelocityScore      float64 `json:"velocityScore"`      // 0-100
-	GrowthScore        float64 `json:"growthScore"`        // 0-100
-	DensityScore       float64 `json:"densityScore"`       // 0-100
-	EffectivenessScore float64 `json:"effectivenessScore"` // 0-100
-	RetentionScore     float64 `json:"retentionScore"`     // 0-100
+	// Composite health score (0-100) and its sub-scores
+	HealthScore        float64 `json:"healthScore"`
+	HealthTier         string  `json:"healthTier"`
+	VelocityScore      float64 `json:"velocityScore"`
+	GrowthScore        float64 `json:"growthScore"`
+	DensityScore       float64 `json:"densityScore"`
+	EffectivenessScore float64 `json:"effectivenessScore"`
+	RetentionScore     float64 `json:"retentionScore"`
 
 	ComputedAt time.Time `json:"computedAt"`
 }
 
-// HealthTier thresholds.
+// HealthTier labels for HealthScore bands of 20.
 const (
-	TierCold         = "cold"         // 0-20: no reinforcing effects
-	TierWarming      = "warming"      // 20-40: early signs
-	TierSpinning     = "spinning"     // 40-60: reputation drives discovery
-	TierAccelerating = "accelerating" // 60-80: strong growth, dense graph
-	TierFlywheel     = "flywheel"     // 80-100: self-sustaining growth loop
+	TierCold         = "cold"         // 0-20
+	TierWarming      = "warming"      // 20-40
+	TierSpinning     = "spinning"     // 40-60
+	TierAccelerating = "accelerating" // 60-80
+	TierFlywheel     = "flywheel"     // 80-100
 )
 
 func healthTier(score float64) string {
