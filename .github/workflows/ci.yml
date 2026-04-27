@@ -31,9 +31,10 @@ jobs:
           govulncheck ./...
       - name: Validate Prometheus rules
         run: |
-          docker run --rm -v "$PWD/deploy/prometheus:/etc/prometheus" \
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/deploy/prometheus:/etc/prometheus" \
             prom/prometheus:latest \
-            promtool check rules /etc/prometheus/rules.yml
+            check rules /etc/prometheus/rules.yml
 
   test:
     runs-on: ubuntu-latest
