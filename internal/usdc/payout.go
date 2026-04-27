@@ -246,6 +246,11 @@ func (s *PayoutService) submitWithRetry(ctx context.Context, req *TransferReques
 			lastErr = fmt.Errorf("send transfer (attempt %d): %w", attempt+1, err)
 			continue
 		}
+		// Honor NonceManager contract: Release after submission so the
+		// inflight set drains and a later non-retryable failure can
+		// correctly roll back highWater (the rollback predicate requires
+		// len(inFlight) == 0).
+		s.nonces.Release(s.wallet.Address(), nonce, true)
 		return submitted, nil
 	}
 	if lastErr == nil {
