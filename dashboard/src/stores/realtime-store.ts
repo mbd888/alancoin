@@ -30,7 +30,8 @@ export const useRealtimeStore = create<RealtimeState>()((set, get) => ({
 
     const token = localStorage.getItem("alancoin_api_key") ?? "";
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`;
+    const wsBase = import.meta.env.VITE_WS_URL || `${protocol}//${window.location.host}`;
+    const url = `${wsBase}/ws?token=${encodeURIComponent(token)}`;
 
     try {
       ws = new WebSocket(url);

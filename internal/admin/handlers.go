@@ -155,7 +155,7 @@ func (h *Handler) listStuck(c *gin.Context) {
 
 	sessions, err := h.gwService.ListStuckSessions(c.Request.Context(), limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list stuck sessions", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list stuck sessions", "message": "Failed to list stuck sessions"})
 		return
 	}
 
@@ -187,7 +187,7 @@ func (h *Handler) resolveSession(c *gin.Context) {
 
 	// Force-close: use the session owner's address as the caller for authorization.
 	if err := h.gwService.CloseSession(c.Request.Context(), sessionID, sess.AgentAddr); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve session", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve session", "message": "Failed to resolve session"})
 		return
 	}
 
@@ -219,7 +219,7 @@ func (h *Handler) retrySettlement(c *gin.Context) {
 
 	// For retry, we close the session which will release remaining hold.
 	if err := h.gwService.CloseSession(c.Request.Context(), sessionID, sess.AgentAddr); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "retry settlement failed", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "retry settlement failed", "message": "Failed to retry settlement"})
 		return
 	}
 
@@ -235,7 +235,7 @@ func (h *Handler) forceCloseExpiredEscrows(c *gin.Context) {
 
 	closed, err := h.escrowForce.ForceCloseExpired(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to force-close escrows", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to force-close escrows", "message": "Failed to force-close escrows"})
 		return
 	}
 
@@ -251,7 +251,7 @@ func (h *Handler) forceCloseExpiredCoalitions(c *gin.Context) {
 
 	closed, err := h.coalitionForce.ForceCloseExpired(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to force-close coalitions", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to force-close coalitions", "message": "Failed to force-close coalitions"})
 		return
 	}
 
@@ -267,7 +267,7 @@ func (h *Handler) forceCloseStaleStreams(c *gin.Context) {
 
 	closed, err := h.streamForce.ForceCloseStale(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to force-close streams", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to force-close streams", "message": "Failed to force-close streams"})
 		return
 	}
 
@@ -283,7 +283,7 @@ func (h *Handler) triggerReconciliation(c *gin.Context) {
 
 	report, err := h.reconciler.RunAll(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "reconciliation failed", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "reconciliation failed", "message": "Reconciliation failed"})
 		return
 	}
 
@@ -313,7 +313,7 @@ func (h *Handler) exportDenials(c *gin.Context) {
 
 	records, err := h.denialExport.ListDenials(c.Request.Context(), since, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to export denials", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to export denials", "message": "Failed to export denials"})
 		return
 	}
 

@@ -1,15 +1,19 @@
 import { useState, useMemo, useEffect } from "react";
-import { MoreHorizontal, Eye, XCircle, DollarSign, Radio } from "lucide-react";
+import { MoreHorizontal, Eye, XCircle, DollarSign, Radio, Loader2, AlertTriangle } from "lucide-react";
 import { PageHeader } from "@/components/layouts/page-header";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useMutation } from "@tanstack/react-query";
 import { DataTable, type Column } from "@/components/ui/data-table";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Tabs } from "@/components/ui/tabs";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { useSessions } from "@/hooks/api/use-dashboard";
+import { api } from "@/lib/api-client";
 import { formatCurrency, relativeTime } from "@/lib/utils";
 import { toast } from "sonner";
 import { useRealtimeStore } from "@/stores/realtime-store";
+import { Address } from "@/components/ui/address";
 import type { GatewaySession } from "@/lib/types";
 
 const STATUS_VARIANT = {
@@ -27,7 +31,15 @@ const STATUS_TABS = [
   { id: "expired", label: "Expired" },
 ];
 
-function SessionActions({ session }: { session: GatewaySession }) {
+function SessionActions({
+  session,
+  onClose,
+  onViewDetails,
+}: {
+  session: GatewaySession;
+  onClose: () => void;
+  onViewDetails: () => void;
+}) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -36,14 +48,14 @@ function SessionActions({ session }: { session: GatewaySession }) {
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={() => toast.info(`Session ${session.id.slice(0, 8)}...`)}>
+        <DropdownMenuItem onClick={onViewDetails}>
           <Eye size={13} />
           View details
         </DropdownMenuItem>
         {session.status === "active" && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem danger onClick={() => toast.info("Session close coming soon")}>
+            <DropdownMenuItem danger onClick={onClose}>
               <XCircle size={13} />
               Close session
             </DropdownMenuItem>
@@ -52,9 +64,9 @@ function SessionActions({ session }: { session: GatewaySession }) {
         {session.status === "exhausted" && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => toast.info("Settlement coming soon")}>
+            <DropdownMenuItem disabled>
               <DollarSign size={13} />
-              Settle now
+              Settlement is automatic
             </DropdownMenuItem>
           </>
         )}
@@ -67,9 +79,21 @@ export function SessionsPage() {
   const [cursor, setCursor] = useState<string | undefined>();
   const [history, setHistory] = useState<string[]>([]);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [confirmClose, setConfirmClose] = useState<GatewaySession | null>(null);
+  const [viewSession, setViewSession] = useState<GatewaySession | null>(null);
   const sessions = useSessions(50, cursor);
   const queryClient = useQueryClient();
   const { events, connect, disconnect } = useRealtimeStore();
+
+  const closeMutation = useMutation({
+    mutationFn: (id: string) => api.delete(`/gateway/sessions/${id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["dashboard", "sessions"] });
+      setConfirmClose(null);
+      toast.success("Session closed");
+    },
+    onError: () => toast.error("Failed to close session"),
+  });
 
   // Auto-refresh sessions when relevant WebSocket events arrive
   useEffect(() => {
@@ -116,11 +140,7 @@ export function SessionsPage() {
     {
       id: "agent",
       header: "Agent",
-      cell: (row) => (
-        <span className="font-mono text-xs">
-          {row.agentAddr.slice(0, 8)}...{row.agentAddr.slice(-4)}
-        </span>
-      ),
+      cell: (row) => <Address value={row.agentAddr} />,
     },
     {
       id: "status",
@@ -138,6 +158,8 @@ export function SessionsPage() {
       id: "budget",
       header: "Budget Usage",
       numeric: true,
+      sortable: true,
+      sortValue: (row) => parseFloat(row.totalSpent) || 0,
       cell: (row) => {
         const spent = parseFloat(row.totalSpent) || 0;
         const total = parseFloat(row.maxTotal) || 1;
@@ -171,11 +193,15 @@ export function SessionsPage() {
       id: "requests",
       header: "Reqs",
       numeric: true,
+      sortable: true,
+      sortValue: (row) => row.requestCount,
       cell: (row) => row.requestCount,
     },
     {
       id: "created",
       header: "Created",
+      sortable: true,
+      sortValue: (row) => new Date(row.createdAt).getTime(),
       cell: (row) => (
         <span className="text-xs text-muted-foreground">
           {relativeTime(row.createdAt)}
@@ -186,7 +212,11 @@ export function SessionsPage() {
       id: "actions",
       header: "",
       className: "w-10",
-      cell: (row) => <SessionActions session={row} />,
+      cell: (row) => (
+        <div onClick={(e) => e.stopPropagation()}>
+          <SessionActions session={row} onClose={() => setConfirmClose(row)} onViewDetails={() => setViewSession(row)} />
+        </div>
+      ),
     },
   ];
 
@@ -213,24 +243,143 @@ export function SessionsPage() {
       </div>
 
       <div className="px-4 md:px-8 py-4">
-        <DataTable
-          columns={columns}
-          data={filteredSessions}
-          isLoading={sessions.isLoading}
-          keyExtractor={(row) => row.id}
-          emptyTitle={statusFilter === "all" ? "No sessions" : `No ${statusFilter} sessions`}
-          emptyDescription={
-            statusFilter === "all"
-              ? "No gateway sessions have been created yet."
-              : `No sessions with status "${statusFilter}" found.`
-          }
-          hasNextPage={sessions.data?.has_more}
-          hasPrevPage={history.length > 0}
-          onNextPage={handleNext}
-          onPrevPage={handlePrev}
-          totalLabel={`${filteredSessions.length} sessions`}
-        />
+        {sessions.isError ? (
+          <div className="flex items-center justify-center gap-2 rounded-lg border bg-card py-8 text-sm text-destructive">
+            <AlertTriangle size={14} />
+            Failed to load sessions
+            <Button variant="ghost" size="sm" onClick={() => sessions.refetch()}>
+              Retry
+            </Button>
+          </div>
+        ) : (
+          <DataTable
+            columns={columns}
+            data={filteredSessions}
+            isLoading={sessions.isLoading}
+            keyExtractor={(row) => row.id}
+            onRowClick={(row) => setViewSession(row)}
+            dataUpdatedAt={sessions.dataUpdatedAt}
+            emptyTitle={statusFilter === "all" ? "No sessions" : `No ${statusFilter} sessions`}
+            emptyDescription={
+              statusFilter === "all"
+                ? "No gateway sessions have been created yet."
+                : `No sessions with status "${statusFilter}" found.`
+            }
+            hasNextPage={sessions.data?.has_more}
+            hasPrevPage={history.length > 0}
+            onNextPage={handleNext}
+            onPrevPage={handlePrev}
+            totalLabel={`${filteredSessions.length} sessions`}
+            page={history.length + 1}
+          />
+        )}
       </div>
+
+      {/* Session Details Dialog */}
+      <Dialog open={!!viewSession} onOpenChange={() => setViewSession(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Session Details</DialogTitle>
+            <DialogDescription>
+              Gateway payment session information.
+            </DialogDescription>
+          </DialogHeader>
+          {viewSession && (
+            <DialogBody>
+              <div className="flex flex-col gap-3 text-sm">
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Session ID</span>
+                  <code className="text-right font-mono text-xs">{viewSession.id}</code>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Agent</span>
+                  <code className="font-mono text-xs">{viewSession.agentAddr}</code>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Status</span>
+                  <Badge variant={STATUS_VARIANT[viewSession.status] ?? "default"}>{viewSession.status}</Badge>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Strategy</span>
+                  <span>{viewSession.strategy}</span>
+                </div>
+                <hr className="border-border" />
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Budget</span>
+                  <span className="tabular-nums">{formatCurrency(viewSession.totalSpent)} / {formatCurrency(viewSession.maxTotal)}</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Max Per Request</span>
+                  <span className="tabular-nums">{formatCurrency(viewSession.maxPerRequest)}</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Requests</span>
+                  <span className="tabular-nums">{viewSession.requestCount}</span>
+                </div>
+                <hr className="border-border" />
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Created</span>
+                  <span>{relativeTime(viewSession.createdAt)}</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Expires</span>
+                  <span>{relativeTime(viewSession.expiresAt)}</span>
+                </div>
+                {viewSession.allowedTypes?.length > 0 && (
+                  <>
+                    <hr className="border-border" />
+                    <div>
+                      <span className="text-xs text-muted-foreground">Allowed Types</span>
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {viewSession.allowedTypes.map((t) => (
+                          <Badge key={t} variant="default" className="text-[10px]">{t}</Badge>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </DialogBody>
+          )}
+          <DialogFooter>
+            <Button variant="ghost" size="sm" onClick={() => setViewSession(null)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Close Session Confirmation */}
+      <Dialog open={!!confirmClose} onOpenChange={() => setConfirmClose(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Close Session</DialogTitle>
+            <DialogDescription>
+              This will close the session and refund any remaining budget. Active requests may fail.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" size="sm" onClick={() => setConfirmClose(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              disabled={closeMutation.isPending}
+              onClick={() => confirmClose && closeMutation.mutate(confirmClose.id)}
+            >
+              {closeMutation.isPending ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  Closing...
+                </>
+              ) : (
+                "Close Session"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

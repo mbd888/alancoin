@@ -30,6 +30,17 @@ func moneyFields(err error) gin.H {
 	return nil
 }
 
+func safeMessage(status int, err error, fallback string) string {
+	if status < 500 {
+		return err.Error()
+	}
+	var me *MoneyError
+	if errors.As(err, &me) {
+		return me.Recovery
+	}
+	return fallback
+}
+
 // ScopeChecker verifies that a session key possesses a required scope.
 type ScopeChecker interface {
 	ValidateScope(ctx context.Context, keyID, scope string) error
@@ -152,7 +163,7 @@ func (h *Handler) GetEscrow(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to retrieve escrow",
 		})
 		return
 	}
@@ -182,7 +193,7 @@ func (h *Handler) ListEscrows(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to list escrows",
 		})
 		return
 	}
@@ -218,7 +229,7 @@ func (h *Handler) MarkDelivered(c *gin.Context) {
 			status = http.StatusConflict
 			code = "invalid_state"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to mark delivered")})
 		return
 	}
 
@@ -245,7 +256,7 @@ func (h *Handler) ConfirmEscrow(c *gin.Context) {
 			status = http.StatusConflict
 			code = "invalid_state"
 		}
-		resp := gin.H{"error": code, "message": err.Error()}
+		resp := gin.H{"error": code, "message": safeMessage(status, err, "Failed to confirm escrow")}
 		if extra := moneyFields(err); extra != nil {
 			for k, v := range extra {
 				resp[k] = v
@@ -287,7 +298,7 @@ func (h *Handler) DisputeEscrow(c *gin.Context) {
 			status = http.StatusConflict
 			code = "invalid_state"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to dispute escrow")})
 		return
 	}
 
@@ -323,7 +334,7 @@ func (h *Handler) SubmitEvidence(c *gin.Context) {
 			status = http.StatusConflict
 			code = "invalid_state"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to submit evidence")})
 		return
 	}
 
@@ -369,7 +380,7 @@ func (h *Handler) AssignArbitrator(c *gin.Context) {
 			status = http.StatusConflict
 			code = "invalid_state"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to assign arbitrator")})
 		return
 	}
 
@@ -408,7 +419,7 @@ func (h *Handler) ResolveArbitration(c *gin.Context) {
 			status = http.StatusBadRequest
 			code = "invalid_amount"
 		}
-		resp := gin.H{"error": code, "message": err.Error()}
+		resp := gin.H{"error": code, "message": safeMessage(status, err, "Failed to resolve arbitration")}
 		if extra := moneyFields(err); extra != nil {
 			for k, v := range extra {
 				resp[k] = v

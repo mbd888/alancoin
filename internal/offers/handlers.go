@@ -10,6 +10,13 @@ import (
 	"github.com/mbd888/alancoin/internal/validation"
 )
 
+func safeMessage(status int, err error, fallback string) string {
+	if status < 500 {
+		return err.Error()
+	}
+	return fallback
+}
+
 // Handler provides HTTP endpoints for the offers marketplace.
 type Handler struct {
 	service *Service
@@ -76,7 +83,7 @@ func (h *Handler) PostOffer(c *gin.Context) {
 		if errors.Is(err, ErrInvalidPrice) {
 			status = http.StatusBadRequest
 		}
-		c.JSON(status, gin.H{"error": "offer_failed", "message": err.Error()})
+		c.JSON(status, gin.H{"error": "offer_failed", "message": safeMessage(status, err, "Failed to create offer")})
 		return
 	}
 
@@ -168,7 +175,7 @@ func (h *Handler) ClaimOffer(c *gin.Context) {
 			status = http.StatusForbidden
 			code = "condition_not_met"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to claim offer")})
 		return
 	}
 
@@ -192,7 +199,7 @@ func (h *Handler) CancelOffer(c *gin.Context) {
 			status = http.StatusForbidden
 			code = "unauthorized"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to cancel offer")})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"offer": offer})
@@ -250,7 +257,7 @@ func (h *Handler) DeliverClaim(c *gin.Context) {
 			status = http.StatusForbidden
 			code = "unauthorized"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to deliver claim")})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"claim": claim})
@@ -276,7 +283,7 @@ func (h *Handler) CompleteClaim(c *gin.Context) {
 			status = http.StatusForbidden
 			code = "unauthorized"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to complete claim")})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"claim": claim})
@@ -302,7 +309,7 @@ func (h *Handler) RefundClaim(c *gin.Context) {
 			status = http.StatusForbidden
 			code = "unauthorized"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to refund claim")})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"claim": claim})

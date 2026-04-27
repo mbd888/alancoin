@@ -142,3 +142,8 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--color-gray-4); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--color-gray-5); }
+
+@keyframes progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}

@@ -1,89 +1,67 @@
 import { useState, useCallback } from "react";
-import { Plus, Copy, Check, AlertTriangle, MoreHorizontal, Trash2, RotateCcw, Key } from "lucide-react";
+import { Plus, Copy, Check, AlertTriangle, MoreHorizontal, Trash2, RotateCcw, Key, Loader2 } from "lucide-react";
 import { PageHeader } from "@/components/layouts/page-header";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { SecretDisplay } from "@/components/domain/secret-display";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
+import { Skeleton } from "@/components/ui/skeleton";
+import { EmptyState } from "@/components/ui/empty-state";
+import { useApiKeys, useCreateApiKey, useRevokeApiKey, useRotateApiKey } from "@/hooks/api/use-api-keys";
 import { relativeTime, copyToClipboard } from "@/lib/utils";
 import { toast } from "sonner";
-
-interface ApiKey {
-  id: string;
-  name: string;
-  prefix: string;
-  createdAt: string;
-  lastUsedAt: string | null;
-  status: "active" | "revoked";
-  environment: "live" | "test";
-}
-
-const INITIAL_KEYS: ApiKey[] = [
-  {
-    id: "key_1",
-    name: "Production Key",
-    prefix: "ak_live_Tf2xR8mN...9k4a",
-    createdAt: "2026-03-10T08:00:00Z",
-    lastUsedAt: "2026-03-17T14:30:00Z",
-    status: "active",
-    environment: "live",
-  },
-  {
-    id: "key_2",
-    name: "Development Key",
-    prefix: "ak_test_Qm8rP5yL...3j7b",
-    createdAt: "2026-03-05T12:00:00Z",
-    lastUsedAt: "2026-03-16T09:15:00Z",
-    status: "active",
-    environment: "test",
-  },
-];
+import { ApiError } from "@/lib/api-client";
+import type { AuthApiKey } from "@/lib/types";
 
 export function ApiKeysPage() {
-  const [keys, setKeys] = useState(INITIAL_KEYS);
+  const keys = useApiKeys();
+  const createMutation = useCreateApiKey();
+  const revokeMutation = useRevokeApiKey();
+  const rotateMutation = useRotateApiKey();
+
   const [createOpen, setCreateOpen] = useState(false);
+  const [createName, setCreateName] = useState("");
   const [newKeyDisplay, setNewKeyDisplay] = useState<{ name: string; key: string } | null>(null);
   const [copied, setCopied] = useState(false);
-
-  // Create key form state
-  const [createName, setCreateName] = useState("");
-  const [createEnv, setCreateEnv] = useState("test");
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
 
   const handleCreate = () => {
-    // Simulate key generation
-    const prefix = createEnv === "live" ? "ak_live_" : "ak_test_";
-    const randomPart = Array.from(crypto.getRandomValues(new Uint8Array(24)))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-    const fullKey = `${prefix}${randomPart}`;
-    const masked = `${prefix}${randomPart.slice(0, 4)}...${randomPart.slice(-4)}`;
-
-    const newKey: ApiKey = {
-      id: `key_${Date.now()}`,
-      name: createName || "Untitled Key",
-      prefix: masked,
-      createdAt: new Date().toISOString(),
-      lastUsedAt: null,
-      status: "active",
-      environment: createEnv as "live" | "test",
-    };
-
-    setKeys((prev) => [newKey, ...prev]);
-    setNewKeyDisplay({ name: newKey.name, key: fullKey });
-    setCreateOpen(false);
-    setCreateName("");
-    setCreateEnv("test");
-    toast.success("API key created");
+    createMutation.mutate(createName || "Untitled Key", {
+      onSuccess: (data) => {
+        setNewKeyDisplay({ name: data.name, key: data.apiKey });
+        setCreateOpen(false);
+        setCreateName("");
+        toast.success("API key created");
+      },
+      onError: () => toast.error("Failed to create key"),
+    });
   };
 
   const handleRevoke = (id: string) => {
-    setKeys((prev) =>
-      prev.map((k) => (k.id === id ? { ...k, status: "revoked" as const } : k))
-    );
-    toast.success("Key revoked");
+    revokeMutation.mutate(id, {
+      onSuccess: () => {
+        setConfirmRevoke(null);
+        toast.success("Key revoked");
+      },
+      onError: (err) => {
+        setConfirmRevoke(null);
+        const msg = err instanceof ApiError && typeof err.body === "object" && err.body !== null && "message" in err.body
+          ? (err.body as { message: string }).message
+          : "Failed to revoke key";
+        toast.error(msg);
+      },
+    });
+  };
+
+  const handleRotate = (id: string) => {
+    rotateMutation.mutate(id, {
+      onSuccess: (data) => {
+        setNewKeyDisplay({ name: "Rotated key", key: data.apiKey });
+        toast.success("Key rotated");
+      },
+      onError: () => toast.error("Failed to rotate key"),
+    });
   };
 
   const handleCopyNewKey = useCallback(async () => {
@@ -93,6 +71,8 @@ export function ApiKeysPage() {
     toast.success("Copied to clipboard");
     setTimeout(() => setCopied(false), 2000);
   }, [newKeyDisplay]);
+
+  const keyList = keys.data?.keys ?? [];
 
   return (
     <div className="min-h-screen">
@@ -108,7 +88,6 @@ export function ApiKeysPage() {
         }
       />
 
-      {/* One-time key reveal banner */}
       {newKeyDisplay && (
         <div className="mx-4 mt-6 md:mx-8 rounded-lg border border-warning bg-warning/10 p-5">
           <div className="flex items-start gap-3">
@@ -139,78 +118,56 @@ export function ApiKeysPage() {
         </div>
       )}
 
-      {/* Key list */}
       <div className="px-4 md:px-8 py-6">
-        <div className="flex flex-col">
-          {keys.map((key) => (
-            <div
-              key={key.id}
-              className="flex items-center justify-between border-b py-4 first:pt-0 last:border-b-0"
-            >
-              <div className="flex items-center gap-4">
-                <div
-                  className="h-10 w-0.5 rounded-full"
-                  style={{
-                    backgroundColor:
-                      key.status === "revoked"
-                        ? "var(--color-gray-5)"
-                        : key.environment === "live"
-                          ? "var(--color-success)"
-                          : "var(--color-warning)",
-                  }}
-                />
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-foreground">
-                      {key.name}
-                    </span>
-                    <Badge variant={key.environment === "live" ? "success" : "warning"}>
-                      {key.environment}
-                    </Badge>
-                    {key.status === "revoked" && <Badge variant="danger">revoked</Badge>}
-                  </div>
-                  <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
-                    <span>Created {relativeTime(key.createdAt)}</span>
-                    {key.lastUsedAt && (
-                      <>
-                        <span className="text-muted-foreground/50">&middot;</span>
-                        <span>Last used {relativeTime(key.lastUsedAt)}</span>
-                      </>
-                    )}
+        {keys.isLoading ? (
+          <div className="flex flex-col gap-4">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="flex items-center justify-between border-b py-4">
+                <div className="flex items-center gap-4">
+                  <Skeleton className="h-10 w-0.5" />
+                  <div>
+                    <Skeleton className="h-4 w-32" />
+                    <Skeleton className="mt-2 h-3 w-48" />
                   </div>
                 </div>
+                <Skeleton className="h-8 w-8" />
               </div>
+            ))}
+          </div>
+        ) : keys.isError ? (
+          <div className="flex items-center justify-center gap-2 rounded-lg border bg-card py-8 text-sm text-destructive">
+            <AlertTriangle size={14} />
+            Failed to load API keys
+            <Button variant="ghost" size="sm" onClick={() => keys.refetch()}>
+              Retry
+            </Button>
+          </div>
+        ) : keyList.length === 0 ? (
+          <EmptyState
+            icon={Key}
+            title="No API keys"
+            description="Create your first key to authenticate API requests."
+            action={
+              <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>
+                <Plus size={14} />
+                Create Key
+              </Button>
+            }
+          />
+        ) : (
+          <div className="flex flex-col">
+            {keyList.map((key) => (
+              <KeyRow
+                key={key.id}
+                apiKey={key}
+                onRevoke={() => setConfirmRevoke(key.id)}
+                onRotate={() => handleRotate(key.id)}
+                isRotating={rotateMutation.isPending}
+              />
+            ))}
+          </div>
+        )}
 
-              <div className="flex items-center gap-2">
-                <SecretDisplay value={key.prefix} />
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <button aria-label="Key actions" className="rounded-sm p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground">
-                      <MoreHorizontal size={15} />
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem onClick={() => toast.info("Rotation coming soon")}>
-                      <RotateCcw size={13} />
-                      Rotate key
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      danger
-                      disabled={key.status === "revoked"}
-                      onClick={() => handleRevoke(key.id)}
-                    >
-                      <Trash2 size={13} />
-                      Revoke key
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Quick start snippet */}
         <div className="mt-8 rounded-lg border bg-card p-5">
           <h3 className="text-sm font-medium text-foreground">Quick Start</h3>
           <pre className="mt-3 overflow-x-auto rounded-md border bg-background p-4 font-mono text-xs leading-relaxed text-muted-foreground">
@@ -230,37 +187,135 @@ export function ApiKeysPage() {
             </DialogDescription>
           </DialogHeader>
           <DialogBody>
-            <div className="flex flex-col gap-4">
-              <Input
-                id="key-name"
-                label="Key name"
-                placeholder="e.g. Production, CI/CD"
-                value={createName}
-                onChange={(e) => setCreateName(e.target.value)}
-                autoFocus
-              />
-              <Select
-                id="key-env"
-                label="Environment"
-                value={createEnv}
-                onChange={(e) => setCreateEnv(e.target.value)}
-                options={[
-                  { value: "test", label: "Test — sandbox, no real charges" },
-                  { value: "live", label: "Live — production traffic" },
-                ]}
-              />
-            </div>
+            <Input
+              id="key-name"
+              label="Key name"
+              placeholder="e.g. Production, CI/CD"
+              value={createName}
+              onChange={(e) => setCreateName(e.target.value)}
+              autoFocus
+            />
           </DialogBody>
           <DialogFooter>
             <Button variant="ghost" size="sm" onClick={() => setCreateOpen(false)}>
               Cancel
             </Button>
-            <Button variant="primary" size="sm" onClick={handleCreate}>
-              Create Key
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleCreate}
+              disabled={createMutation.isPending}
+            >
+              {createMutation.isPending ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  Creating...
+                </>
+              ) : (
+                "Create Key"
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Revoke Confirmation Dialog */}
+      <Dialog open={!!confirmRevoke} onOpenChange={() => setConfirmRevoke(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Revoke API Key</DialogTitle>
+            <DialogDescription>
+              This key will immediately stop working. Any services using it will lose access.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" size="sm" onClick={() => setConfirmRevoke(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={() => confirmRevoke && handleRevoke(confirmRevoke)}
+              disabled={revokeMutation.isPending}
+            >
+              {revokeMutation.isPending ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  Revoking...
+                </>
+              ) : (
+                "Revoke Key"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function KeyRow({
+  apiKey,
+  onRevoke,
+  onRotate,
+  isRotating,
+}: {
+  apiKey: AuthApiKey;
+  onRevoke: () => void;
+  onRotate: () => void;
+  isRotating: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between border-b py-4 first:pt-0 last:border-b-0">
+      <div className="flex items-center gap-4">
+        <div
+          className="h-10 w-0.5 rounded-full"
+          style={{
+            backgroundColor: apiKey.revoked
+              ? "var(--color-gray-5)"
+              : "var(--color-success)",
+          }}
+        />
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-foreground">
+              {apiKey.name}
+            </span>
+            {apiKey.revoked && <Badge variant="danger">revoked</Badge>}
+          </div>
+          <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
+            <span>Created {relativeTime(apiKey.createdAt)}</span>
+            {apiKey.lastUsed && (
+              <>
+                <span className="text-muted-foreground/50">&middot;</span>
+                <span>Last used {relativeTime(apiKey.lastUsed)}</span>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            aria-label="Key actions"
+            className="rounded-sm p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+          >
+            <MoreHorizontal size={15} />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onClick={onRotate} disabled={apiKey.revoked || isRotating}>
+            <RotateCcw size={13} />
+            Rotate key
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem danger disabled={apiKey.revoked} onClick={onRevoke}>
+            <Trash2 size={13} />
+            Revoke key
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

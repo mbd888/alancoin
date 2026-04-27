@@ -7,6 +7,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func safeMessage(status int, err error, fallback string) string {
+	if status < 500 {
+		return err.Error()
+	}
+	return fallback
+}
+
 // Handler exposes agent-initiated withdrawal over HTTP.
 // Mount under a router group that has already applied authentication —
 // the handler itself performs no auth.
@@ -66,6 +73,20 @@ func (h *Handler) Withdraw(c *gin.Context) {
 		ClientRef: req.ClientRef,
 	})
 	if err != nil {
+		// Pending: tx submitted, on-chain status unknown, hold retained.
+		// Surface as 202 Accepted so clients know it is in-flight, not failed.
+		if errors.Is(err, ErrPayoutPending) {
+			body := gin.H{
+				"error":   "payout_pending",
+				"message": "Payout submitted; on-chain status unknown. Funds remain on hold pending reconciliation.",
+			}
+			if w != nil {
+				body["withdrawal"] = w
+			}
+			c.JSON(http.StatusAccepted, body)
+			return
+		}
+
 		status := http.StatusInternalServerError
 		code := "internal_error"
 		switch {
@@ -84,7 +105,7 @@ func (h *Handler) Withdraw(c *gin.Context) {
 		}
 		body := gin.H{
 			"error":   code,
-			"message": err.Error(),
+			"message": safeMessage(status, err, "Failed to process withdrawal"),
 		}
 		if w != nil {
 			body["withdrawal"] = w

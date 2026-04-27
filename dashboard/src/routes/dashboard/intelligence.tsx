@@ -9,68 +9,22 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Minus,
+  AlertTriangle,
+  Eye,
+  MoreHorizontal,
 } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/layouts/page-header";
 import { Tabs } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
 import { KpiCard } from "@/components/ui/kpi-card";
-
-interface IntelligenceProfile {
-  address: string;
-  creditScore: number;
-  riskScore: number;
-  compositeScore: number;
-  tier: string;
-  computeRunId: string;
-  computedAt: string;
-  credit: {
-    traceRankInput: number;
-    reputationInput: number;
-    disputeRate: number;
-    txSuccessRate: number;
-    totalVolume: number;
-  };
-  risk: {
-    anomalyCount30d: number;
-    criticalAlerts: number;
-    meanAmount: number;
-    stdDevAmount: number;
-    forensicScore: number;
-    behavioralVolatility: number;
-  };
-  network: {
-    inDegree: number;
-    outDegree: number;
-    clusteringCoefficient: number;
-    bridgeScore: number;
-  };
-  operational: {
-    totalTxns: number;
-    daysOnNetwork: number;
-  };
-  trends: {
-    creditDelta7d: number;
-    creditDelta30d: number;
-    riskDelta7d: number;
-    riskDelta30d: number;
-  };
-}
-
-interface Benchmarks {
-  totalAgents: number;
-  avgCreditScore: number;
-  medianCreditScore: number;
-  avgRiskScore: number;
-  p90CreditScore: number;
-  p10CreditScore: number;
-  avgCompositeScore: number;
-  computeRunId: string;
-  computedAt: string;
-}
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { Address } from "@/components/ui/address";
+import { useLeaderboard, useBenchmarks } from "@/hooks/api/use-intelligence";
+import type { IntelligenceProfile } from "@/hooks/api/use-intelligence";
 
 const TIER_COLORS: Record<string, string> = {
   diamond: "text-[#b9f2ff]",
@@ -140,20 +94,10 @@ function ScoreBar({ score, maxScore = 100 }: { score: number; maxScore?: number 
 
 export function IntelligencePage() {
   const [view, setView] = useState("leaderboard");
+  const [viewAgent, setViewAgent] = useState<IntelligenceProfile | null>(null);
 
-  const leaderboard = useQuery({
-    queryKey: ["intelligence", "leaderboard"],
-    queryFn: () =>
-      api.get<{ agents: IntelligenceProfile[]; count: number }>(
-        "/intelligence/network/leaderboard",
-        { limit: "100" }
-      ),
-  });
-
-  const benchmarks = useQuery({
-    queryKey: ["intelligence", "benchmarks"],
-    queryFn: () => api.get<Benchmarks>("/intelligence/network/benchmarks"),
-  });
+  const leaderboard = useLeaderboard();
+  const benchmarks = useBenchmarks();
 
   const agents = leaderboard.data?.agents ?? [];
   const bench = benchmarks.data;
@@ -215,6 +159,14 @@ export function IntelligencePage() {
                 <Skeleton key={i} className="h-16" />
               ))}
             </div>
+          ) : leaderboard.isError ? (
+            <div className="flex items-center justify-center gap-2 rounded-lg border bg-card py-8 text-sm text-destructive">
+              <AlertTriangle size={14} />
+              Failed to load leaderboard
+              <Button variant="ghost" size="sm" onClick={() => leaderboard.refetch()}>
+                Retry
+              </Button>
+            </div>
           ) : agents.length === 0 ? (
             <EmptyState
               icon={Users}
@@ -234,21 +186,21 @@ export function IntelligencePage() {
                     <th className="px-4 py-2.5 text-left font-medium text-muted-foreground">Composite</th>
                     <th className="px-4 py-2.5 text-left font-medium text-muted-foreground">7d Trend</th>
                     <th className="px-4 py-2.5 text-right font-medium text-muted-foreground">Txns</th>
+                    <th className="w-10 px-2 py-2.5" />
                   </tr>
                 </thead>
                 <tbody>
                   {agents.map((agent, i) => (
                     <tr
                       key={agent.address}
-                      className="border-b last:border-0 transition-colors hover:bg-accent"
+                      className="border-b last:border-0 cursor-pointer transition-colors hover:bg-accent/50"
+                      onClick={() => setViewAgent(agent)}
                     >
                       <td className="px-4 py-3 text-muted-foreground tabular-nums">
                         {i + 1}
                       </td>
                       <td className="px-4 py-3">
-                        <span className="font-mono text-xs">
-                          {agent.address.slice(0, 10)}...{agent.address.slice(-4)}
-                        </span>
+                        <Address value={agent.address} />
                       </td>
                       <td className="px-4 py-3">
                         <Badge variant={TIER_BADGE[agent.tier] ?? "default"}>
@@ -270,12 +222,35 @@ export function IntelligencePage() {
                       <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
                         {agent.operational.totalTxns.toLocaleString()}
                       </td>
+                      <td className="px-2 py-3" onClick={(e) => e.stopPropagation()}>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button aria-label="Agent actions" className="rounded-sm p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground">
+                              <MoreHorizontal size={15} />
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => setViewAgent(agent)}>
+                              <Eye size={13} />
+                              View profile
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           )
+        ) : benchmarks.isError ? (
+          <div className="flex items-center justify-center gap-2 rounded-lg border bg-card py-8 text-sm text-destructive">
+            <AlertTriangle size={14} />
+            Failed to load benchmarks
+            <Button variant="ghost" size="sm" onClick={() => benchmarks.refetch()}>
+              Retry
+            </Button>
+          </div>
         ) : (
           /* Benchmarks View */
           bench ? (
@@ -355,6 +330,137 @@ export function IntelligencePage() {
           )
         )}
       </div>
+
+      <Dialog open={!!viewAgent} onOpenChange={() => setViewAgent(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Agent Intelligence Profile</DialogTitle>
+            <DialogDescription>Full credit, risk, and network analysis.</DialogDescription>
+          </DialogHeader>
+          {viewAgent && (
+            <DialogBody>
+              <div className="flex flex-col gap-3 text-sm">
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Address</span>
+                  <Address value={viewAgent.address} truncate={false} />
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Tier</span>
+                  <Badge variant={TIER_BADGE[viewAgent.tier] ?? "default"}>
+                    {viewAgent.tier}
+                  </Badge>
+                </div>
+
+                <hr className="border-border" />
+                <p className="text-xs font-medium text-muted-foreground">Scores</p>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Credit Score</span>
+                  <ScoreBar score={viewAgent.creditScore} />
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Risk Score</span>
+                  <ScoreBar score={viewAgent.riskScore} />
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Composite</span>
+                  <span className="tabular-nums font-medium">{viewAgent.compositeScore.toFixed(1)}</span>
+                </div>
+
+                <hr className="border-border" />
+                <p className="text-xs font-medium text-muted-foreground">Credit Breakdown</p>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">TraceRank Input</span>
+                  <span className="tabular-nums">{viewAgent.credit.traceRankInput.toFixed(2)}</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Reputation Input</span>
+                  <span className="tabular-nums">{viewAgent.credit.reputationInput.toFixed(2)}</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Success Rate</span>
+                  <span className="tabular-nums">{(viewAgent.credit.txSuccessRate * 100).toFixed(1)}%</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Dispute Rate</span>
+                  <span className="tabular-nums">{(viewAgent.credit.disputeRate * 100).toFixed(1)}%</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Total Volume</span>
+                  <span className="tabular-nums">${viewAgent.credit.totalVolume.toLocaleString()}</span>
+                </div>
+
+                <hr className="border-border" />
+                <p className="text-xs font-medium text-muted-foreground">Risk Breakdown</p>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Anomalies (30d)</span>
+                  <span className="tabular-nums">{viewAgent.risk.anomalyCount30d}</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Critical Alerts</span>
+                  <span className="tabular-nums" style={{ color: viewAgent.risk.criticalAlerts > 0 ? "var(--color-danger)" : undefined }}>
+                    {viewAgent.risk.criticalAlerts}
+                  </span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Forensic Score</span>
+                  <span className="tabular-nums">{viewAgent.risk.forensicScore.toFixed(1)}</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Behavioral Volatility</span>
+                  <span className="tabular-nums">{viewAgent.risk.behavioralVolatility.toFixed(2)}</span>
+                </div>
+
+                <hr className="border-border" />
+                <p className="text-xs font-medium text-muted-foreground">Network</p>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">In-Degree / Out-Degree</span>
+                  <span className="tabular-nums">{viewAgent.network.inDegree} / {viewAgent.network.outDegree}</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Clustering Coefficient</span>
+                  <span className="tabular-nums">{viewAgent.network.clusteringCoefficient.toFixed(3)}</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Bridge Score</span>
+                  <span className="tabular-nums">{viewAgent.network.bridgeScore.toFixed(2)}</span>
+                </div>
+
+                <hr className="border-border" />
+                <p className="text-xs font-medium text-muted-foreground">Trends</p>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Credit (7d / 30d)</span>
+                  <div className="flex items-center gap-3">
+                    <DeltaIndicator value={viewAgent.trends.creditDelta7d} />
+                    <DeltaIndicator value={viewAgent.trends.creditDelta30d} />
+                  </div>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Risk (7d / 30d)</span>
+                  <div className="flex items-center gap-3">
+                    <DeltaIndicator value={viewAgent.trends.riskDelta7d} />
+                    <DeltaIndicator value={viewAgent.trends.riskDelta30d} />
+                  </div>
+                </div>
+
+                <hr className="border-border" />
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Total Transactions</span>
+                  <span className="tabular-nums">{viewAgent.operational.totalTxns.toLocaleString()}</span>
+                </div>
+                <div className="flex items-start justify-between gap-4">
+                  <span className="text-xs text-muted-foreground">Days on Network</span>
+                  <span className="tabular-nums">{viewAgent.operational.daysOnNetwork}</span>
+                </div>
+              </div>
+            </DialogBody>
+          )}
+          <DialogFooter>
+            <Button variant="ghost" size="sm" onClick={() => setViewAgent(null)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

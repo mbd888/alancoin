@@ -573,7 +573,7 @@ func TestTrendComputesCorrectDelta(t *testing.T) {
 	// The 7d delta should compare against the 7-day-ago score (50), not 1-day-ago (70)
 	// So delta should be positive and significant (current credit - 50)
 	if profile.Trends.CreditDelta7d == 0 {
-		t.Log("7d trend is 0 — expected non-zero if history was found in the 6-8d window")
+		t.Errorf("7d trend is 0 — expected non-zero delta against score from 6-8d window")
 	}
 }
 

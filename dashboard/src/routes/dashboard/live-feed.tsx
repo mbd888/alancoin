@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/layouts/page-header";
+import { Address } from "@/components/ui/address";
 import { Rss } from "lucide-react";
 import { useRealtimeStore } from "@/stores/realtime-store";
 import { relativeTime } from "@/lib/utils";
@@ -38,17 +39,11 @@ function EventCard({ event }: { event: { type: string; timestamp: string; data: 
         {event.type}
       </Badge>
       <div className="flex-1 space-x-3">
-        {from && (
-          <span className="font-mono text-xs text-muted-foreground">
-            {from.slice(0, 8)}...
-          </span>
-        )}
+        {from && <Address value={from} className="text-muted-foreground" />}
         {to && (
           <>
             <span className="text-muted-foreground/50">&rarr;</span>
-            <span className="font-mono text-xs text-muted-foreground">
-              {to.slice(0, 8)}...
-            </span>
+            <Address value={to} className="text-muted-foreground" />
           </>
         )}
         {amount && (

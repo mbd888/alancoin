@@ -477,6 +477,26 @@ func TestDeleteAgent_RequiresOwnership(t *testing.T) {
 	}
 }
 
+// Cross-agent payouts must be rejected at the route layer by RequireOwnership,
+// regardless of whether the withdrawal service is wired (the middleware aborts
+// before reaching the handler).
+func TestPayouts_RequiresOwnership(t *testing.T) {
+	s := newTestServer(t)
+	addr1 := "0xeeee000000000000000000000000000000000a01"
+	addr2 := "0xeeee000000000000000000000000000000000a02"
+	apiKey1 := registerAgent(t, s, addr1, "AgentA")
+	_ = registerAgent(t, s, addr2, "AgentB")
+
+	body := `{"to":"0x000000000000000000000000000000000000dEaD","amount":"1.000000","clientRef":"x1"}`
+	w := httptest.NewRecorder()
+	req := authedRequest("POST", "/v1/agents/"+addr2+"/payouts", apiKey1, body)
+	s.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("Expected 403 for cross-agent payout, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket auth
 // ---------------------------------------------------------------------------

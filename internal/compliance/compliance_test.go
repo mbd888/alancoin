@@ -276,6 +276,7 @@ func TestHandler_AckUnknownIncident(t *testing.T) {
 }
 
 func TestHandler_UpsertAndListControls(t *testing.T) {
+	t.Setenv("ADMIN_SECRET", "test-admin-secret")
 	r, _ := setupRouter(t)
 
 	body, _ := json.Marshal(map[string]any{
@@ -286,6 +287,7 @@ func TestHandler_UpsertAndListControls(t *testing.T) {
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("PUT", "/v1/compliance/controls/chain_intact", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-Secret", "test-admin-secret")
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("upsert status=%d body=%s", w.Code, w.Body.String())
@@ -333,5 +335,97 @@ func TestHandler_InvalidTimeFormat(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+// setupRouterWithTenant builds a test router that injects the given tenant
+// ID into the gin context, simulating a request that went through the auth
+// middleware as that tenant.
+func setupRouterWithTenant(t *testing.T, tenantID string) (*gin.Engine, *Service) {
+	t.Helper()
+	chain := &stubChainHead{head: &ChainHeadSnapshot{Scope: "tenant_a", HeadHash: "hf", HeadIndex: 1}}
+	svc, _ := newTestService(chain)
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set("authTenantID", tenantID)
+		c.Next()
+	})
+	NewHandler(svc).RegisterRoutes(r.Group("/v1"))
+	return r, svc
+}
+
+func TestHandler_ListIncidents_RejectsCrossTenantScope(t *testing.T) {
+	r, svc := setupRouterWithTenant(t, "tenant_a")
+	_, _ = svc.RecordFromAlert(context.Background(), IncidentInput{
+		Scope: "tenant_b", Source: "forensics", Severity: SeverityWarning, Title: "victim",
+	})
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/compliance/tenant_b/incidents", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("cross-tenant list should 403, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandler_RecordIncident_RejectsCrossTenantScope(t *testing.T) {
+	r, _ := setupRouterWithTenant(t, "tenant_a")
+	body, _ := json.Marshal(map[string]any{
+		"source": "forensics", "severity": "critical", "title": "spoofed",
+	})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/compliance/tenant_b/incidents", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("cross-tenant record should 403, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandler_Readiness_RejectsCrossTenantScope(t *testing.T) {
+	r, _ := setupRouterWithTenant(t, "tenant_a")
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/compliance/tenant_b/readiness", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("cross-tenant readiness should 403, got %d", w.Code)
+	}
+}
+
+func TestHandler_Ack_RejectsCrossTenantIncident(t *testing.T) {
+	r, svc := setupRouterWithTenant(t, "tenant_a")
+	inc, _ := svc.RecordFromAlert(context.Background(), IncidentInput{
+		Scope: "tenant_b", Source: "forensics", Severity: SeverityCritical, Title: "victim",
+	})
+
+	body, _ := json.Marshal(map[string]any{"actor": "attacker"})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/compliance/incidents/"+inc.ID+"/ack", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("cross-tenant ack should 403, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	got, _ := svc.GetIncident(context.Background(), inc.ID)
+	if got.Acknowledged {
+		t.Error("victim incident must not be acknowledged by another tenant")
+	}
+}
+
+func TestHandler_UpsertControl_RejectsNonAdmin(t *testing.T) {
+	t.Setenv("ADMIN_SECRET", "test-admin-secret")
+	r, _ := setupRouter(t)
+
+	body, _ := json.Marshal(map[string]any{
+		"title": "x", "status": "enabled",
+	})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/compliance/controls/c1", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// no X-Admin-Secret header
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("non-admin upsert should 403, got %d body=%s", w.Code, w.Body.String())
 	}
 }

@@ -31,6 +31,13 @@ var (
 		Help:      "Number of orphaned ledger holds found in last reconciliation run.",
 	})
 
+	reconcileInvariantViolations = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "alancoin",
+		Subsystem: "reconciliation",
+		Name:      "invariant_violations",
+		Help:      "Number of agent balances violating A+P+E = TotalIn-TotalOut.",
+	})
+
 	reconcileDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Namespace: "alancoin",
 		Subsystem: "reconciliation",
@@ -53,6 +60,7 @@ func init() {
 		reconcileStuckEscrows,
 		reconcileStaleStreams,
 		reconcileOrphanedHolds,
+		reconcileInvariantViolations,
 		reconcileDuration,
 		reconcileErrors,
 	)

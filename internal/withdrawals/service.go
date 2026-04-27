@@ -56,10 +56,27 @@ func (s *Service) Withdraw(ctx context.Context, req Request) (*Withdrawal, error
 
 	result, payoutErr := s.payouts.Send(ctx, to, req.Amount, req.ClientRef)
 	if payoutErr != nil {
-		// Submission or finalization errored before we have a definitive
-		// status. Treat as "unknown" and release the hold so the agent's
-		// balance is restored. The operator can re-issue with the same
-		// ClientRef after investigation.
+		// Receipt-poll timeout: the tx hash exists and may still settle on
+		// chain. Releasing the hold here would let the agent be credited
+		// twice if the tx confirms after the timeout. Retain the hold and
+		// require an out-of-band reconciler to resolve it.
+		if errors.Is(payoutErr, ErrPayoutPending) {
+			s.logger.Error("withdrawals: payout pending; hold retained for resolution",
+				"agent", agent, "ref", ref, "tx", result.TxHash, "err", payoutErr)
+			return &Withdrawal{
+				ClientRef:   req.ClientRef,
+				AgentAddr:   agent,
+				ToAddr:      to,
+				Amount:      req.Amount,
+				Status:      "pending",
+				TxHash:      result.TxHash,
+				SubmittedAt: result.SubmittedAt,
+				Error:       payoutErr.Error(),
+			}, fmt.Errorf("%w: %v", ErrPayoutPending, payoutErr)
+		}
+
+		// Submission or finalization errored before any tx hash is known.
+		// Safe to release the hold — nothing settled on-chain.
 		if relErr := s.ledger.ReleaseHold(ctx, agent, req.Amount, ref); relErr != nil {
 			s.logger.Error("withdrawals: release hold after payout error failed",
 				"agent", agent, "ref", ref, "payout_err", payoutErr, "release_err", relErr)

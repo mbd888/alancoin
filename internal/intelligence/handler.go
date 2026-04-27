@@ -251,6 +251,10 @@ func (h *Handler) BatchLookup(c *gin.Context) {
 		return
 	}
 
+	for i := range req.Addresses {
+		req.Addresses[i] = strings.ToLower(req.Addresses[i])
+	}
+
 	profiles, err := h.store.GetProfiles(c.Request.Context(), req.Addresses)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{

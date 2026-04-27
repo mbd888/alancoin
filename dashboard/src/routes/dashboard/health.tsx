@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -9,6 +10,7 @@ import {
 } from "lucide-react";
 import { useSystemHealth } from "@/hooks/api/use-dashboard";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/layouts/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { relativeTime } from "@/lib/utils";
@@ -17,6 +19,27 @@ function checkValueColor(value: number): string {
   if (value === 0) return "text-foreground";
   if (value <= 2) return "text-warning";
   return "text-destructive";
+}
+
+function FreshnessLabel({ dataUpdatedAt }: { dataUpdatedAt?: number }) {
+  const [, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!dataUpdatedAt) return;
+    const id = window.setInterval(() => setTick((t) => t + 1), 10_000);
+    return () => window.clearInterval(id);
+  }, [dataUpdatedAt]);
+
+  if (!dataUpdatedAt) return null;
+
+  const diff = Math.floor((Date.now() - dataUpdatedAt) / 1000);
+  const label = diff < 10 ? "just now" : diff < 60 ? `${diff}s ago` : `${Math.floor(diff / 60)}m ago`;
+
+  return (
+    <span className="text-xs text-muted-foreground/50">
+      Updated {label}
+    </span>
+  );
 }
 
 export function HealthPage() {
@@ -37,17 +60,21 @@ export function HealthPage() {
         title="System Health"
         description="Infrastructure status, reconciliation, and conservation invariants"
         actions={
-          <button
-            onClick={() => health.refetch()}
-            disabled={health.isFetching}
-            className="flex items-center gap-1.5 rounded-md border bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors disabled:opacity-50"
-          >
-            <RefreshCw
-              size={12}
-              className={health.isFetching ? "animate-spin" : ""}
-            />
-            Refresh
-          </button>
+          <div className="flex items-center gap-3">
+            <FreshnessLabel dataUpdatedAt={health.dataUpdatedAt} />
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => health.refetch()}
+              disabled={health.isFetching}
+            >
+              <RefreshCw
+                size={12}
+                className={health.isFetching ? "animate-spin" : ""}
+              />
+              Refresh
+            </Button>
+          </div>
         }
       />
 
@@ -59,6 +86,9 @@ export function HealthPage() {
           <div className="flex items-center justify-center gap-2 rounded-lg border bg-card py-8 text-sm text-destructive">
             <AlertTriangle size={14} />
             Failed to load system health
+            <Button variant="ghost" size="sm" onClick={() => health.refetch()}>
+              Retry
+            </Button>
           </div>
         ) : (
           <div className="rounded-lg border bg-card p-5">

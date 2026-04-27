@@ -181,6 +181,139 @@ export type OffersResponse = {
   count: number;
 };
 
+export interface AuthApiKey {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastUsed: string | null;
+  revoked: boolean;
+}
+
+export type AuthKeysResponse = {
+  keys: AuthApiKey[];
+  count: number;
+};
+
+export interface Webhook {
+  id: string;
+  url: string;
+  events: string[];
+  active: boolean;
+  createdAt: string;
+}
+
+export type WebhooksResponse = {
+  webhooks: Webhook[];
+};
+
+export interface Balance {
+  agentAddr: string;
+  available: string;
+  pending: string;
+  escrowed: string;
+  creditLimit: string;
+  creditUsed: string;
+  totalIn: string;
+  totalOut: string;
+  updatedAt: string;
+}
+
+export type BalanceResponse = { balance: Balance };
+
+export interface LedgerEntry {
+  id: string;
+  agentAddr: string;
+  type: string;
+  amount: string;
+  txHash?: string;
+  reference?: string;
+  description?: string;
+  reversedAt?: string;
+  reversedBy?: string;
+  reversalOf?: string;
+  createdAt: string;
+}
+
+export type LedgerHistoryResponse = {
+  entries: LedgerEntry[];
+  nextCursor?: string;
+  hasMore?: boolean;
+};
+
+export interface CreditInfo {
+  address: string;
+  limit: string;
+  used: string;
+  available: string;
+}
+
+export interface Receipt {
+  id: string;
+  paymentPath: string;
+  reference: string;
+  from: string;
+  to: string;
+  amount: string;
+  serviceId?: string;
+  status: string;
+  scope: string;
+  chainIndex: number;
+  prevHash: string;
+  payloadHash: string;
+  signature: string;
+  issuedAt: string;
+  expiresAt: string;
+  metadata?: string;
+  createdAt: string;
+}
+
+export type ReceiptsResponse = {
+  receipts: Receipt[];
+  count: number;
+};
+
+export interface ReceiptVerification {
+  valid: boolean;
+  receiptId: string;
+  expired?: boolean;
+  error?: string;
+}
+
+export interface ArbitrationEvidence {
+  id: string;
+  caseId: string;
+  submittedBy: string;
+  role: string;
+  type: string;
+  content: string;
+  submittedAt: string;
+}
+
+export interface ArbitrationCase {
+  id: string;
+  escrowId: string;
+  buyerAddr: string;
+  sellerAddr: string;
+  disputedAmount: string;
+  reason: string;
+  status: string;
+  arbiterAddr?: string;
+  outcome?: string;
+  splitPct?: number;
+  decision?: string;
+  fee: string;
+  contractId?: string;
+  evidence?: ArbitrationEvidence[];
+  autoResolvable: boolean;
+  filedAt: string;
+  resolvedAt?: string;
+}
+
+export type ArbitrationCasesResponse = {
+  cases: ArbitrationCase[];
+  count: number;
+};
+
 export interface RealtimeEvent {
   type: string;
   timestamp: string;

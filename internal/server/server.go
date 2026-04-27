@@ -603,7 +603,8 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		db := s.db
 		s.healthRegistry.Register("database", func(ctx context.Context) health.Status {
 			if err := db.PingContext(ctx); err != nil {
-				return health.Status{Name: "database", Healthy: false, Detail: err.Error()}
+				s.logger.Warn("database health check failed", "error", err)
+				return health.Status{Name: "database", Healthy: false, Detail: "database health check failed"}
 			}
 			return health.Status{Name: "database", Healthy: true}
 		})
@@ -668,7 +669,8 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		rc := s.redisClient
 		s.healthRegistry.Register("redis", func(ctx context.Context) health.Status {
 			if err := rc.Healthy(ctx); err != nil {
-				return health.Status{Name: "redis", Healthy: false, Detail: err.Error()}
+				s.logger.Warn("redis health check failed", "error", err)
+				return health.Status{Name: "redis", Healthy: false, Detail: "redis health check failed"}
 			}
 			return health.Status{Name: "redis", Healthy: true, Detail: "ok"}
 		})
@@ -1286,7 +1288,7 @@ func (s *Server) setupRoutes() {
 	// Agent-initiated withdrawals (authenticated agent only)
 	{
 		protectedWithdraw := v1.Group("")
-		protectedWithdraw.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireAuth(s.authMgr))
+		protectedWithdraw.Use(auth.Middleware(s.authMgr), tenantRL, auth.RequireOwnership(s.authMgr, "address"))
 		withdrawals.NewHandler(s.withdrawalService).RegisterRoutes(protectedWithdraw)
 	}
 
@@ -1863,6 +1865,7 @@ func (s *Server) Run(ctx context.Context) error {
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      s.cfg.HTTPWriteTimeout,
 		IdleTimeout:       s.cfg.HTTPIdleTimeout,
+		MaxHeaderBytes:    1 << 14, // 16KB
 	}
 
 	// Channel to catch server errors
@@ -2229,7 +2232,9 @@ func (s *Server) tenantRateLimitMiddleware() gin.HandlerFunc {
 	}
 	store := s.tenantStore
 	return s.rateLimiter.TenantMiddleware(auth.ContextKeyTenantID, func(tenantID string) int {
-		t, err := store.Get(context.Background(), tenantID)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		t, err := store.Get(ctx, tenantID)
 		if err != nil {
 			return 0
 		}
@@ -2995,6 +3000,19 @@ func (a *payoutsWithdrawAdapter) Send(ctx context.Context, to, amount, ref strin
 		ClientRef: ref,
 	})
 	if err != nil {
+		// Receipt-timeout means the tx hash exists and may still settle.
+		// Surface as withdrawals.ErrPayoutPending so the withdrawal service
+		// retains the hold instead of releasing it (which would let the
+		// agent double-credit if the tx confirms after the timeout).
+		if errors.Is(err, usdc.ErrReceiptTimeoutTxPending) && p != nil {
+			return withdrawals.Result{
+				ChainID:     p.ChainID,
+				TxHash:      p.TxHash,
+				Status:      "pending",
+				SubmittedAt: p.SubmittedAt,
+				Error:       p.LastError,
+			}, withdrawals.ErrPayoutPending
+		}
 		return withdrawals.Result{}, err
 	}
 	out := withdrawals.Result{

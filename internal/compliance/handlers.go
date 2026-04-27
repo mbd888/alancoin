@@ -4,10 +4,30 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/mbd888/alancoin/internal/auth"
 )
+
+// resolveScope returns the scope param after verifying it matches the
+// caller's tenant ID. When the caller has a non-empty tenant ID, the URL
+// scope must equal it (case-insensitive). Deployments without tenancy
+// (empty tenant ID) accept any scope, preserving single-tenant behavior.
+// On mismatch the request is aborted with 403 and the bool is false.
+func resolveScope(c *gin.Context) (string, bool) {
+	urlScope := c.Param("scope")
+	tenantID := auth.GetTenantID(c)
+	if tenantID != "" && !strings.EqualFold(tenantID, urlScope) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "Scope does not match authenticated tenant.",
+		})
+		return "", false
+	}
+	return urlScope, true
+}
 
 // Handler exposes compliance operations over HTTP.
 type Handler struct {
@@ -31,11 +51,15 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 
 // GetReadiness handles GET /compliance/:scope/readiness
 func (h *Handler) GetReadiness(c *gin.Context) {
-	report, err := h.service.Readiness(c.Request.Context(), c.Param("scope"))
+	scope, ok := resolveScope(c)
+	if !ok {
+		return
+	}
+	report, err := h.service.Readiness(c.Request.Context(), scope)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to compute readiness",
 		})
 		return
 	}
@@ -45,8 +69,12 @@ func (h *Handler) GetReadiness(c *gin.Context) {
 // ListIncidents handles GET /compliance/:scope/incidents
 // Query params: severity, source, agent, onlyUnacked, since, until, limit.
 func (h *Handler) ListIncidents(c *gin.Context) {
+	scope, ok := resolveScope(c)
+	if !ok {
+		return
+	}
 	filter := IncidentFilter{
-		Scope:       c.Param("scope"),
+		Scope:       scope,
 		Source:      c.Query("source"),
 		AgentAddr:   c.Query("agent"),
 		OnlyUnacked: c.Query("onlyUnacked") == "true",
@@ -83,7 +111,7 @@ func (h *Handler) ListIncidents(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to list incidents",
 		})
 		return
 	}
@@ -108,6 +136,10 @@ type recordIncidentReq struct {
 
 // RecordIncident handles POST /compliance/:scope/incidents
 func (h *Handler) RecordIncident(c *gin.Context) {
+	scope, ok := resolveScope(c)
+	if !ok {
+		return
+	}
 	var req recordIncidentReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
@@ -122,7 +154,7 @@ func (h *Handler) RecordIncident(c *gin.Context) {
 		occurred = *req.OccurredAt
 	}
 	inc, err := h.service.RecordFromAlert(c.Request.Context(), IncidentInput{
-		Scope:      c.Param("scope"),
+		Scope:      scope,
 		Source:     req.Source,
 		Kind:       req.Kind,
 		Severity:   req.Severity,
@@ -133,7 +165,7 @@ func (h *Handler) RecordIncident(c *gin.Context) {
 		OccurredAt: occurred,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to record incident"})
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"incident": inc})
@@ -153,17 +185,36 @@ func (h *Handler) AcknowledgeIncident(c *gin.Context) {
 		return
 	}
 	id := c.Param("id")
-	if err := h.service.AcknowledgeIncident(c.Request.Context(), id, req.Actor, req.Note); err != nil {
+	ctx := c.Request.Context()
+
+	existing, err := h.service.GetIncident(ctx, id)
+	if err != nil {
 		if errors.Is(err, ErrIncidentNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": err.Error()})
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Incident not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to retrieve incident"})
 		return
 	}
-	inc, err := h.service.GetIncident(c.Request.Context(), id)
+	if tenantID := auth.GetTenantID(c); tenantID != "" && !strings.EqualFold(tenantID, existing.Scope) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "Incident does not belong to authenticated tenant.",
+		})
+		return
+	}
+
+	if err := h.service.AcknowledgeIncident(ctx, id, req.Actor, req.Note); err != nil {
+		if errors.Is(err, ErrIncidentNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "Incident not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to acknowledge incident"})
+		return
+	}
+	inc, err := h.service.GetIncident(ctx, id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to retrieve incident"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"incident": inc})
@@ -173,7 +224,7 @@ func (h *Handler) AcknowledgeIncident(c *gin.Context) {
 func (h *Handler) ListControls(c *gin.Context) {
 	controls, err := h.service.ListControls(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to list controls"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -191,7 +242,17 @@ type upsertControlReq struct {
 }
 
 // UpsertControl handles PUT /compliance/controls/:id
+//
+// Controls are global (not tenant-scoped) so writes require platform admin
+// credentials. Use ListControls (GET /compliance/controls) for read access.
 func (h *Handler) UpsertControl(c *gin.Context) {
+	if !auth.IsAdminRequest(c) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "Admin access required to modify controls.",
+		})
+		return
+	}
 	var req upsertControlReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
@@ -205,7 +266,7 @@ func (h *Handler) UpsertControl(c *gin.Context) {
 		Evidence: req.Evidence,
 	}
 	if err := h.service.RegisterControl(c.Request.Context(), ctrl); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "Failed to register control"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"control": ctrl})

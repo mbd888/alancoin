@@ -46,7 +46,7 @@ func (h *Handler) GetReceipt(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to retrieve receipt",
 		})
 		return
 	}
@@ -71,7 +71,7 @@ func (h *Handler) ListByAgent(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to list receipts",
 		})
 		return
 	}
@@ -97,7 +97,7 @@ func (h *Handler) VerifyReceipt(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to verify receipt",
 		})
 		return
 	}
@@ -118,7 +118,7 @@ func (h *Handler) GetChainHead(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to retrieve chain head",
 		})
 		return
 	}
@@ -146,7 +146,7 @@ func (h *Handler) VerifyChain(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to verify chain",
 		})
 		return
 	}
@@ -196,7 +196,7 @@ func (h *Handler) ExportBundle(c *gin.Context) {
 		}
 		c.JSON(code, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to export bundle",
 		})
 		return
 	}
@@ -207,7 +207,7 @@ func (h *Handler) ExportBundle(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "pdf_generation_failed",
-				"message": err.Error(),
+				"message": "Failed to generate PDF",
 			})
 			return
 		}

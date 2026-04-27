@@ -19,6 +19,10 @@ var (
 	ErrBadRecipient       = errors.New("usdc: invalid recipient address")
 	ErrDuplicateClientRef = errors.New("usdc: duplicate client reference")
 	ErrReceiptNotFound    = errors.New("usdc: receipt not found")
+	// ErrReceiptTimeoutTxPending signals that waitForReceipt gave up before the
+	// tx reached a final on-chain state. The tx hash exists and may still
+	// settle; callers must NOT assume the funds were not sent.
+	ErrReceiptTimeoutTxPending = errors.New("usdc: receipt timeout, tx may still settle")
 )
 
 // PayoutConfig tunes the payout service's retry/timeout behavior.
@@ -184,15 +188,17 @@ func (s *PayoutService) Send(ctx context.Context, req TransferRequest) (*Payout,
 
 	receipt, err := s.waitForReceipt(ctx, submitted.TxHash)
 	if err != nil {
+		// Tx hash exists; the chain may still settle this. Leaving Status as
+		// Pending (no FinalizedAt) signals to callers that the on-chain
+		// outcome is unknown — releasing funds prematurely would let an
+		// attacker double-spend if the tx confirms after the timeout.
 		payout.LastError = err.Error()
-		payout.Status = TxStatusDropped
-		now := time.Now().UTC()
-		payout.FinalizedAt = &now
+		payout.Status = TxStatusPending
 		if storeErr := s.store.Put(ctx, payout); storeErr != nil {
-			s.logger.Error("failed to persist dropped payout status",
+			s.logger.Error("failed to persist pending payout status",
 				"payout", payout.ClientRef, "tx", payout.TxHash, "err", storeErr)
 		}
-		return payout, err
+		return payout, fmt.Errorf("%w: %v", ErrReceiptTimeoutTxPending, err)
 	}
 
 	payout.Receipt = &receipt

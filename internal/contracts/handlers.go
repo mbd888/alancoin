@@ -7,6 +7,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func safeMessage(status int, err error, fallback string) string {
+	if status < 500 {
+		return err.Error()
+	}
+	return fallback
+}
+
 // Handler provides HTTP endpoints for behavioral contract operations.
 type Handler struct {
 	service *Service
@@ -50,7 +57,7 @@ func (h *Handler) CreateContract(c *gin.Context) {
 			status = http.StatusBadRequest
 			code = "validation_error"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to create contract")})
 		return
 	}
 
@@ -72,7 +79,7 @@ func (h *Handler) GetContract(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to retrieve contract",
 		})
 		return
 	}
@@ -110,7 +117,7 @@ func (h *Handler) BindToEscrow(c *gin.Context) {
 			status = http.StatusConflict
 			code = "already_bound"
 		}
-		c.JSON(status, gin.H{"error": code, "message": err.Error()})
+		c.JSON(status, gin.H{"error": code, "message": safeMessage(status, err, "Failed to bind contract")})
 		return
 	}
 
@@ -151,7 +158,7 @@ func (h *Handler) CheckInvariant(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to check invariant",
 		})
 		return
 	}
@@ -200,7 +207,7 @@ func (h *Handler) GetAuditTrail(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
-			"message": err.Error(),
+			"message": "Failed to retrieve audit trail",
 		})
 		return
 	}

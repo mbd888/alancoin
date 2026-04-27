@@ -10,6 +10,7 @@ import {
   Moon,
   Sun,
   Command,
+  LogOut,
   ShieldAlert,
   TrendingDown,
   Shield,
@@ -17,13 +18,17 @@ import {
   Activity,
   Rss,
   Lock,
+  Scale,
   Wallet,
   GitBranch,
   Zap,
   Store,
+  FileCheck,
+  Bell,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
+import { useAuthStore } from "@/stores/auth-store";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
@@ -45,11 +50,13 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: "Payments",
     items: [
+      { to: "/ledger", label: "Ledger", icon: Wallet },
       { to: "/escrow", label: "Escrow", icon: Lock },
       { to: "/budget", label: "Budget", icon: Wallet },
       { to: "/workflows", label: "Workflows", icon: GitBranch },
       { to: "/streams", label: "Streams", icon: Zap },
       { to: "/marketplace", label: "Marketplace", icon: Store },
+      { to: "/receipts", label: "Receipts", icon: FileCheck },
     ],
   },
   {
@@ -59,6 +66,7 @@ const NAV_GROUPS: NavGroup[] = [
       { to: "/chargeback", label: "Chargeback", icon: TrendingDown },
       { to: "/certificates", label: "Certificates", icon: Shield },
       { to: "/intelligence", label: "Intelligence", icon: Brain },
+      { to: "/arbitration", label: "Arbitration", icon: Scale },
       { to: "/health", label: "System Health", icon: Activity },
     ],
   },
@@ -66,6 +74,7 @@ const NAV_GROUPS: NavGroup[] = [
     label: "Access",
     items: [
       { to: "/api-keys", label: "API Keys", icon: Key },
+      { to: "/webhooks", label: "Webhooks", icon: Bell },
     ],
   },
   {
@@ -161,6 +170,9 @@ export function SidebarContent({
         </div>
       </nav>
 
+      {/* User info */}
+      <UserSection collapsed={collapsed} />
+
       {/* Footer actions */}
       <div className="flex flex-col gap-1 border-t border-[var(--sidebar-border)] px-2 py-3">
         {/* Command palette trigger */}
@@ -226,6 +238,40 @@ export function SidebarContent({
         )}
       </div>
     </>
+  );
+}
+
+function UserSection({ collapsed }: { collapsed: boolean }) {
+  const { agentAddress, keyName, logout } = useAuthStore();
+
+  if (!agentAddress) return null;
+
+  return (
+    <div className="border-t border-[var(--sidebar-border)] px-2 py-3">
+      {!collapsed && (
+        <div className="mb-2 px-3">
+          <p className="truncate text-xs font-medium text-foreground">
+            {keyName ?? "API Key"}
+          </p>
+          <p className="truncate font-mono text-[10px] text-muted-foreground">
+            {agentAddress.slice(0, 10)}...{agentAddress.slice(-4)}
+          </p>
+        </div>
+      )}
+      <button
+        aria-label="Sign out"
+        onClick={logout}
+        className={cn(
+          "flex w-full items-center gap-3 rounded-md px-3 py-1.5",
+          "text-xs text-muted-foreground",
+          "transition-colors",
+          "hover:bg-destructive/10 hover:text-destructive"
+        )}
+      >
+        <LogOut size={14} strokeWidth={1.8} className="shrink-0" />
+        {!collapsed && <span>Sign out</span>}
+      </button>
+    </div>
   );
 }
 
