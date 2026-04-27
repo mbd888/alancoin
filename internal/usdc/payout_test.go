@@ -263,6 +263,61 @@ func TestNonceManager_MonotonicUnderConcurrency(t *testing.T) {
 	}
 }
 
+// Regression: success path must Release the nonce so (a) the inFlight set
+// drains (no leak) and (b) a later non-retryable failure can roll back
+// highWater (the rollback predicate requires len(inFlight) == 0).
+//
+// Without the Release, a single non-retryable failure after any successful
+// send creates a permanent gap in the nonce sequence: the chain waits for
+// the missing nonce, stalling every subsequent payout from that wallet.
+func TestPayout_SuccessReleasesNonce(t *testing.T) {
+	svc, client, _, _ := newTestService(t)
+	nonces, ok := svc.nonces.(*InMemoryNonceManager)
+	if !ok {
+		t.Fatal("expected InMemoryNonceManager")
+	}
+
+	// 1. Send #1 succeeds. The nonce must be released after submission.
+	done := make(chan *Payout, 1)
+	go func() { done <- sendOne(t, svc, "ref-A") }()
+	waitForSubmitted(t, client)
+	client.Mine(3, true, true)
+	p1 := <-done
+	if p1.Status != TxStatusSuccess {
+		t.Fatalf("send #1 status=%s err=%q", p1.Status, p1.LastError)
+	}
+	if c := nonces.InFlightCount(testFromAddr); c != 0 {
+		t.Fatalf("inflight after successful send = %d, want 0 (nonce leak)", c)
+	}
+
+	// 2. Send #2: the broadcast fails non-retryable. The rollback path can
+	//    only fire if the previous success's nonce was released. Otherwise
+	//    highWater is NOT rolled back and the next send broadcasts with a
+	//    gap, stalling the wallet.
+	client.InjectSendError(NonRetryable(errors.New("bad signature")))
+
+	_, err := svc.Send(context.Background(), TransferRequest{
+		ChainID:   testChainID,
+		ToAddr:    testToAddr,
+		Amount:    big.NewInt(1_000_000),
+		ClientRef: "ref-B",
+	})
+	if err == nil {
+		t.Fatal("expected non-retryable error from injected failure")
+	}
+	if c := nonces.InFlightCount(testFromAddr); c != 0 {
+		t.Fatalf("inflight after non-retryable failure = %d, want 0", c)
+	}
+
+	// 3. The failed nonce must be reusable. If it isn't, future txs broadcast
+	//    with a gap → chain waits forever for the missing nonce → stuck wallet.
+	expected := p1.Nonce + 1
+	n, _ := nonces.Next(context.Background(), testFromAddr, expected)
+	if n != expected {
+		t.Fatalf("expected failed nonce %d to be reissued, got %d (gap = stuck wallet)", expected, n)
+	}
+}
+
 func TestNonceManager_ReleaseRewindsOnFailure(t *testing.T) {
 	m := NewInMemoryNonceManager()
 	ctx := context.Background()
